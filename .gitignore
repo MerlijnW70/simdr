@@ -1,0 +1,15 @@
+# Build output.
+/target/
+
+# The mutation tester's scratch. `.noha/baseline.tsv` and `.noha/tia.tsv` are *not* ignored: the
+# baseline is the floor a run is measured against and the TIA table is which test kills which
+# mutant, and both are worth less to a reader who cannot see them than they cost in diff noise.
+.noha/work/
+.noha/tmp/
+
+# A memory store belonging to an MCP server that happens to run in this directory. Not part of the
+# project, and its lock file is held open for as long as that server lives — which is also why
+# `noha prober` cannot walk this tree while the server is running.
+mnema.store
+mnema.store.key
+mnema.store.lock

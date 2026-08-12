@@ -1,0 +1,26 @@
+[package]
+name = "simdr"
+version = "0.0.0"
+edition = "2024"
+description = "SIMD on the GPU: portable-SIMD semantics lowered onto SPIR-V subgroup operations."
+license = "MIT OR Apache-2.0"
+# Measured, not assumed: this is what is installed and what the code is held to. Emitting a binary
+# format needs nothing newer, and staying on stable is the point of not building on rust-gpu —
+# that route pins nightly-2026-04-11.
+rust-version = "1.97"
+
+# ZERO dependencies. Emitting SPIR-V is pure computation: words in, words out. Nothing here needs
+# to reach the outside world, so nothing here may take a crate to do it. Running the result *does*
+# need Vulkan, and that is why `runner/` exists and why it is a workspace member rather than a
+# dependency — the arrow points runner -> simdr, never back, and `cargo test` at the root touches
+# the emitter alone.
+[dependencies]
+
+[dev-dependencies]
+
+[workspace]
+members = ["runner", "cli"]
+
+[profile.release]
+opt-level = 3
+lto = "thin"

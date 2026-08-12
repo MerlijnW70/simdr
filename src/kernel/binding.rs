@@ -1,0 +1,140 @@
+//! Setting up a kernel's interface: buffers, layout, entry point, invocation index.
+//!
+//! All of it is the same every time, which is exactly why it belongs here rather than being
+//! copied into each kernel — this is the sixty lines that `Kernel::new` replaces.
+
+use super::Shape;
+use crate::encode;
+use crate::lanes::{Element, LaneError};
+use crate::module::{Id, Module, Section, Version, op};
+use crate::spec::{
+    AddressingModel, BuiltIn, Capability, Decoration, ExecutionMode, ExecutionModel,
+    FunctionControl, MemoryModel, StorageClass,
+};
+
+/// A built interface, with `main` open and waiting for a body.
+pub(super) struct Parts {
+    pub(super) module: Module,
+    pub(super) element: Id,
+    pub(super) element_pointer: Id,
+    pub(super) uint: Id,
+    pub(super) zero: Id,
+    pub(super) buffers: Vec<Id>,
+    /// This invocation's index within its workgroup.
+    pub(super) local: Id,
+    /// Which workgroup this invocation is in.
+    pub(super) group: Id,
+}
+
+/// Build a module holding the interface, and open `main`.
+pub(super) fn build<T: Element>(shape: Shape) -> Result<Parts, LaneError> {
+    if shape.buffers == 0 || shape.workgroup == 0 {
+        return Err(LaneError::BadShape {
+            workgroup: shape.workgroup,
+            buffers: shape.buffers,
+        });
+    }
+
+    let mut module = Module::new(Version::V1_3);
+
+    let main = module.alloc_id()?;
+    module.name(main, "main")?;
+    module.require_capability(Capability::Shader)?;
+    module.emit(
+        Section::MemoryModel,
+        op::MEMORY_MODEL,
+        &[AddressingModel::Logical.word(), MemoryModel::Glsl450.word()],
+    )?;
+
+    let element = T::type_id(&mut module)?;
+    let uint = module.type_int(32, false)?;
+    let uint3 = module.type_vector(uint, 3)?;
+
+    let element_pointer = module.type_pointer(StorageClass::StorageBuffer, element)?;
+    let uint3_pointer = module.type_pointer(StorageClass::Input, uint3)?;
+
+    // One struct per buffer rather than one shared: §2.8 lets aggregates repeat precisely so they
+    // can be decorated apart, and a caller that later wants different strides per binding should
+    // not have to unpick a shared type first.
+    // Two permissions rather than one: `element` above declared whatever the *type* needs, and
+    // this declares what a storage buffer holding it needs. A device may offer `shaderInt8` and
+    // not `storageBuffer8BitAccess`, and only the second is a property of the buffer.
+    T::require_in_storage_buffer(&mut module)?;
+
+    let mut buffers = Vec::with_capacity(shape.buffers as usize);
+    for binding in 0..shape.buffers {
+        let elements = module.type_runtime_array(element)?;
+        let block = module.type_struct(&[elements])?;
+        // The element's own width, not four. This is the whole of the narrow types' benefit: the
+        // stride is what decides how many bytes a dispatch moves, and everything above it is
+        // unchanged.
+        module.decorate(elements, Decoration::ArrayStride, &[T::STRIDE])?;
+        module.decorate(block, Decoration::Block, &[])?;
+        module.member_decorate(block, 0, Decoration::Offset, &[0])?;
+
+        let pointer = module.type_pointer(StorageClass::StorageBuffer, block)?;
+        let variable = module.global_variable(pointer, StorageClass::StorageBuffer)?;
+        module.decorate(variable, Decoration::DescriptorSet, &[0])?;
+        module.decorate(variable, Decoration::Binding, &[binding])?;
+        buffers.push(variable);
+    }
+
+    let local_id = module.global_variable(uint3_pointer, StorageClass::Input)?;
+    let workgroup_id = module.global_variable(uint3_pointer, StorageClass::Input)?;
+    module.name(local_id, "local_id")?;
+    module.name(workgroup_id, "workgroup_id")?;
+    module.decorate(
+        local_id,
+        Decoration::BuiltIn,
+        &[BuiltIn::LocalInvocationId.word()],
+    )?;
+    module.decorate(
+        workgroup_id,
+        Decoration::BuiltIn,
+        &[BuiltIn::WorkgroupId.word()],
+    )?;
+
+    // Emitted after the variables it names and still landing ahead of them, because the sections
+    // are buffered apart. Below SPIR-V 1.4 the interface lists Input and Output only, so the
+    // buffers are deliberately absent.
+    let mut entry = vec![ExecutionModel::GlCompute.word(), main.word()];
+    encode::literal_string(&mut entry, "main");
+    entry.push(local_id.word());
+    entry.push(workgroup_id.word());
+    module.emit(Section::EntryPoint, op::ENTRY_POINT, &entry)?;
+    module.emit(
+        Section::ExecutionMode,
+        op::EXECUTION_MODE,
+        &[
+            main.word(),
+            ExecutionMode::LocalSize.word(),
+            shape.workgroup,
+            1,
+            1,
+        ],
+    )?;
+
+    let zero = module.constant_u32(0)?;
+
+    let void = module.type_void()?;
+    let signature = module.type_function(void, &[])?;
+    module.begin_function(void, main, FunctionControl::None, signature)?;
+    module.label()?;
+
+    // Both built-ins are three-component vectors; a linear dispatch only ever uses x.
+    let local_vector = module.load(uint3, local_id)?;
+    let local = module.composite_extract(uint, local_vector, &[0])?;
+    let group_vector = module.load(uint3, workgroup_id)?;
+    let group = module.composite_extract(uint, group_vector, &[0])?;
+
+    Ok(Parts {
+        module,
+        element,
+        element_pointer,
+        uint,
+        zero,
+        buffers,
+        local,
+        group,
+    })
+}

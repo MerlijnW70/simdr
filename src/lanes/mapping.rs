@@ -1,0 +1,210 @@
+//! How a lane count sits on a subgroup.
+//!
+//! Three arrangements and one refusal, decided in one place so that every operation gets the same
+//! answer. `decisions/DR-0002` is why this is settled at build time rather than on the device.
+
+use super::{LaneError, Lanes, MAX_STRIPS};
+
+/// How a lane count sits on the hardware.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mapping {
+    /// The vector is exactly as wide as the subgroup: one element per lane.
+    WholeSubgroup,
+    /// Several vectors share a subgroup, each reducing within its own cluster.
+    ///
+    /// The case that would otherwise idle hardware: a `Simd<f32, 8>` on a 32-lane machine runs
+    /// four of itself at once.
+    Clusters {
+        /// Lanes per cluster, which is the vector's own width.
+        size: u32,
+    },
+    /// The vector is wider than the subgroup, so each lane holds several elements.
+    ///
+    /// Lane `l` holds the elements at `l`, `l + width`, `l + 2·width` — strided, so that every
+    /// strip is still a coalesced read.
+    Strips {
+        /// How many elements each lane holds.
+        count: u32,
+    },
+}
+
+impl Lanes<'_> {
+    /// How many elements each lane holds for a vector of `LANES`.
+    ///
+    /// # Errors
+    ///
+    /// [`LaneError::NoMapping`] or [`LaneError::TooManyStrips`] if there is no mapping.
+    pub fn strips_for<const LANES: u32>(&self) -> Result<usize, LaneError> {
+        match self.mapping::<LANES>()? {
+            Mapping::WholeSubgroup | Mapping::Clusters { .. } => Ok(1),
+            Mapping::Strips { count } => Ok(count as usize),
+        }
+    }
+
+    /// Check that `LANES` can map onto this subgroup, and say how.
+    ///
+    /// The single place the mapping is decided, so there is one answer rather than one per
+    /// operation.
+    ///
+    /// # Errors
+    ///
+    /// [`LaneError::NoMapping`] when `LANES` neither divides nor is a multiple of the width,
+    /// [`LaneError::TooManyStrips`] when it is a multiple too large to hold inline.
+    pub const fn mapping<const LANES: u32>(&self) -> Result<Mapping, LaneError> {
+        let no_mapping = Err(LaneError::NoMapping {
+            lanes: LANES,
+            width: self.width(),
+        });
+
+        // Zero has to go first and is load-bearing: every integer is a multiple of nothing, so
+        // without this the strip arm below would happily compute `0 / width` strips.
+        if LANES == 0 {
+            return no_mapping;
+        }
+        if LANES == self.width() {
+            return Ok(Mapping::WholeSubgroup);
+        }
+
+        // No `LANES < self.width()` here, though that is what this arm means. The equal case is
+        // already gone, so a comparison would be indistinguishable from `<=` — divisibility says
+        // the same thing and says it once.
+        if self.width().is_multiple_of(LANES) {
+            return Ok(Mapping::Clusters { size: LANES });
+        }
+        if !LANES.is_multiple_of(self.width()) {
+            return no_mapping;
+        }
+
+        let count = LANES / self.width();
+        if count as usize > MAX_STRIPS {
+            return Err(LaneError::TooManyStrips {
+                strips: count as usize,
+                limit: MAX_STRIPS,
+            });
+        }
+        Ok(Mapping::Strips { count })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // A test may panic — that is how it reports.
+    #![allow(clippy::expect_used)]
+
+    use super::*;
+    use crate::module::{Module, Version};
+
+    fn module() -> Module {
+        Module::new(Version::V1_3)
+    }
+
+    #[test]
+    fn a_vector_as_wide_as_the_subgroup_maps_to_the_whole_of_it() {
+        let mut module = module();
+        let lanes = Lanes::new(&mut module, 32).expect("built");
+
+        assert_eq!(lanes.mapping::<32>(), Ok(Mapping::WholeSubgroup));
+        assert_eq!(lanes.strips_for::<32>(), Ok(1));
+    }
+
+    #[test]
+    fn a_narrower_vector_maps_to_clusters_of_its_own_width() {
+        let mut module = module();
+        let lanes = Lanes::new(&mut module, 32).expect("built");
+
+        assert_eq!(lanes.mapping::<8>(), Ok(Mapping::Clusters { size: 8 }));
+        assert_eq!(lanes.strips_for::<8>(), Ok(1), "still one element per lane");
+    }
+
+    #[test]
+    fn a_wider_vector_gives_every_lane_more_than_one_element() {
+        let mut module = module();
+        let lanes = Lanes::new(&mut module, 32).expect("built");
+
+        assert_eq!(lanes.mapping::<64>(), Ok(Mapping::Strips { count: 2 }));
+        assert_eq!(lanes.mapping::<128>(), Ok(Mapping::Strips { count: 4 }));
+        assert_eq!(lanes.strips_for::<128>(), Ok(4));
+    }
+
+    #[test]
+    fn a_width_that_neither_divides_nor_multiplies_has_no_mapping() {
+        let mut module = module();
+        let lanes = Lanes::new(&mut module, 32).expect("built");
+
+        assert_eq!(
+            lanes.mapping::<12>(),
+            Err(LaneError::NoMapping {
+                lanes: 12,
+                width: 32
+            })
+        );
+        assert_eq!(
+            lanes.mapping::<48>(),
+            Err(LaneError::NoMapping {
+                lanes: 48,
+                width: 32
+            }),
+            "48 is wider than 32 and not a multiple of it"
+        );
+    }
+
+    #[test]
+    fn a_vector_of_no_lanes_has_no_mapping() {
+        // Zero is a multiple of every width, so the strip arm would otherwise compute zero strips
+        // and hand back a vector holding nothing.
+        let mut module = module();
+        let lanes = Lanes::new(&mut module, 32).expect("built");
+
+        assert_eq!(
+            lanes.mapping::<0>(),
+            Err(LaneError::NoMapping {
+                lanes: 0,
+                width: 32
+            })
+        );
+    }
+
+    #[test]
+    fn more_strips_than_fit_inline_are_refused() {
+        let mut module = module();
+        let lanes = Lanes::new(&mut module, 32).expect("built");
+
+        assert_eq!(
+            lanes.mapping::<512>(),
+            Err(LaneError::TooManyStrips {
+                strips: 16,
+                limit: MAX_STRIPS
+            })
+        );
+    }
+
+    #[test]
+    fn exactly_the_inline_maximum_of_strips_is_accepted() {
+        // The boundary itself: 256 lanes on a 32-wide subgroup is eight strips, which is
+        // `MAX_STRIPS` exactly and must be allowed.
+        let mut module = module();
+        let lanes = Lanes::new(&mut module, 32).expect("built");
+
+        assert_eq!(
+            lanes.mapping::<256>(),
+            Ok(Mapping::Strips {
+                count: MAX_STRIPS as u32
+            })
+        );
+    }
+
+    #[test]
+    fn the_same_lane_count_maps_three_different_ways_across_two_devices() {
+        // DR-0002 in one test: 32 lanes is the whole machine on NVIDIA, half of it on a 64-wide
+        // AMD part, and 64 lanes is two strips on the first and the whole of the second.
+        let mut narrow = module();
+        let mut wide = module();
+        let on_nvidia = Lanes::new(&mut narrow, 32).expect("built");
+        let on_amd = Lanes::new(&mut wide, 64).expect("built");
+
+        assert_eq!(on_nvidia.mapping::<32>(), Ok(Mapping::WholeSubgroup));
+        assert_eq!(on_amd.mapping::<32>(), Ok(Mapping::Clusters { size: 32 }));
+        assert_eq!(on_nvidia.mapping::<64>(), Ok(Mapping::Strips { count: 2 }));
+        assert_eq!(on_amd.mapping::<64>(), Ok(Mapping::WholeSubgroup));
+    }
+}

@@ -1,0 +1,16 @@
+[package]
+name = "runner"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Runs simdr's SPIR-V on a real device, so that validity can be checked against correctness."
+
+# A WORKSPACE MEMBER, not a dependency. The arrow points runner -> simdr and never back, which is
+# what keeps the emitter's dependency table empty while this crate takes whatever it needs.
+#
+# `ash` rather than `wgpu` deliberately. wgpu runs SPIR-V through naga, which re-parses and
+# re-emits it — that would test naga's reading of our module rather than the driver's, and this
+# crate exists precisely to ask the driver. ash hands the bytes to vkCreateShaderModule untouched.
+[dependencies]
+ash = "0.38"
+simdr = { path = ".." }
