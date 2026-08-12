@@ -1116,3 +1116,20 @@ The ownership is the part that needed care rather than the caching. A pipeline h
 set and a descriptor set points at particular buffers, so pipelines and buffers have to be owned by
 the same object and released in that order. `Session` had already established the shape; this is
 the same trade for a chain of pipelines rather than one.
+
+
+## Splitting a file moved 200 lines into the mutation gate — 2026-08-12
+
+`runner/src/dispatch.rs` did two jobs: the staging machinery — three buffers, three submissions, a
+fence — and the surface over it, one call per way a caller might spell its data. The whole file was
+excused from mutation as FFI, which was true of the machinery and not of the surface.
+
+Splitting it along that seam made the excuse fail. `tests/integrity.rs` checks that every excused
+file still contains `unsafe`, and `dispatch/run.rs` contains none: it converts `f32`, `u32`, bytes
+and halves into words and calls `execute`. So it is mutated now rather than excused, and the
+packing that `run_bytes` and `run_halves` do — four elements to a word, little-endian, truncated
+back to the caller's length — is inside the gate for the first time.
+
+The check that caught it was written months earlier for a different reason: an excuse that names
+FFI should expire when the file stops being FFI. It had never fired. **A file split is exactly the
+event that makes a blanket exemption wrong**, and nothing but that check would have noticed.
