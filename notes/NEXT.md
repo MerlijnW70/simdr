@@ -157,7 +157,11 @@ match arms; it is written in terms of `bits()` instead, so `add` is one wrapping
 The sweeps agree at every width: 3 000 rounds per domain on the 4080 and the Radeon, 1 500 on
 lavapipe, no disagreements.
 
-**`f16` is deliberately not fuzzed.** A half represents integers exactly only to 2048, and a sum
+> **Superseded by item 19.** `f16` is fuzzed now, 253 of 256 seeds compared exactly. The paragraph
+> below is right about the arithmetic and wrong about what follows from it: the answer was to refuse
+> the rounds that leave the range, not the domain.
+
+**`f16` was deliberately not fuzzed.** A half represents integers exactly only to 2048, and a sum
 over sixty-four lanes leaves that range immediately — so the exactness argument the float domain
 rests on does not hold, and a tolerance would be checking something other than the emitter.
 `runner/tests/narrow.rs` covers `f16` against expectations reasoned from the format.
@@ -362,23 +366,58 @@ almost all are one `ash` call inside an `unsafe fn` whose `# Safety` section alr
 missing thing is a way to tell those from a block that needs a *new* argument — not 78
 restatements.
 
-## 1. The upload is what is left, and it needs a shape rather than an optimisation
+### 18. The host round trip — **the map moved into the chain, and it is worth two crossings**
 
-~294 µs of a 1275 µs call, and it is real: a caller passing `&[f32]` has to have it copied to the
-device. No device-side change touches it.
+This item said the upload needed *a shape rather than an optimisation*, and warned that nothing
+here had data on the device to begin with, so the API would be for a caller that had not arrived.
 
-Except that for most real uses it should not exist. A caller reducing the *output of a previous
-dispatch* has its data on the device already, and one feeding the total into another kernel does
-not need it on the host either. `Reducer::sum` takes `&[f32]` and returns `f32`, so it forces both
-crossings whether or not the caller wanted them.
+The caller was one level up. Σ f(x) is a map and a reduce, and doing it costs three host crossings
+of which two are the whole buffer. `Gpu::reducer_of(elements, map)` makes the map the first pass of
+the same chain, so the intermediate never leaves the device.
 
-Something like `Reducer::fold()` over a binding the caller already filled, with `sum` as the
-convenience wrapper that copies — `Session` already proves every piece exists. The measurement to
-beat is `runner/examples/reducer.rs`.
+| Σ x², both routes held | three crossings | one crossing | |
+| --- | --- | --- | --- |
+| RTX 4080, 2²⁰ | 2326 µs | 1331 µs | **1.7×** |
+| integrated Radeon, 2²⁰ | 5411 µs | 2759 µs | **2.0×** |
 
-**What would refute it:** nothing in this repository having data on the device to begin with, which
-is currently true — every caller here starts from a `Vec`. That makes this an API for a use that
-has not arrived, and the honest first step is a caller that wants it, not the method.
+The 993 µs saved is the download (718) plus the upload (294) this file measured separately — 1012
+predicted against 993 observed, which is the only reason to believe either number.
+
+**The first version said 2.9×**, because the route being replaced was written as `gpu.run`, which
+allocates and builds a pipeline every call. Fourth time in two days. *Give the thing you are
+replacing every advantage you would give the replacement.*
+
+### 19. `f16` in the fuzzer — **the exclusion was one step too far**
+
+Item 8 left `f16` out on the grounds that a half counts integers only to 2048, so a sum over a few
+hundred lanes leaves the range and a tolerance would check the rounding rather than the emitter.
+
+That argues for *noticing* when a round leaves the range, not for skipping the domain.
+`Domain::exact_limit` says where the range ends, the reference reports whether it stayed inside, and
+a round that did not is **refused** rather than loosened. `Half` runs **253 of 256 seeds compared
+exactly**, with 3 refused — coverage, not a domain that looks supported and never runs. A test now
+insists on that distinction, because a domain refused every round looks exactly like one that always
+agreed.
+
+The same three lines revealed that `Domain::Float` rested on the identical argument one exponent
+wider and had never been checked either. It is checked now. It has never fired, which is what the
+assumption predicted and the first time anything has confirmed it.
+
+**Eight mutation survivors along the way**, one of which took three attempts: `_ => vec![false; …]`
+was a genuine equivalent mutant whose comment said the alternatives were worse and listed the two
+that had been tried. The third — compute the vote *inside the arm that reads it* — deletes the
+branch and shortens the file.
+
+## 1. A buffer the caller already owns
+
+`reducer_of` covers Σ f(x). What it does not cover is a caller whose data was produced by some
+*other* dispatch it owns: the reducer's bindings are private, and the map has to be a pass of its
+chain, so there is no way to hand it a buffer that already holds the right numbers.
+
+That needs `Reducer` to expose a binding, or to take a `Session`'s buffer — and it has the same
+problem this item had before `reducer_of`: **no caller in this repository wants it yet.** Every
+path here starts from a `Vec`. Left unbuilt on purpose, and the note is here so the next reader
+knows it was considered rather than missed.
 
 ---
 

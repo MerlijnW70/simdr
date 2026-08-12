@@ -83,6 +83,100 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     breakdown(&gpu, largest_held)?;
+    mapped(&gpu)?;
+    Ok(())
+}
+
+/// What not crossing the bus twice is worth.
+///
+/// The breakdown above says the host upload and download are most of what a held reduction still
+/// costs, and that no device-side change touches them. This is the change that does: Σ x² as one
+/// chain instead of three host crossings.
+///
+/// Both columns compute the same number and `runner/tests/reducer.rs` asserts they agree, so what
+/// is being timed is only where the intermediate went.
+///
+/// # The left column is given every advantage
+///
+/// It would be easy — and wrong — to write it as `gpu.run(&square, …)`, which allocates three
+/// buffers and builds a pipeline on every call. That is ~900 µs of setup this file has already
+/// measured, and charging it to the old route would make the new one look two to three times
+/// better than it is. So the map runs through a held [`Session`] and the reduction through a held
+/// `Reducer`: nothing is allocated or built in either column, and the only difference left is that
+/// one of them carries the intermediate across the bus and back.
+fn mapped(gpu: &Gpu) -> Result<(), Box<dyn std::error::Error>> {
+    let width = gpu.limits().subgroup_size;
+    let square = runner::kernels::square(width)?;
+
+    println!("\nΣ x² — the map on the device against the map through the host:");
+    println!(
+        "{:>12} {:>16} {:>16} {:>10}",
+        "elements", "three crossings", "one crossing", "faster"
+    );
+
+    for (elements, repeats) in SIZES {
+        // **Values of 0, 1 and 2, and both halves of that matter.** Σ x² has to stay inside the
+        // 2²⁴ an `f32` counts exactly or the comparison below is a tolerance wearing an equals
+        // sign — 0..7 over 2²⁰ elements sums to 18.3 million and does not, which is how this
+        // assertion earned its place by failing. And 2 has to be in there: x² and x agree on 0 and
+        // 1, so a map that had stopped squaring would go unnoticed without it.
+        let input: Vec<f32> = (0..elements).map(|index| (index % 3) as f32).collect();
+        let expected: f32 = input.iter().map(|value| value * value).sum();
+        let groups = elements as u32 / runner::kernels::WORKGROUP_SIZE;
+
+        let mut plain = gpu.reducer(elements)?;
+        let mut fused = gpu.reducer_of(elements, &square)?;
+
+        // The map, held: no allocation and no pipeline creation inside the timed loop.
+        let mut mapping = gpu.session(&square, &[elements, elements])?;
+        let words: Vec<u32> = input.iter().map(|value| value.to_bits()).collect();
+
+        // Warm every path, so none pays for the driver's first compile of these modules.
+        mapping.write(0, &words)?;
+        mapping.dispatch(groups, 1)?;
+        mapping.read(1, elements)?;
+        plain.sum(&input)?;
+        fused.sum(&input)?;
+
+        let started = Instant::now();
+        for _ in 0..repeats {
+            // The best a caller can do today: send the input, run the map, bring the squares
+            // home, send them back to be reduced.
+            mapping.write(0, &words)?;
+            mapping.dispatch(groups, 1)?;
+            let squares: Vec<f32> = mapping
+                .read(1, elements)?
+                .into_iter()
+                .map(f32::from_bits)
+                .collect();
+
+            let total = plain.sum(&squares)?.total;
+            assert_eq!(total, expected, "the two-step sum of squares is wrong");
+        }
+        let stepwise = started.elapsed() / repeats;
+
+        let started = Instant::now();
+        for _ in 0..repeats {
+            let total = fused.sum(&input)?.total;
+            assert_eq!(total, expected, "the fused sum of squares is wrong");
+        }
+        let chained = started.elapsed() / repeats;
+
+        println!(
+            "{:>12} {:>16} {:>16} {:>10}",
+            thousands(elements),
+            micros(stepwise),
+            micros(chained),
+            format!("{:.1}x", stepwise.as_secs_f64() / chained.as_secs_f64())
+        );
+    }
+
+    println!(
+        "\n  The left column uploads the input, downloads the squares and uploads them again —\n\
+         three crossings of which two are the whole buffer. The right one is a single chain: the\n\
+         map is its first pass and its output is handed to the first fold on the device."
+    );
+
     Ok(())
 }
 

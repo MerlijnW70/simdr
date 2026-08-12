@@ -27,12 +27,10 @@
 //! safe-looking code — the buffers would drop, the descriptors would still name them, and the next
 //! dispatch would read freed memory. So one type owns both, and its `Drop` releases them in order.
 
-use super::{BadLength, Fold, Reduction, folds};
+use super::Reduction;
 use crate::buffer::Buffer;
 use crate::dispatch::{Ends, Pipeline, answer_in_destination};
-use crate::kernels::{self, WORKGROUP_SIZE};
 use crate::{Error, Gpu};
-use simdr::lanes::F32;
 
 /// How much of the answer buffer comes home: one `f32`.
 ///
@@ -74,33 +72,52 @@ impl Gpu {
     /// [`Error::BadLength`] if `elements` is not a shape this can fold, [`Error::Emit`] if a pass
     /// cannot be built, otherwise as [`Gpu::run`].
     pub fn reducer<'gpu>(&'gpu self, elements: usize) -> Result<Reducer<'gpu>, Error> {
-        let width = self.limits().subgroup_size;
-        let minimum = 2 * WORKGROUP_SIZE as usize;
+        self.build_reducer(elements, None)
+    }
 
-        if !elements.is_power_of_two() {
-            return Err(Error::BadLength(BadLength::NotAPowerOfTwo(elements)));
-        }
-        if elements < minimum {
-            return Err(Error::BadLength(BadLength::TooSmall {
-                length: elements,
-                minimum,
-            }));
-        }
+    /// The same, with one elementwise pass of `map` run over the input first.
+    ///
+    /// **This is what removes an upload and a download.** Σ f(x) over a device the caller cannot
+    /// reach otherwise costs three host crossings: send the input, run `f`, bring the result home,
+    /// send it back, reduce. Two of those are 4 MB each at 2²⁰ elements, and
+    /// `runner/examples/reducer.rs` prices a 4 MB upload at ~294 µs and a download at ~718 µs.
+    ///
+    /// Here `map` is simply the first pass of the same chain. Its output never leaves the device —
+    /// the ping-pong hands it straight to the first fold — so the intermediate crossing does not
+    /// happen rather than happening faster.
+    ///
+    /// `map` must be a two-binding kernel built for [`crate::kernels::WORKGROUP_SIZE`]
+    /// invocations, reading
+    /// binding 0 and writing binding 1, and it must write **every** element the first fold reads —
+    /// which for an elementwise kernel over the whole input it does. `elements / WORKGROUP_SIZE`
+    /// workgroups of it are dispatched, computed here rather than taken as an argument so that the
+    /// count cannot disagree with the length the folds were built for.
+    ///
+    /// # Errors
+    ///
+    /// As [`Gpu::reducer`].
+    pub fn reducer_of<'gpu>(
+        &'gpu self,
+        elements: usize,
+        map: &[u32],
+    ) -> Result<Reducer<'gpu>, Error> {
+        self.build_reducer(elements, Some(map))
+    }
 
+    /// The construction both of them share.
+    ///
+    /// What to run is decided in [`super::plan`], which has no `unsafe` in it and is therefore
+    /// inside the mutation gate; this half owns the Vulkan objects and is not.
+    fn build_reducer<'gpu>(
+        &'gpu self,
+        elements: usize,
+        map: Option<&[u32]>,
+    ) -> Result<Reducer<'gpu>, Error> {
         // Every module first, so a build failure happens before anything is allocated.
-        let plan: Vec<Fold> = folds(elements);
-        let mut modules: Vec<(Vec<u32>, u32)> = Vec::with_capacity(plan.len() + 1);
-        for step in &plan {
-            let words = kernels::fold_halves(width, step.half).map_err(Error::Emit)?;
-            modules.push((words, step.workgroups));
-        }
-        modules.push((
-            kernels::workgroup_sum::<F32>(width).map_err(Error::Emit)?,
-            1,
-        ));
+        let stages = super::plan::stages(self.limits().subgroup_size, elements, map)?;
 
         let bytes = (elements.max(1) * size_of::<u32>()) as u64;
-        let workgroups: Vec<u32> = modules.iter().map(|(_, groups)| *groups).collect();
+        let workgroups: Vec<u32> = stages.iter().map(|stage| stage.workgroups).collect();
 
         // SAFETY: everything allocated here is owned by the `Reducer` and destroyed in its `Drop`,
         // which cannot run while a dispatch is in flight — every dispatch waits on a fence before
@@ -123,15 +140,15 @@ impl Gpu {
                 }
             };
 
-            let mut pipelines = Vec::with_capacity(modules.len());
-            for (index, (words, _)) in modules.iter().enumerate() {
+            let mut pipelines = Vec::with_capacity(stages.len());
+            for (index, stage) in stages.iter().enumerate() {
                 // The pair alternates: pass 0 reads the source and writes the destination, pass 1
                 // the other way round. It is the descriptor set that decides, so the modules are
                 // untouched — `fold_halves` has no idea which buffer it is reading.
                 let (read, written) = Ends::of(index).order(&source, &destination);
                 match Pipeline::new(
                     self,
-                    words,
+                    &stage.words,
                     &[(read, bytes), (written, bytes)],
                     &crate::Specialization::none(),
                 ) {

@@ -44,6 +44,7 @@
 //! judgement and this module does not make it for them.
 
 mod held;
+mod plan;
 
 pub use held::Reducer;
 

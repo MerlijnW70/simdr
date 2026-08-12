@@ -48,10 +48,41 @@ fn rounds() -> u64 {
         .unwrap_or(ROUNDS)
 }
 
+/// What a sweep did, rather than only how many times it agreed.
+struct Swept {
+    /// Rounds the device and the reference were compared on, and agreed.
+    checked: u64,
+    /// Rounds the mapping refused to build — a lane count with no mapping, say.
+    refused: u64,
+    /// Rounds whose arithmetic left the range the domain counts exactly, so nothing was compared.
+    unrepresentable: u64,
+}
+
+impl Swept {
+    /// Report the counts, and insist that most rounds actually compared something.
+    ///
+    /// **The number that matters is `checked`.** A domain that refused every round, or whose
+    /// arithmetic left its exact range every round, is indistinguishable from one that always
+    /// agreed if only the failures are reported — and `Domain::Half` makes that a live risk rather
+    /// than a hypothetical, because a sum over a few hundred halves leaves 2048 at once.
+    fn expect_mostly_checked(&self, domain: Domain, rounds: u64) {
+        eprintln!(
+            "fuzz {domain:?}: {} agreed, {} refused, {} unrepresentable, over {rounds} seeds",
+            self.checked, self.refused, self.unrepresentable
+        );
+        assert!(
+            self.checked > rounds / 2,
+            "most {domain:?} rounds proved nothing: {} checked of {rounds}",
+            self.checked
+        );
+    }
+}
+
 /// Run `rounds` generated programs in `domain` and report how many were actually checked.
-fn sweep(gpu: &runner::Gpu, domain: Domain, subgroup: u32, rounds: u64) -> (u64, u64) {
+fn sweep(gpu: &runner::Gpu, domain: Domain, subgroup: u32, rounds: u64) -> Swept {
     let mut checked = 0;
     let mut refused = 0;
+    let mut unrepresentable = 0;
 
     for seed in 0..rounds {
         let mut rng = fuzz::Rng::new(seed);
@@ -61,6 +92,7 @@ fn sweep(gpu: &runner::Gpu, domain: Domain, subgroup: u32, rounds: u64) -> (u64,
         match fuzz::check(gpu, &program, &input).expect("dispatched") {
             Outcome::Agreed => checked += 1,
             Outcome::Refused(_) => refused += 1,
+            Outcome::Unrepresentable => unrepresentable += 1,
             Outcome::Disagreed {
                 program,
                 expected,
@@ -77,7 +109,11 @@ fn sweep(gpu: &runner::Gpu, domain: Domain, subgroup: u32, rounds: u64) -> (u64,
         }
     }
 
-    (checked, refused)
+    Swept {
+        checked,
+        refused,
+        unrepresentable,
+    }
 }
 
 #[test]
@@ -93,13 +129,9 @@ fn generated_integer_programs_agree_with_the_cpu_reference() {
     }
 
     let rounds = rounds();
-    let (checked, refused) = sweep(&gpu, Domain::Unsigned, limits.subgroup_size, rounds);
+    let swept = sweep(&gpu, Domain::Unsigned, limits.subgroup_size, rounds);
 
-    eprintln!("fuzz u32: {checked} agreed, {refused} refused, over {rounds} seeds");
-    assert!(
-        checked > rounds / 2,
-        "most rounds were refused rather than checked, so this proved little"
-    );
+    swept.expect_mostly_checked(Domain::Unsigned, rounds);
 }
 
 /// The same sweep over `f32`.
@@ -120,10 +152,9 @@ fn generated_float_programs_agree_with_the_cpu_reference() {
     }
 
     let rounds = rounds();
-    let (checked, refused) = sweep(&gpu, Domain::Float, limits.subgroup_size, rounds);
+    let swept = sweep(&gpu, Domain::Float, limits.subgroup_size, rounds);
 
-    eprintln!("fuzz f32: {checked} agreed, {refused} refused, over {rounds} seeds");
-    assert!(checked > rounds / 2);
+    swept.expect_mostly_checked(Domain::Float, rounds);
 }
 
 /// The same sweep over `i32`.
@@ -144,13 +175,12 @@ fn generated_signed_programs_agree_with_the_cpu_reference() {
     }
 
     let rounds = rounds();
-    let (checked, refused) = sweep(&gpu, Domain::Signed, limits.subgroup_size, rounds);
+    let swept = sweep(&gpu, Domain::Signed, limits.subgroup_size, rounds);
 
-    eprintln!("fuzz i32: {checked} agreed, {refused} refused, over {rounds} seeds");
-    assert!(checked > rounds / 2);
+    swept.expect_mostly_checked(Domain::Signed, rounds);
 }
 
-/// The four narrow integer domains, which need three device features the wide ones do not.
+/// The five narrow domains, which need three device features the wide ones do not.
 ///
 /// `i8`, `u8`, `i16` and `u16` had direct device tests and no fuzzing at all — the least-checked
 /// surface in the tree by this project's own standard, and the one where the two conversions
@@ -159,6 +189,13 @@ fn generated_signed_programs_agree_with_the_cpu_reference() {
 ///
 /// The buffer is where they differ from everything else here: a stride of one byte means four
 /// elements share a word, and `fuzz::check` packs and unpacks at that boundary.
+///
+/// **`f16` joined them on 2026-08-13.** It had been excluded on the grounds that a half counts
+/// integers only to 2048, so a sum over a few hundred lanes leaves the range and a tolerance would
+/// be checking the rounding rather than the emitter. That reasoning was right; the conclusion —
+/// leave the domain out — was one step too far. A round that leaves the range is *refused* now
+/// instead of loosened, so every `Half` round compared is compared exactly, and the ones that
+/// cannot be are counted where `expect_mostly_checked` can see them.
 #[test]
 fn generated_narrow_programs_agree_with_the_cpu_reference() {
     let Some(gpu) = device("fuzz-narrow") else {
@@ -183,18 +220,15 @@ fn generated_narrow_programs_agree_with_the_cpu_reference() {
         (Domain::Byte, limits.narrow.byte_kernel()),
         (Domain::UnsignedShort, limits.narrow.short_kernel()),
         (Domain::Short, limits.narrow.short_kernel()),
+        (Domain::Half, limits.narrow.half_kernel()),
     ] {
         if !needed {
             eprintln!("SKIPPED fuzz-narrow {domain:?}: the device cannot hold it in a buffer");
             continue;
         }
 
-        let (checked, refused) = sweep(&gpu, domain, limits.subgroup_size, rounds);
-        eprintln!("fuzz {domain:?}: {checked} agreed, {refused} refused, over {rounds} seeds");
-        assert!(
-            checked > rounds / 2,
-            "most {domain:?} rounds were refused rather than checked, so this proved little"
-        );
+        let swept = sweep(&gpu, domain, limits.subgroup_size, rounds);
+        swept.expect_mostly_checked(domain, rounds);
     }
 }
 
@@ -221,7 +255,7 @@ fn strip_mined_programs_agree_in_every_domain() {
             let input = corpus(domain, program.input_len());
 
             match fuzz::check(&gpu, &program, &input).expect("dispatched") {
-                Outcome::Agreed | Outcome::Refused(_) => {}
+                Outcome::Agreed | Outcome::Refused(_) | Outcome::Unrepresentable => {}
                 Outcome::Disagreed {
                     program,
                     expected,
@@ -281,7 +315,7 @@ fn the_fuzzer_notices_when_the_answer_is_wrong() {
                 .expect("ran");
             let expected = fuzz::reference(&program, &wrong);
 
-            if expected != actual {
+            if expected.values != actual {
                 caught = true;
                 break;
             }

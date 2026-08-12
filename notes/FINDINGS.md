@@ -1725,3 +1725,106 @@ What is genuinely missing is not the comments but a way to tell the two apart �
 stated contract from a block that needs a new argument. Nothing enforces that distinction, so a
 novel `unsafe` block would arrive unremarked among the seventy-eight. Recorded rather than papered
 over.
+
+## The map belongs in the chain, and that is worth two crossings — 2026-08-13
+
+`notes/NEXT.md` had the upload as item 1 and said it needed *a shape rather than an optimisation*,
+with an honest caveat attached: nothing in this repository had data on the device to begin with, so
+the API would be for a caller that had not arrived.
+
+The caller was there all along, one level up. **Σ f(x) is a map and a reduce**, and computing it
+costs three host crossings — send the input, run the map, bring the result home, send it back,
+reduce — of which two are the whole buffer. `Gpu::reducer_of(elements, map)` makes the map the
+*first pass of the same chain*, so its output is handed to the first fold on the device and the
+intermediate never crosses at all.
+
+`kernels::square` is the map; Σ x² is the squared L2 norm, which is a real primitive rather than a
+demonstration.
+
+| Σ x², both routes held | three crossings | one crossing | |
+| --- | --- | --- | --- |
+| RTX 4080, 8 192 | 317–373 µs | 175 µs | **1.8–2.1×** |
+| RTX 4080, 2²⁰ | 2326–2356 µs | 1331–1355 µs | **1.7×** |
+| integrated Radeon, 2²⁰ | 5411 µs | 2759 µs | **2.0×** |
+
+**The saving is the crossings and nothing else.** At 2²⁰ it is 993 µs, against a download of 718 µs
+and an upload of 294 µs measured separately in the same file — 1012 µs predicted, 993 observed. Two
+numbers arrived at independently that agree is the only reason to believe either.
+
+### The first version of this measurement said 2.9×, for the reason it always does
+
+The old route was written as `gpu.run(&square, …)`, which allocates three buffers and builds a
+pipeline on every call. This file had *already measured* that at ~900 µs, and charging it to the
+route being replaced made the new one look nearly twice as good as it is.
+
+That is the fourth time in two days: a component timed with its setup included, then costed as
+though the change removed the setup too. The rule that keeps not being followed is simple enough to
+write down — **give the thing you are replacing every advantage you would give the replacement**.
+Both columns run through a held `Session` and a held `Reducer` now, and the only difference left is
+where the intermediate went.
+
+### And an assertion that earned its place by failing
+
+The example asserts both routes equal a host reference. At 2²⁰ elements over values 0..7 that
+assertion fired: Σ x² is 18.3 million and an `f32` counts exactly to 16.7. The measurement would
+otherwise have printed a confident speed-up for two numbers that were both wrong.
+
+The values are 0, 1 and 2 now — small enough to stay exact, and **2 has to be among them**, because
+x² and x agree on 0 and 1 and a map that had stopped squaring would go unnoticed without it.
+
+### What this does not reach
+
+A caller whose data was produced by some *other* dispatch it owns still cannot hand that buffer to
+a `Reducer` — the reducer's bindings are private, and the map has to be a pass of its chain. That is
+a third shape, and it still has no caller in this repository, so it is still not built.
+
+## `f16` is fuzzable after all, by refusing the rounds it cannot check — 2026-08-13
+
+`notes/NEXT.md` had excluded `f16` from the differential fuzzer since the narrow types arrived, with
+a stated reason: a half counts integers exactly only to **2048**, so a sum over a few hundred lanes
+leaves that range at once, and a tolerance would be checking the rounding rather than the emitter.
+
+The reasoning was right. The conclusion — leave the domain out — was one step too far.
+
+What it argues for is not skipping the domain but **noticing** when a round leaves the range.
+`Domain::exact_limit` says where that is, the reference reports whether it stayed inside, and
+`fuzz::check` returns `Outcome::Unrepresentable` instead of comparing. So every `Half` round that is
+compared at all is compared **exactly**, and the ones that cannot be are counted rather than
+quietly loosened.
+
+| domain | agreed | refused | unrepresentable | of 256 seeds |
+| --- | --- | --- | --- | --- |
+| the seven that already ran | 256 | 0 | 0 | each |
+| **Half** | **253** | 0 | **3** | |
+
+99% of rounds are checked, so this is coverage rather than a domain that looks supported and never
+runs. That distinction is now a test: `Swept::expect_mostly_checked` insists most rounds compared
+something, because a domain refused every round is indistinguishable from one that always agreed if
+only the failures are reported.
+
+### And the same check found that `Float` had never been checked either
+
+`Domain::Float` rests on exactly the same argument one exponent wider — every value a small integer,
+every partial sum under 2²⁴ — and that had only ever been *assumed*. Nothing verified it at run
+time. It is verified now, for both, by the same three lines. It has never fired for `Float`, which
+is the answer the assumption predicted and the first time anything has said so.
+
+### Three mutants, and one of them took three attempts to delete
+
+The mutation gate found eight survivors in the new code. Six were straightforward gaps —
+`as_f32`'s three readings, the reduction identities' signedness — and two were sharper:
+
+- **`exact = exact && within(…)` flipped to `||` survived my first test.** The test raised a value
+  past the limit and asserted the round was inexact — but the *final* answers were also past the
+  limit, and the separate check on those caught it either way. The case that isolates the loop is
+  the one the comment beside it already described: a value that leaves the range and is **clamped
+  back**, so everything compared is in range and only the middle was not.
+- **`_ => vec![false; invocations]` was a genuine equivalent mutant** — a vote nothing reads for
+  three of the four finishes. Its comment said the alternatives were worse, and listed two that
+  were. The third was not tried: compute the vote **inside the one arm that reads it**. There is no
+  default to be wrong about now because there is no value to default, and the reference got shorter.
+  It costs a recomputation per invocation instead of per subgroup, which a file whose first line
+  says *obviously right rather than fast* can afford.
+
+The lesson is the older one arriving again: when a comment argues that an unfalsifiable branch has
+to stay, it is usually arguing about the two shapes someone already tried.

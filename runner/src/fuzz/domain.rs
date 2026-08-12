@@ -53,10 +53,22 @@ pub enum Domain {
     UnsignedShort,
     /// 16-bit signed integers.
     Short,
+    /// 16-bit floats holding small integers, where arithmetic is exact.
+    ///
+    /// The domain `notes/NEXT.md` said could not be fuzzed. Its reasoning was right and its
+    /// conclusion was too strong: a half represents integers exactly only to **2048**, so a sum
+    /// over a few hundred lanes leaves that range and a tolerance would be checking the rounding
+    /// rather than the emitter.
+    ///
+    /// What that argues for is not skipping the domain but *noticing* when a round leaves the
+    /// range. [`Domain::exact_limit`] says where that is and the reference refuses the round
+    /// rather than comparing it — so every `Half` round that is compared at all is compared
+    /// exactly, and the ones that cannot be are counted rather than quietly loosened.
+    Half,
 }
 
 /// Every domain, for a caller that wants to sweep them.
-pub const ALL_DOMAINS: [Domain; 7] = [
+pub const ALL_DOMAINS: [Domain; 8] = [
     Domain::Unsigned,
     Domain::Signed,
     Domain::Float,
@@ -64,6 +76,7 @@ pub const ALL_DOMAINS: [Domain; 7] = [
     Domain::Byte,
     Domain::UnsignedShort,
     Domain::Short,
+    Domain::Half,
 ];
 
 impl Domain {
@@ -76,15 +89,66 @@ impl Domain {
     pub const fn bits(self) -> u32 {
         match self {
             Self::Unsigned | Self::Signed | Self::Float => 32,
-            Self::UnsignedShort | Self::Short => 16,
+            Self::UnsignedShort | Self::Short | Self::Half => 16,
             Self::UnsignedByte | Self::Byte => 8,
         }
     }
 
-    /// Whether this is the float domain, where arithmetic is not modular.
+    /// Whether this is a float domain, where arithmetic rounds instead of wrapping.
     #[must_use]
     pub const fn is_float(self) -> bool {
-        matches!(self, Self::Float)
+        matches!(self, Self::Float | Self::Half)
+    }
+
+    /// This domain's bits, read as the number they stand for.
+    ///
+    /// The one place the two float widths differ. Everything else is written in terms of `f32`,
+    /// because a half converts to one exactly — there is no second rounding hiding in here.
+    fn decode(self, bits: u32) -> f32 {
+        if matches!(self, Self::Half) {
+            simdr::half::to_f32(bits as u16)
+        } else {
+            f32::from_bits(bits)
+        }
+    }
+
+    /// The inverse: a number written back as this domain's bits.
+    fn encode_float(self, value: f32) -> u32 {
+        if matches!(self, Self::Half) {
+            u32::from(simdr::half::from_f32(value))
+        } else {
+            value.to_bits()
+        }
+    }
+
+    /// This domain's bits as a number, for a caller that wants to reason about magnitude.
+    ///
+    /// Integer domains answer with the value they stand for, so one bound serves both kinds.
+    #[must_use]
+    pub fn as_f32(self, bits: u32) -> f32 {
+        if self.is_float() {
+            self.decode(bits)
+        } else if self.is_signed() {
+            self.signed_value(bits) as f32
+        } else {
+            self.truncate(bits) as f32
+        }
+    }
+
+    /// The magnitude past which this domain stops counting integers exactly, if it has one.
+    ///
+    /// `None` for the integer domains: wrapping is exact and the reference wraps the same way.
+    /// The floats do have one — 2²⁴ for a single and **2¹¹** for a half — and past it a sum is
+    /// rounded, so comparing it against a host sum compares two roundings rather than the mapping.
+    ///
+    /// The single's limit had never been checked, only assumed. It is checked now, for both.
+    #[must_use]
+    pub const fn exact_limit(self) -> Option<f32> {
+        match self {
+            Self::Float => Some(16_777_216.0),
+            Self::Half => Some(2_048.0),
+            _ => None,
+        }
     }
 
     /// The mask that keeps a value inside this domain's width.
@@ -121,6 +185,9 @@ impl Domain {
             Self::Unsigned | Self::Signed => 4_096,
             Self::Float => 256,
             Self::UnsignedShort | Self::Short => 1_024,
+            // Small, so that a sum over a few hundred lanes usually stays under 2048 and the
+            // round can be checked exactly. Rounds that still leave the range are refused.
+            Self::Half => 8,
             Self::UnsignedByte | Self::Byte => 32,
         }
     }
@@ -131,14 +198,17 @@ impl Domain {
     /// differs from the unsigned ones at all.
     #[must_use]
     pub const fn is_signed(self) -> bool {
-        matches!(self, Self::Signed | Self::Float | Self::Byte | Self::Short)
+        matches!(
+            self,
+            Self::Signed | Self::Float | Self::Byte | Self::Short | Self::Half
+        )
     }
 
     /// Encode a small integer as this domain's bit pattern.
     #[must_use]
     pub fn encode(self, value: u32) -> u32 {
         if self.is_float() {
-            (value as f32).to_bits()
+            self.encode_float(value as f32)
         } else {
             self.truncate(value)
         }
@@ -152,7 +222,7 @@ impl Domain {
     #[must_use]
     pub fn encode_signed(self, value: i32) -> u32 {
         if self.is_float() {
-            return (value as f32).to_bits();
+            return self.encode_float(value as f32);
         }
         if self.is_signed() {
             self.truncate(u32::from_ne_bytes(value.to_ne_bytes()))
@@ -165,7 +235,7 @@ impl Domain {
     #[must_use]
     pub fn add(self, left: u32, right: u32) -> u32 {
         if self.is_float() {
-            (f32::from_bits(left) + f32::from_bits(right)).to_bits()
+            self.encode_float(self.decode(left) + self.decode(right))
         } else {
             self.truncate(left.wrapping_add(right))
         }
@@ -175,7 +245,7 @@ impl Domain {
     #[must_use]
     pub fn mul(self, left: u32, right: u32) -> u32 {
         if self.is_float() {
-            (f32::from_bits(left) * f32::from_bits(right)).to_bits()
+            self.encode_float(self.decode(left) * self.decode(right))
         } else {
             self.truncate(left.wrapping_mul(right))
         }
@@ -189,7 +259,7 @@ impl Domain {
     #[must_use]
     pub fn greater(self, left: u32, right: u32) -> bool {
         if self.is_float() {
-            return f32::from_bits(left) > f32::from_bits(right);
+            return self.decode(left) > self.decode(right);
         }
         if self.is_signed() {
             self.signed_value(left) > self.signed_value(right)
@@ -225,7 +295,7 @@ impl Domain {
     #[must_use]
     pub fn largest(self) -> u32 {
         if self.is_float() {
-            return f32::INFINITY.to_bits();
+            return self.encode_float(f32::INFINITY);
         }
         if self.is_signed() {
             self.mask() >> 1
@@ -238,7 +308,7 @@ impl Domain {
     #[must_use]
     pub fn smallest(self) -> u32 {
         if self.is_float() {
-            return f32::NEG_INFINITY.to_bits();
+            return self.encode_float(f32::NEG_INFINITY);
         }
         if self.is_signed() {
             self.truncate(1 << (self.bits() - 1))

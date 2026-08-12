@@ -318,3 +318,74 @@ fn a_head_larger_than_the_buffer_returns_the_buffer() {
 
     assert_eq!(output.len(), count);
 }
+
+#[test]
+fn a_mapped_reducer_computes_the_sum_of_squares_without_a_round_trip() {
+    // Σ x², the squared L2 norm. The map pass runs on the device and its output goes straight into
+    // the first fold — so the intermediate never crosses the bus. What this asserts is that it
+    // computes the same number the two-step route does, because "faster" is worth nothing if the
+    // answer moved.
+    let Some(gpu) = device("reducer-mapped") else {
+        return;
+    };
+    if !gpu.limits().subgroup_arithmetic {
+        eprintln!("SKIPPED reducer-mapped: no subgroup arithmetic reported");
+        return;
+    }
+    let width = gpu.limits().subgroup_size;
+    let square = runner::kernels::square(width).expect("built");
+
+    for power in 8..=14 {
+        let count = 1_usize << power;
+        if count < 2 * WORKGROUP_SIZE as usize {
+            continue;
+        }
+
+        // Small values, so every partial sum of squares stays inside the 24 bits an `f32` carries
+        // and the comparison is exact rather than lucky.
+        let input: Vec<f32> = (0..count).map(|index| (index % 8) as f32).collect();
+        let expected: f32 = input.iter().map(|value| value * value).sum();
+
+        let mut mapped = gpu.reducer_of(count, &square).expect("built");
+        let total = mapped.sum(&input).expect("reduced").total;
+        assert_eq!(total, expected, "{count} elements");
+
+        // And the two-step route, which is what a caller would have written instead: run the map,
+        // bring it home, send it back, reduce.
+        let squares = gpu
+            .run(&square, &input, count as u32 / WORKGROUP_SIZE)
+            .expect("mapped");
+        let stepwise = gpu
+            .reducer(count)
+            .expect("built")
+            .sum(&squares)
+            .expect("reduced");
+        assert_eq!(
+            total, stepwise.total,
+            "{count} elements, against the two-step route"
+        );
+    }
+}
+
+#[test]
+fn a_mapped_reducer_runs_one_more_dispatch_than_a_plain_one() {
+    // The map is a pass of the same chain rather than a second submission, and the count is what
+    // says so. It also moves the *parity*, which decides which buffer the answer lands in — the
+    // test above would fail if that were got wrong, and this one says where to look.
+    let Some(gpu) = device("reducer-mapped-count") else {
+        return;
+    };
+    if !gpu.limits().subgroup_arithmetic {
+        eprintln!("SKIPPED reducer-mapped-count: no subgroup arithmetic reported");
+        return;
+    }
+    let width = gpu.limits().subgroup_size;
+    let square = runner::kernels::square(width).expect("built");
+
+    let count = 8_192;
+    let plain = gpu.reducer(count).expect("built");
+    let mapped = gpu.reducer_of(count, &square).expect("built");
+
+    assert_eq!(mapped.dispatches(), plain.dispatches() + 1);
+    assert_eq!(plain.dispatches(), dispatches_for(count));
+}

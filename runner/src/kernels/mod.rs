@@ -173,6 +173,29 @@ pub fn lane_affine<const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneErro
     kernel.finish()
 }
 
+/// `out[i] = in[i] × in[i]`.
+///
+/// The map half of a map-reduce, and the reason [`crate::Gpu::reducer_of`] exists: Σ x² is the
+/// squared L2 norm, and computing it the obvious way sends the input to the device, brings the
+/// squares home, and sends them straight back to be summed. As one chain it is a single crossing.
+///
+/// # Errors
+///
+/// As [`scale`].
+pub fn square(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup!(subgroup, square_at)
+}
+
+fn square_at<const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    use simdr::lanes::F32;
+
+    let mut kernel = Kernel::<F32>::new(shape(subgroup))?;
+    let value = kernel.load::<LANES>(0)?;
+    let squared = kernel.lanes()?.mul(value, value)?;
+    kernel.store(1, squared)?;
+    kernel.finish()
+}
+
 /// [`lane_affine`] over a vector as wide as the device's subgroup — one element per invocation.
 ///
 /// What every caller of it actually wanted. The generic form was called with a literal 32, which

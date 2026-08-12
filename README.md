@@ -139,11 +139,11 @@ did not.
 
 | Layer | What it is | What it caught |
 | --- | --- | --- |
-| **Unit tests** | 324 in the emitter, decoding what was emitted; 599 across the workspace | Everything cheap |
+| **Unit tests** | 324 in the emitter, decoding what was emitted; 620 across the workspace | Everything cheap |
 | **`spirv-val`** | Khronos' validator, at `--target-env vulkan1.1` | `OpLoopMerge` in the wrong position — a unit test asserted "merge before branch" and passed while the comparison sat between them. And, the first time it was pointed at `Lanes::dot_unsigned`, that `OpUDot` had been emitted with a **signed** result type: invalid SPIR-V in a shipped public method that had no caller, no unit test and no validator coverage |
 | **Execution** | Real dispatches on a real GPU, against CPU references | A missing staging write: every computing kernel returned garbage and the empty-kernel test still passed |
 | **Other widths** | The same suite at **4, 8, 16, 32 and 64** lanes, across three devices | Ten tests that had conflated "32 lanes" with "the subgroup", four of which could not build at all because a vote has no clustered form. Then, at 8: a fuzzer generating shuffles that leave the subgroup, and three tests assuming uninitialised device memory is zero. Then, at 4: `kernels::scale` — *the control kernel* — reading and writing eight times its buffer, which had been undefined behaviour returning zeros at width 8 for a day before it became an access violation at 4 |
-| **Differential fuzzing** | Generated programs across seven element types, each interpreted on the CPU and compared exactly | `reduce_min` folding strips with a *maximum* — right for every mapping but the strip-mined one, so hand tests never saw it |
+| **Differential fuzzing** | Generated programs across **all eight** element types, each interpreted on the CPU and compared exactly | `reduce_min` folding strips with a *maximum* — right for every mapping but the strip-mined one, so hand tests never saw it |
 | **Mutation coverage** | `noha prober` over the emitter and the runner's pure half | Eight real gaps in one night, five of them in the *fuzzer* — including a generated program that dispatched nothing and therefore agreed with everything. Later, fifteen more in the half-float rounding path, which an *exhaustive* round-trip test could not reach because it only ever fed `from_f32` values that came from a half — and those never round |
 
 Each row was added because the ones above it were green while something was wrong. What that does
@@ -389,8 +389,26 @@ The ping-pong is kept for being shorter code — no copies, no copy lengths, and
 where a short copy returns the previous call's data — and because on the integrated Radeon it *is*
 worth 5.5%.
 
-What is left is the upload, and it is real: a caller passing `&[f32]` has to have it copied across.
-Removing that is a different API rather than a faster one, and `notes/NEXT.md` heads with it.
+### The map belongs in the chain
+
+What was left after that is the upload, and no device-side change touches it — except by not
+happening. Σ f(x) is a map and a reduce, and the obvious way to compute it crosses the bus three
+times: send the input, run the map, bring the result home, send it back, reduce.
+
+```rust
+let square = kernels::square(width)?;                    // out[i] = in[i] * in[i]
+let mut reducer = gpu.reducer_of(1 << 20, &square)?;     // the map is the chain's first pass
+let norm = reducer.sum(&input)?.total;                   // Σ x², one crossing
+```
+
+**1.7× on an RTX 4080 and 2.0× on the integrated Radeon**, over 2²⁰ elements, against the same
+route with a held `Session` for the map and a held `Reducer` for the fold — so neither column pays
+for allocation or pipeline creation and the only difference is where the intermediate went. The
+993 µs saved is the 718 µs download plus the 294 µs upload measured separately in the same file.
+
+A first attempt reported 2.9× by writing the old route as `gpu.run`, which allocates and builds a
+pipeline every call. Give the thing you are replacing every advantage you would give the
+replacement.
 
 ## One instruction where there were eleven
 

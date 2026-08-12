@@ -71,6 +71,17 @@ pub enum Outcome {
     /// Not a failure: the generator is allowed to ask for things the mapping refuses, and being
     /// refused *by name* is the correct answer.
     Refused(LaneError),
+    /// The reference left the range its domain counts exactly, so the round was not compared.
+    ///
+    /// Also not a failure, and for a sharper reason than [`Outcome::Refused`]: the *device* would
+    /// have answered perfectly well. It is the comparison that cannot be trusted, because both
+    /// sides would be rounded and two roundings agreeing says nothing about the mapping.
+    ///
+    /// This is what lets [`Domain::Half`] be fuzzed at all — a half counts integers only to 2048,
+    /// which a sum over a few hundred lanes leaves at once. A caller sweeping should **count
+    /// these**: a domain that is refused every round is a domain with no coverage, and it would
+    /// otherwise look exactly like a domain that always agreed.
+    Unrepresentable,
 }
 
 /// Something that stopped a round before it could conclude.
@@ -109,10 +120,17 @@ pub fn check(gpu: &Gpu, program: &Program, input: &[u32]) -> Result<Outcome, Fuz
         Err(refused) => return Ok(Outcome::Refused(refused)),
     };
 
-    let actual = dispatch(gpu, program, &spirv, input)?;
+    // The reference first, and the dispatch only if it can be believed. A round whose arithmetic
+    // left the range its domain counts exactly cannot be compared — both sides would be rounded
+    // and agreeing or disagreeing would say nothing about which lanes were combined — so it is
+    // refused here rather than dispatched and then loosened.
     let expected = reference(program, input);
+    if !expected.exact {
+        return Ok(Outcome::Unrepresentable);
+    }
 
-    Ok(verdict(program, expected, actual))
+    let actual = dispatch(gpu, program, &spirv, input)?;
+    Ok(verdict(program, expected.values, actual))
 }
 
 /// Run `spirv` over `input`, packing the buffer the way this domain's stride requires.
