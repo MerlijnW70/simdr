@@ -9,7 +9,7 @@
 //! submissions, a fence — and this is the surface over it. Both were one file until the surface
 //! grew a conversion per element width.
 
-use super::Specialization;
+use super::{Grid, Specialization};
 use crate::timing::Timing;
 use crate::{Error, Gpu};
 use std::time::Duration;
@@ -19,7 +19,7 @@ impl Gpu {
     ///
     /// The module must be a compute shader named `main` with two `StorageBuffer` bindings in
     /// descriptor set 0 — binding 0 read, binding 1 written — which is the shape every kernel in
-    /// `simdr` emits. `workgroups` is the dispatch's x dimension.
+    /// `simdr` emits. `workgroups` is the dispatch's x dimension; [`Gpu::run_grid`] takes both.
     ///
     /// The words go to `vkCreateShaderModule` exactly as the emitter produced them. Nothing here
     /// inspects or rewrites them, which is the point: any disagreement that shows up is between
@@ -128,7 +128,20 @@ impl Gpu {
         input: &[u32],
         workgroups: u32,
     ) -> Result<Vec<u32>, Error> {
-        self.execute(spirv, input, workgroups, 1, &Specialization::none())
+        self.run_grid(spirv, input, Grid::linear(workgroups))
+    }
+
+    /// Run over raw words, dispatching on both axes.
+    ///
+    /// What a kernel built from [`simdr::kernel::Shape::grid`] needs: its rows come from the
+    /// dispatch's y, from a workgroup several invocations deep, or from both. Everything else here
+    /// is [`Grid::linear`] of the count it was given.
+    ///
+    /// # Errors
+    ///
+    /// As [`Gpu::run`].
+    pub fn run_grid(&self, spirv: &[u32], input: &[u32], grid: Grid) -> Result<Vec<u32>, Error> {
+        self.execute(spirv, input, grid, 1, &Specialization::none())
             .map(|out| out.0)
     }
 
@@ -148,7 +161,7 @@ impl Gpu {
         workgroups: u32,
         specialization: &Specialization,
     ) -> Result<Vec<u32>, Error> {
-        self.execute(spirv, input, workgroups, 1, specialization)
+        self.execute(spirv, input, Grid::linear(workgroups), 1, specialization)
             .map(|out| out.0)
     }
 
@@ -165,8 +178,14 @@ impl Gpu {
         iterations: u32,
         specialization: &Specialization,
     ) -> Result<Duration, Error> {
-        self.execute(spirv, input, workgroups, iterations, specialization)
-            .map(|out| out.1)
+        self.execute(
+            spirv,
+            input,
+            Grid::linear(workgroups),
+            iterations,
+            specialization,
+        )
+        .map(|out| out.1)
     }
 
     /// Time `iterations` back-to-back dispatches of `spirv`.
@@ -186,14 +205,23 @@ impl Gpu {
         workgroups: u32,
         iterations: u32,
     ) -> Result<Duration, Error> {
-        self.execute(
-            spirv,
-            input,
-            workgroups,
-            iterations,
-            &Specialization::none(),
-        )
-        .map(|out| out.1)
+        self.time_grid(spirv, input, Grid::linear(workgroups), iterations)
+    }
+
+    /// Time `iterations` back-to-back dispatches over both axes.
+    ///
+    /// # Errors
+    ///
+    /// As [`Gpu::run`].
+    pub fn time_grid(
+        &self,
+        spirv: &[u32],
+        input: &[u32],
+        grid: Grid,
+        iterations: u32,
+    ) -> Result<Duration, Error> {
+        self.execute(spirv, input, grid, iterations, &Specialization::none())
+            .map(|out| out.1)
     }
 
     /// Time the same dispatch `repeats` times over, and report the spread.

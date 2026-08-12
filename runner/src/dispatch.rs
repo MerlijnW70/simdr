@@ -11,11 +11,13 @@
 //!
 //! This file is the staging machinery: allocate three buffers, copy in, dispatch, copy out, tear
 //! down. [`run`] is the surface over it — one call per way a caller might spell its data. The rest
-//! are the pieces each of those needs: [`pipeline`] and [`specialization`] to build one,
-//! [`submit`] to record and wait, [`session`] and [`chain`] to keep things alive across calls.
+//! are the pieces each of those needs: [`pipeline`] and [`specialization`] to build one, [`grid`]
+//! to say how many workgroups on how many axes, [`submit`] to record and wait, [`session`] and
+//! [`chain`] to keep things alive across calls.
 
 mod bindings;
 mod chain;
+mod grid;
 mod pipeline;
 mod placement;
 mod run;
@@ -25,6 +27,7 @@ mod submit;
 mod timestamps;
 
 pub use chain::Pass;
+pub use grid::Grid;
 pub use placement::{MemoryType, Placement};
 pub use session::Session;
 pub use specialization::Specialization;
@@ -42,7 +45,7 @@ impl Gpu {
         &self,
         spirv: &[u32],
         input: &[u32],
-        workgroups: u32,
+        grid: Grid,
         iterations: u32,
         specialization: &Specialization,
     ) -> Result<(Vec<u32>, Duration), Error> {
@@ -67,7 +70,7 @@ impl Gpu {
                 &source,
                 &destination,
                 bytes,
-                workgroups,
+                grid,
                 count,
                 iterations.max(1),
                 specialization,
@@ -97,7 +100,7 @@ impl Gpu {
         source: &Buffer,
         destination: &Buffer,
         bytes: u64,
-        workgroups: u32,
+        grid: Grid,
         count: usize,
         iterations: u32,
         specialization: &Specialization,
@@ -115,7 +118,7 @@ impl Gpu {
         // them. Untimed, because a benchmark of PCIe is not what anyone asked for.
         unsafe { self.copy(staging, source, bytes) }?;
 
-        let elapsed = unsafe { self.dispatch(&pipeline, workgroups, iterations) }?;
+        let elapsed = unsafe { self.dispatch(&pipeline, grid, iterations) }?;
 
         unsafe { self.copy(destination, staging, bytes) }?;
         let output = unsafe { staging.read(self, count) }?;
@@ -132,9 +135,10 @@ impl Gpu {
     unsafe fn dispatch(
         &self,
         pipeline: &Pipeline,
-        workgroups: u32,
+        grid: Grid,
         iterations: u32,
     ) -> Result<Duration, Error> {
+        let (x, y) = grid.counts();
         unsafe {
             self.record_and_wait(|device, command| {
                 device.cmd_bind_pipeline(
@@ -168,7 +172,7 @@ impl Gpu {
                             &[],
                         );
                     }
-                    device.cmd_dispatch(command, workgroups, 1, 1);
+                    device.cmd_dispatch(command, x, y, 1);
                 }
                 Ok(())
             })

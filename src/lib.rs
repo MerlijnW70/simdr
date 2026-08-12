@@ -37,10 +37,10 @@
 //!
 //! # What it cannot express
 //!
-//! No matrices and no cooperative matrices, and no integer dot-product extension — so a packed
-//! `i8` mapping, where four elements share a lane, is not available and `decisions/DR-0004` says
-//! why it is not missed. Dispatch is one-dimensional. There is no compare-and-exchange among the
-//! atomics, and no `f64`.
+//! No matrices and no cooperative matrices. A packed `i8` *mapping*, where four elements share a
+//! lane, is deliberately absent — `decisions/DR-0004` says why, and why the packed integer dot
+//! product does not amount to one. Dispatch has two axes and not three, which is
+//! `decisions/DR-0006`. There is no compare-and-exchange among the atomics, and no `f64`.
 //!
 //! `notes/NEXT.md` says which of those is worth building and what each one blocks.
 

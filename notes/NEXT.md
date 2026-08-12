@@ -1,17 +1,17 @@
 # What is worth doing next
 
-Rewritten 2026-08-12, after ten items were worked through in two sittings. Every item here has a
-number behind it or a named thing it blocks. Ordered by value per line of work, not by size.
+Rewritten 2026-08-12, after eleven items were worked through in three sittings. Every item here has
+a number behind it or a named thing it blocks. Ordered by value per line of work, not by size.
 
 The point of the file is that the ordering should be arguable. If a later reader disagrees, the
-measurements are here to disagree *with* — and two of the ten were **refuted by their own
+measurements are here to disagree *with* — and two of the eleven were **refuted by their own
 measurement** and left undone, which is what the ordering is for.
 
 ## What is done, and what each one actually turned out to be
 
-Listed with their outcomes rather than crossed off, because five of the ten came out differently
+Listed with their outcomes rather than crossed off, because six of the eleven came out differently
 from the argument that put them on the list — two of them differently enough that the work was not
-done at all.
+done at all, and one of which produced a better finding than the item it was part of.
 
 ### 1. Narrow element types — `i8`, `u8`, `i16`, `u16`, `f16` — **built**
 
@@ -205,10 +205,35 @@ Along the way the lane API gained the shifts — `shift_left`, `shift_right_logi
 `shift_right_arithmetic` — because the written-out twin needs them, and the two right shifts are
 another pair that agree on every value with the top bit clear.
 
-## 1. Multi-dimensional dispatch
+### 11. Multi-dimensional dispatch — **built, and it costs nothing**
 
-`cmd_dispatch(x, 1, 1)` and a one-dimensional address. Everything with a natural 2-D shape — an
-image, a matrix tile — has to linearise itself before it reaches a kernel.
+`Shape::grid`, `Kernel::load_row` / `store_row` / `load_row_at`, and a `runner::Grid` that
+dispatches along y. A kernel addresses `row × pitch + column`, where the column is the same
+expression a one-axis kernel uses — the same code, not a second copy that agrees.
+
+The prediction was that the extra multiply and add would be invisible on a memory-bound kernel, and
+`runner/examples/plane.rs` says so on both hardware devices: 3.38 µs against 3.38 on the 4080,
+42.99 against 42.92 on the Radeon.
+
+**The first version of that measurement reported 2× and was measuring something else.** A grid
+`rows` deep has `subgroup × rows` invocations per workgroup, so comparing it against a one-axis
+kernel of `subgroup` invocations moved the occupancy at the same time. The example is a two-by-two
+now. `notes/FINDINGS.md` has both halves and `decisions/DR-0006` records why there is no z.
+
+## 1. Choose the workgroup size, rather than having chosen 64 once
+
+The confound above is a finding in its own right. Eight subgroups per workgroup instead of one is
+**2.04× faster on the RTX 4080 and 1.12× slower on the integrated Radeon**, at 131 072 invocations
+on an elementwise kernel — a larger effect than most of what has been optimised here.
+
+`WORKGROUP_SIZE` is 64 in `runner/src/kernels/mod.rs` and has been since the first kernel. On the
+three devices here that is eight subgroups, two, and one. Nothing has ever measured it.
+
+What makes this an open question rather than a change to make: the two devices disagree in
+*direction*, so there is no constant to move it to. It would have to come from the device, and
+`Gpu::limits()` reports `maxComputeWorkGroupInvocations` already — what it does not report is which
+multiple of the subgroup width this particular kernel wants. The honest first step is a sweep, over
+more than one kernel shape, before anything is wired to it.
 
 ---
 
@@ -230,6 +255,10 @@ file and checks each one still contains the `unsafe` that excused it.
 
 **Switching the extremes' strip fold to `FMax`.** See item 4 above. One instruction saved, a
 defined behaviour lost.
+
+**A third dispatch axis.** `decisions/DR-0006` has the argument: the term is easy and the *layout*
+is not, and a z count above 1 today would run every workgroup again over the same elements. `Grid`
+has no z field, so that dispatch cannot be written by accident.
 
 ---
 

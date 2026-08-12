@@ -8,14 +8,16 @@
 //! [`crate::Gpu::run`] expects.
 //!
 //! Split by what a kernel needs from the machine: the elementwise ones here, the ones that cross
-//! lanes in [`reduce`], the ones whose shape is decided at runtime in [`control`], and the ones
-//! that reach the GLSL.std.450 set in [`extended`].
+//! lanes in [`reduce`], the ones whose shape is decided at runtime in [`control`], the ones that
+//! reach the GLSL.std.450 set in [`extended`], and the ones addressing rows and columns in
+//! [`plane`].
 
 pub mod control;
 pub mod dot;
 pub mod extended;
 pub mod narrow;
 pub mod network;
+pub mod plane;
 pub mod reduce;
 pub mod scatter;
 pub mod specialized;
@@ -29,6 +31,7 @@ pub use dot::{mixed_dot, packed_dot, repeated_packed_dot, repeated_unpacked_dot,
 pub use extended::{clamped, fused_square, larger, magnitude, root, smaller};
 pub use narrow::{narrow_add, narrow_clamp, narrow_sum, narrow_sum_whole};
 pub use network::{Layer, clipped_dot, clipped_dot_split, unclipped_dot};
+pub use plane::{flat_scale, row_bias, row_index, row_scale, row_sum};
 pub use reduce::{
     FOLD_HALF_SPEC_ID, butterfly_pair_sum, butterfly_tree_sum, dot_product, dot_product_whole,
     fold_halves, fold_halves_open, lane_max, lane_max_whole, lane_sum, lane_sum_whole,

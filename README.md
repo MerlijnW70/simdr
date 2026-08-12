@@ -43,7 +43,8 @@ spec/      Khronos' numbers — opcodes, capabilities, enumerants, GLSL.std.450
 module/    A SPIR-V module being assembled: types, constants, blocks, phis, subgroup ops, atomics
 lanes/     Simd<T, N> semantics: mappings, reductions, shuffles, votes, loops, branches,
            min/max/clamp, shifts, and the packed integer dot product
-kernel/    The buffer interface, workgroup shared memory, the barrier, and atomic scatter
+kernel/    The buffer interface, one axis or two, workgroup shared memory, the barrier,
+           and atomic scatter
 half/      f32 ↔ f16, because Rust has no stable f16 and this crate has nothing to borrow one from
 decode/    Reading a module back, which is how the tests inspect what was emitted
 ```
@@ -134,7 +135,7 @@ did not.
 
 | Layer | What it is | What it caught |
 | --- | --- | --- |
-| **Unit tests** | 308 in the emitter, decoding what was emitted; 544 across the workspace | Everything cheap |
+| **Unit tests** | 320 in the emitter, decoding what was emitted; 571 across the workspace | Everything cheap |
 | **`spirv-val`** | Khronos' validator, at `--target-env vulkan1.1` | `OpLoopMerge` in the wrong position — a unit test asserted "merge before branch" and passed while the comparison sat between them |
 | **Execution** | Real dispatches on a real GPU, against CPU references | A missing staging write: every computing kernel returned garbage and the empty-kernel test still passed |
 | **Other devices** | The same suite at 64 lanes and at 8, as well as at 32 | Ten tests that had conflated "32 lanes" with "the subgroup", four of which could not build at all because a vote has no clustered form. Then, at 8: a fuzzer generating shuffles that leave the subgroup, and three tests assuming uninitialised device memory is zero |
@@ -256,6 +257,7 @@ cargo run --release --example narrow   -p runner  # i8 and i16 against i32, at t
 cargo run --release --example specialize -p runner # emitting a module against building a pipeline
 cargo run --release --example reducer   -p runner  # a reduction that keeps its pipelines
 cargo run --release --example dot       -p runner  # OpSDot against the eleven instructions it replaces
+cargo run --release --example plane     -p runner  # what a second dispatch axis costs, against what it was confounded with
 ```
 
 To run any of it against a different device:
@@ -340,6 +342,36 @@ This is **not** a packed lane mapping. A `Simd<u32, N>` is still one `u32` per l
 an operation that reads each of them as four bytes, and `decisions/DR-0004` says why that
 distinction is worth keeping.
 
+## Rows and columns
+
+A matrix used to have to linearise itself before it reached a kernel. `Shape::grid` gives the
+kernel a second axis, and `Grid` gives the dispatch one:
+
+```rust
+// One subgroup across, four invocation rows deep, over a matrix `pitch` elements to the row.
+let mut kernel = Kernel::<U32>::new(Shape::grid(width, width, 4, 2))?;
+let value = kernel.load_row::<32>(0, pitch)?;      // row × pitch + this invocation's column
+let total = kernel.lanes()?.reduce_sum(value)?;    // one total per row, not per matrix
+kernel.store_row_scalar(1, pitch, total)?;
+
+gpu.run_grid(&spirv, &input, Grid::new(pitch / width, height / 4))?;
+```
+
+The column is the same expression a one-axis kernel uses — the same code, not a second copy written
+to agree with it. `load_row_at` takes the row as a value, which is what a bias row or a vertical
+stencil needs.
+
+**It costs nothing measurable.** The extra multiply and add hide behind the loads on both hardware
+devices — 3.38 µs against 3.38 on the RTX 4080, 42.99 against 42.92 on the integrated Radeon, at
+the same invocation count. What it buys is that the caller stops doing the arithmetic by hand, and
+hand-done addressing is exactly what ten tests got wrong the first time a second device ran them.
+
+> The first version of that measurement said **2×**, and was comparing a grid four rows deep
+> against a one-axis kernel with an eighth of the invocations per workgroup — so it moved the
+> occupancy and the address at once. `notes/FINDINGS.md` has the corrected two-by-two, and the
+> workgroup-size effect it was confounded with, which is real and points the opposite way on the
+> two devices.
+
 ## What this is not
 
 - **Not a shader language.** There is no Rust-to-GPU compiler here. You write the kernel against
@@ -355,7 +387,9 @@ distinction is worth keeping.
   single allocation, and placement under three simultaneous ones.
 - **Not matrices or cooperative matrices.** `i8`, `u8`, `i16`, `u16` and `f16` are here and run on
   every device tried; matrix types are not.
-- **No multi-dimensional dispatch.** `cmd_dispatch(x, 1, 1)`.
+- **Two dispatch axes, not three.** `Shape::grid` and `Grid::new(x, y)` are here; `vkCmdDispatch`'s
+  z is always 1. `decisions/DR-0006` has the argument — the term is easy, the *layout* is not, and
+  a z count above 1 would silently run every workgroup again over the same elements.
 - **Nothing here defers a value.** Specialization constants work end to end and no kernel uses one
   outside the tests and the measurement written for them. That is a conclusion rather than a gap:
   `runner/examples/specialize.rs` timed one module specialized fourteen ways against fourteen
@@ -366,7 +400,7 @@ distinction is worth keeping.
 
 ## Reading the tree
 
-- `decisions/` — the five decisions that shape everything, and why. `DR-0002` carries a correction
+- `decisions/` — the six decisions that shape everything, and why. `DR-0002` carries a correction
   where a later experiment showed its reasoning was too strong.
 - `notes/FINDINGS.md` — what has been learnt, including the retractions, in place and struck
   through rather than deleted.

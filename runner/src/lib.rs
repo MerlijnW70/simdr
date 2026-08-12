@@ -42,7 +42,7 @@ use ash::vk;
 use std::fmt;
 
 pub use device::{Limits, Narrow};
-pub use dispatch::{MemoryType, Pass, Placement, Session, Specialization};
+pub use dispatch::{Grid, MemoryType, Pass, Placement, Session, Specialization};
 pub use reduction::{BadLength, Reducer, Reduction};
 pub use timing::Timing;
 

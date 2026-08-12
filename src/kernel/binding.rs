@@ -24,6 +24,8 @@ pub(super) struct Parts {
     pub(super) local: Id,
     /// Which workgroup this invocation is in.
     pub(super) group: Id,
+    /// This invocation's row across the whole dispatch, for a grid kernel.
+    pub(super) row: Option<Id>,
 }
 
 /// Build a module holding the interface, and open `main`.
@@ -33,6 +35,9 @@ pub(super) fn build<T: Element>(shape: Shape) -> Result<Parts, LaneError> {
             workgroup: shape.workgroup,
             buffers: shape.buffers,
         });
+    }
+    if shape.rows == Some(0) {
+        return Err(LaneError::BadRows { rows: 0 });
     }
 
     let mut module = Module::new(Version::V1_3);
@@ -109,7 +114,7 @@ pub(super) fn build<T: Element>(shape: Shape) -> Result<Parts, LaneError> {
             main.word(),
             ExecutionMode::LocalSize.word(),
             shape.workgroup,
-            1,
+            shape.rows.unwrap_or(1),
             1,
         ],
     )?;
@@ -127,6 +132,8 @@ pub(super) fn build<T: Element>(shape: Shape) -> Result<Parts, LaneError> {
     let group_vector = module.load(uint3, workgroup_id)?;
     let group = module.composite_extract(uint, group_vector, &[0])?;
 
+    let row = row_index(&mut module, shape, uint, local_vector, group_vector)?;
+
     Ok(Parts {
         module,
         element,
@@ -136,5 +143,38 @@ pub(super) fn build<T: Element>(shape: Shape) -> Result<Parts, LaneError> {
         buffers,
         local,
         group,
+        row,
     })
+}
+
+/// This invocation's row across the whole dispatch: `group.y × rows + local.y`.
+///
+/// Emitted once at function entry, because every access on the second axis wants it and the two
+/// built-ins are already loaded here.
+///
+/// **A workgroup one row deep folds to `group.y`.** The `LocalSize` above declares y as 1, so
+/// `LocalInvocationId.y` can only be 0 — that is not an assumption about the dispatch, it is what
+/// the execution mode this same function emitted says. Two instructions saved on the shape that
+/// most grid kernels use.
+fn row_index(
+    module: &mut Module,
+    shape: Shape,
+    uint: Id,
+    local_vector: Id,
+    group_vector: Id,
+) -> Result<Option<Id>, LaneError> {
+    let rows = match shape.rows {
+        None => return Ok(None),
+        Some(rows) => rows,
+    };
+
+    let group_y = module.composite_extract(uint, group_vector, &[1])?;
+    if rows == 1 {
+        return Ok(Some(group_y));
+    }
+
+    let local_y = module.composite_extract(uint, local_vector, &[1])?;
+    let depth = module.constant_u32(rows)?;
+    let base = module.i_mul(uint, group_y, depth)?;
+    Ok(Some(module.i_add(uint, base, local_y)?))
 }

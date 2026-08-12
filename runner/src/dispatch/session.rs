@@ -182,13 +182,22 @@ impl Session<'_> {
     ///
     /// [`Error::NoPipeline`] if the session has been torn down, otherwise as [`Gpu::run`].
     pub fn dispatch(&mut self, workgroups: u32, iterations: u32) -> Result<Duration, Error> {
+        self.dispatch_grid(super::Grid::linear(workgroups), iterations)
+    }
+
+    /// The same, over both axes.
+    ///
+    /// # Errors
+    ///
+    /// As [`Session::dispatch`].
+    pub fn dispatch_grid(&mut self, grid: super::Grid, iterations: u32) -> Result<Duration, Error> {
         let Some(pipeline) = self.pipeline.as_ref() else {
             return Err(Error::NoPipeline);
         };
 
         // SAFETY: the pipeline and its buffers are alive for as long as `self` is, and this waits
         // on a fence before returning.
-        unsafe { self.gpu.dispatch(pipeline, workgroups, iterations.max(1)) }
+        unsafe { self.gpu.dispatch(pipeline, grid, iterations.max(1)) }
     }
 }
 

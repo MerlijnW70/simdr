@@ -17,11 +17,13 @@
 //! ```
 //!
 //! `access` has the reads and writes, and the address arithmetic that decides where each element
-//! lives; `binding` has the interface every kernel starts from; `shared` has workgroup memory and
-//! the barrier. All three are private — what they add appears as methods on [`Kernel`].
+//! lives; `plane` has the same thing on two axes; `binding` has the interface every kernel starts
+//! from; `shared` has workgroup memory and the barrier; `scatter` has the writes whose address
+//! comes from the data. All five are private — what they add appears as methods on [`Kernel`].
 
 mod access;
 mod binding;
+mod plane;
 mod scatter;
 mod shared;
 
@@ -36,19 +38,53 @@ pub struct Shape {
     /// The device's subgroup width. See `decisions/DR-0002` for why this is not discoverable
     /// later.
     pub subgroup: u32,
-    /// Invocations per workgroup.
+    /// Invocations per workgroup along x.
+    ///
+    /// For a grid this is the workgroup's *width*: `workgroup × rows` invocations in all.
     pub workgroup: u32,
+    /// Invocations per workgroup along y, and `None` for a kernel with no second axis at all.
+    ///
+    /// `Some(1)` and `None` emit the same `LocalSize`, and they are not the same shape: the first
+    /// says the dispatch has a y dimension and one invocation row per workgroup, the second says
+    /// there is no y and a row index would be meaningless. Only the first admits
+    /// [`Kernel::load_row`].
+    pub rows: Option<u32>,
     /// How many storage buffers to bind, in descriptor set 0 at bindings `0..buffers`.
     pub buffers: u32,
 }
 
 impl Shape {
     /// A kernel over `buffers` storage buffers, `workgroup` invocations at a time.
+    ///
+    /// One axis: every address is a single index and the dispatch's y and z are 1.
     #[must_use]
     pub const fn new(subgroup: u32, workgroup: u32, buffers: u32) -> Self {
         Self {
             subgroup,
             workgroup,
+            rows: None,
+            buffers,
+        }
+    }
+
+    /// The same, with a second axis: `workgroup × rows` invocations per group.
+    ///
+    /// A grid kernel addresses `(row, column)` rather than a single index — see
+    /// [`Kernel::load_row`]. `rows` may be 1, and that is the common case: one invocation row per
+    /// workgroup and one workgroup per image row.
+    ///
+    /// **`workgroup` is what the subgroups are cut from.** SPIR-V numbers a workgroup's
+    /// invocations x-fastest, so subgroups fill along x first; a `workgroup` that is a multiple of
+    /// the subgroup width keeps each subgroup inside one row, and one that is not lets a subgroup
+    /// straddle two. Nothing here refuses that, because the same is true of a one-axis kernel
+    /// whose `workgroup` is not a multiple of the width — but on a grid it silently makes a
+    /// row-wise reduction sum parts of two rows.
+    #[must_use]
+    pub const fn grid(subgroup: u32, workgroup: u32, rows: u32, buffers: u32) -> Self {
+        Self {
+            subgroup,
+            workgroup,
+            rows: Some(rows),
             buffers,
         }
     }
@@ -66,6 +102,9 @@ pub struct Kernel<T: Element> {
     /// This invocation's position within its workgroup, and which workgroup that is.
     local: Id,
     group: Id,
+    /// This invocation's row in the whole dispatch, for a grid kernel, and `None` for a linear
+    /// one — where there is no second axis to have a position on.
+    row: Option<Id>,
     marker: core::marker::PhantomData<T>,
 }
 
@@ -86,6 +125,7 @@ impl<T: Element> Kernel<T> {
             buffers: parts.buffers,
             local: parts.local,
             group: parts.group,
+            row: parts.row,
             marker: core::marker::PhantomData,
         })
     }
@@ -157,6 +197,11 @@ impl<T: Element> Kernel<T> {
     /// This invocation's index within its workgroup, and which workgroup that is.
     pub(super) const fn position(&self) -> (Id, Id) {
         (self.local, self.group)
+    }
+
+    /// This invocation's row, or `None` for a kernel with no second axis.
+    pub(super) const fn row_index(&self) -> Option<Id> {
+        self.row
     }
 
     /// The variable bound at `index`.

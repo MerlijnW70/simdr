@@ -52,6 +52,25 @@ pub enum LaneError {
         /// How many buffers were asked for.
         buffers: u32,
     },
+    /// A grid kernel whose second axis holds no invocations.
+    ///
+    /// Apart from [`LaneError::BadShape`] because a workgroup of `columns × 0` is not a workgroup
+    /// with no invocations in it — it is a caller who wrote the wrong one of two numbers, and
+    /// saying which one is the whole value of the message.
+    BadRows {
+        /// What was passed to [`crate::kernel::Shape::grid`].
+        rows: u32,
+    },
+    /// A two-dimensional access on a kernel that has only one axis.
+    ///
+    /// [`crate::kernel::Shape::new`] builds a kernel whose address is a single index, and there is
+    /// no row to compute one from. [`crate::kernel::Shape::grid`] builds one that has.
+    NotAGrid,
+    /// A row pitch of zero, which would put every row at the same address.
+    ///
+    /// Refused rather than treated as one row: a kernel that stacks every row on top of the first
+    /// validates, runs, and returns whichever row happened to be written last.
+    BadPitch,
     /// The operation has no form for how this vector sits on the subgroup.
     ///
     /// A clustered *scan*, for instance: SPIR-V's clustered form is a reduce, so scanning a
@@ -115,6 +134,18 @@ impl fmt::Display for LaneError {
                 f,
                 "a kernel of {workgroup} invocations over {buffers} buffers describes nothing"
             ),
+            Self::BadRows { rows } => write!(
+                f,
+                "a grid {rows} rows deep has no invocations on its second axis"
+            ),
+            Self::NotAGrid => write!(
+                f,
+                "this kernel has one axis and no rows; Shape::grid builds one that has"
+            ),
+            Self::BadPitch => write!(
+                f,
+                "a row pitch of 0 would stack every row on the address of the first"
+            ),
             Self::NoSuchForm { operation, because } => {
                 write!(f, "{operation} has no form here: {because}")
             }
@@ -141,36 +172,51 @@ mod tests {
 
     #[test]
     fn every_variant_says_something_a_reader_can_act_on() {
+        // Each case pairs an error with the one detail a reader needs out of it. The pairing is
+        // the test: this used to assert only that the message held *a* digit somewhere, which any
+        // wrong number satisfies as well as the right one.
         let cases = [
-            LaneError::BadWidth { width: 24 },
-            LaneError::NoMapping {
-                lanes: 12,
-                width: 32,
-            },
-            LaneError::TooManyStrips {
-                strips: 16,
-                limit: 8,
-            },
-            LaneError::NoSuchBuffer { index: 2, bound: 2 },
-            LaneError::BadShape {
-                workgroup: 0,
-                buffers: 2,
-            },
-            LaneError::NoSuchForm {
-                operation: "prefix_sum",
-                because: "there is no clustered scan",
-            },
-            LaneError::NoOpenBlock { arm: "then" },
+            (LaneError::BadWidth { width: 24 }, "24"),
+            (
+                LaneError::NoMapping {
+                    lanes: 12,
+                    width: 32,
+                },
+                "12",
+            ),
+            (
+                LaneError::TooManyStrips {
+                    strips: 16,
+                    limit: 8,
+                },
+                "16",
+            ),
+            (LaneError::NoSuchBuffer { index: 2, bound: 2 }, "buffer 2"),
+            (
+                LaneError::BadShape {
+                    workgroup: 0,
+                    buffers: 2,
+                },
+                "0 invocations",
+            ),
+            (LaneError::BadRows { rows: 0 }, "0 rows"),
+            (LaneError::NotAGrid, "Shape::grid"),
+            (LaneError::BadPitch, "pitch of 0"),
+            (
+                LaneError::NoSuchForm {
+                    operation: "prefix_sum",
+                    because: "there is no clustered scan",
+                },
+                "clustered scan",
+            ),
+            (LaneError::NoOpenBlock { arm: "then" }, "then"),
         ];
 
-        for case in cases {
+        for (case, expected) in cases {
             let message = case.to_string();
-            assert!(!message.is_empty());
             assert!(
-                message.chars().any(char::is_numeric)
-                    || message.contains("scan")
-                    || message.contains("then"),
-                "a message with no specifics is not worth printing: {message}"
+                message.contains(expected),
+                "{case:?} printed {message:?}, which never says {expected:?}"
             );
         }
     }

@@ -1172,3 +1172,69 @@ Two things worth carrying:
 `Simd<u32, N>` is still one `u32` per lane; `OpSDot` reads each of those `u32`s as four bytes. The
 packing is a property of the *instruction's operands*, and the two readings of the same buffer —
 `Simd<i8, N>` arithmetic and a packed dot product — coexist without either knowing about the other.
+
+
+## A second axis costs nothing, and the thing next to it in the table costs 2× — 2026-08-12
+
+Kernels can address `(row, column)` now: `simdr::kernel::Shape::grid`, `Kernel::load_row`, and a
+`runner::Grid` that dispatches along y as well as x. `decisions/DR-0006` records why there is no
+third axis.
+
+The question worth asking was what the extra arithmetic costs. A grid address is
+`row * pitch + column` where a linear one is just the column, so every access pays one multiply and
+one add more. `runner/examples/plane.rs` runs the same elementwise kernel five ways over the same
+elements, and the answer is **nothing**:
+
+| | one axis | two axes |
+| --- | --- | --- |
+| RTX 4080, 131 072 invocations, workgroup 32 | 3.38 µs | 3.38 µs |
+| RTX 4080, 131 072 invocations, workgroup 256 | 1.66 µs | 1.67 µs |
+| integrated Radeon, 262 144 invocations, workgroup 64 | 42.99 µs | 42.92 µs |
+| integrated Radeon, 262 144 invocations, workgroup 512 | 48.00 µs | 46.71 µs |
+
+Lavapipe runs it too and its timings move by more between repeats than any of these differences, so
+it is not in the table. A number that cannot separate the two cases is not evidence about them.
+
+### The first version of the benchmark said 2×, and was measuring occupancy
+
+The first table compared a one-axis kernel of `width` invocations per workgroup against a grid
+**eight rows deep**, and the grid came out at 2×. It would have been written up as "the second axis
+is faster", which is absurd on its face — an extra multiply does not make a kernel quicker — and
+that is the only reason it got a second look.
+
+A grid `rows` deep has `width * rows` invocations per workgroup. So the comparison moved the
+address *and* the occupancy at once, and the occupancy was all of it. The example is a two-by-two
+now: down a column is the address, across a row is the workgroup size.
+
+**The habit this is the second instance of.** `notes/FINDINGS.md` already carries a measurement
+that was wrong by eight because a probe allocated two buffers per call. Both were one variable
+moving that nobody had listed. The check that caught both was the same: the number was better than
+the mechanism could explain.
+
+### And the thing it was confounded with is a real finding about `WORKGROUP_SIZE`
+
+Eight subgroups per workgroup instead of one, at 131 072 invocations:
+
+| | workgroup of one subgroup | workgroup of eight | |
+| --- | --- | --- | --- |
+| RTX 4080 | 3.38 µs | 1.66 µs | **2.04× faster** |
+| integrated Radeon | 42.99 µs | 48.00 µs | 1.12× *slower* |
+
+**It goes opposite ways on the two devices.** So there is no constant to change: `WORKGROUP_SIZE`
+is 64 across `runner`, and 64 is one subgroup on the Radeon, two on the 4080 and eight on lavapipe.
+A device-dependent number would have to come from the device, and nothing here measures it at
+startup.
+
+What this does say is that the workgroup size is worth more than most of what has been optimised
+here, and that it has never been chosen — it has been 64 since the first kernel. It is on
+`notes/NEXT.md` as a question rather than as an answer, because one elementwise kernel on two
+devices is not enough to pick a number.
+
+### What the address arithmetic gained on the way past
+
+Hoisting the row out of the strip loop showed that the *column* had never been hoisted either:
+`Kernel::address` recomputed `group * workgroup * strips` once per strip, so a four-strip load
+emitted four identical multiplies. Every driver folds those back into one, which is exactly why
+nothing had caught it — the answer was right and the module said something the arithmetic does not.
+
+It is one per access now, and `src/kernel/access.rs` has the test. Nothing measurable changed.

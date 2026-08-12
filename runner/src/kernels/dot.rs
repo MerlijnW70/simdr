@@ -36,7 +36,7 @@ fn packed_dot_at<const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneError>
 ///
 /// # Errors
 ///
-/// As [`packed_dot_at`].
+/// As `packed_dot_at`.
 fn unpacked_dot_at<const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
     let mut kernel = Kernel::<U32>::new(shape(subgroup))?;
     let packed = kernel.load::<LANES>(0)?;
@@ -80,33 +80,33 @@ fn square_of_byte<const LANES: u32>(
     lanes.mul(component, component)
 }
 
-/// [`packed_dot_at`] over a vector as wide as this device's subgroup.
+/// `packed_dot_at` over a vector as wide as this device's subgroup.
 ///
 /// # Errors
 ///
-/// As [`packed_dot_at`].
+/// As `packed_dot_at`.
 pub fn packed_dot(subgroup: u32) -> Result<Vec<u32>, LaneError> {
     whole_subgroup!(subgroup, packed_dot_at)
 }
 
-/// [`unpacked_dot_at`] over a vector as wide as this device's subgroup.
+/// `unpacked_dot_at` over a vector as wide as this device's subgroup.
 ///
 /// # Errors
 ///
-/// As [`packed_dot_at`].
+/// As `packed_dot_at`.
 pub fn unpacked_dot(subgroup: u32) -> Result<Vec<u32>, LaneError> {
     whole_subgroup!(subgroup, unpacked_dot_at)
 }
 
 /// `times` dot products accumulated into one running total, saturating.
 ///
-/// The arithmetic-bound shape. [`packed_dot_at`] does one dot product per element loaded, so on a
+/// The arithmetic-bound shape. `packed_dot_at` does one dot product per element loaded, so on a
 /// device with bandwidth to spare it measures the load rather than the instruction; this does
 /// `times` of them per load, so the arithmetic is what is left.
 ///
 /// The operand is salted with the iteration number — `packed + i` — because otherwise every
 /// iteration is the same expression and a driver is free to compute it once. The salt costs one
-/// add per iteration and [`repeated_unpacked_at`] pays exactly the same one.
+/// add per iteration and `repeated_unpacked_at` pays exactly the same one.
 ///
 /// # Errors
 ///
@@ -136,7 +136,7 @@ fn repeated_packed_at<const LANES: u32>(subgroup: u32, times: u32) -> Result<Vec
 ///
 /// # Errors
 ///
-/// As [`repeated_packed_at`].
+/// As `repeated_packed_at`.
 fn repeated_unpacked_at<const LANES: u32>(
     subgroup: u32,
     times: u32,
@@ -170,20 +170,20 @@ fn repeated_unpacked_at<const LANES: u32>(
     kernel.finish()
 }
 
-/// [`repeated_packed_at`] over a vector as wide as this device's subgroup.
+/// `repeated_packed_at` over a vector as wide as this device's subgroup.
 ///
 /// # Errors
 ///
-/// As [`repeated_packed_at`].
+/// As `repeated_packed_at`.
 pub fn repeated_packed_dot(subgroup: u32, times: u32) -> Result<Vec<u32>, LaneError> {
     whole_subgroup!(subgroup, repeated_packed_at, times)
 }
 
-/// [`repeated_unpacked_at`] over a vector as wide as this device's subgroup.
+/// `repeated_unpacked_at` over a vector as wide as this device's subgroup.
 ///
 /// # Errors
 ///
-/// As [`repeated_packed_at`].
+/// As `repeated_packed_at`.
 pub fn repeated_unpacked_dot(subgroup: u32, times: u32) -> Result<Vec<u32>, LaneError> {
     whole_subgroup!(subgroup, repeated_unpacked_at, times)
 }
@@ -196,7 +196,7 @@ pub fn repeated_unpacked_dot(subgroup: u32, times: u32) -> Result<Vec<u32>, Lane
 ///
 /// # Errors
 ///
-/// As [`packed_dot_at`].
+/// As `packed_dot_at`.
 fn mixed_dot_at<const LANES: u32>(subgroup: u32, offset: u32) -> Result<Vec<u32>, LaneError> {
     let mut kernel = Kernel::<U32>::new(shape(subgroup))?;
     let signed = kernel.load::<LANES>(0)?;
@@ -211,11 +211,11 @@ fn mixed_dot_at<const LANES: u32>(subgroup: u32, offset: u32) -> Result<Vec<u32>
     kernel.finish()
 }
 
-/// [`mixed_dot_at`] over a vector as wide as this device's subgroup.
+/// `mixed_dot_at` over a vector as wide as this device's subgroup.
 ///
 /// # Errors
 ///
-/// As [`packed_dot_at`].
+/// As `packed_dot_at`.
 pub fn mixed_dot(subgroup: u32, offset: u32) -> Result<Vec<u32>, LaneError> {
     whole_subgroup!(subgroup, mixed_dot_at, offset)
 }

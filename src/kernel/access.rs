@@ -17,6 +17,10 @@
 //! reducing `Simd<f32,128>` into a scalar has two differently shaped buffers and both are laid
 //! out correctly. Sizing them is the caller's job; agreeing with this arithmetic is all that is
 //! required.
+//!
+//! **A grid kernel's address is this one plus a row.** [`super::plane`] computes `row × pitch` and
+//! adds the index below to it, calling the same [`Kernel::run_start`] and [`Kernel::address`]
+//! rather than writing a second arithmetic that would have to keep agreeing with this one.
 
 use super::Kernel;
 use crate::lanes::{Element, LaneError, Vector};
@@ -65,11 +69,12 @@ impl<T: Element> Kernel<T> {
     ) -> Result<Vector<T, LANES>, LaneError> {
         let buffer = self.buffer(index)?;
         let strips = self.strips::<LANES>()?;
+        let base = self.run_start(strips)?;
 
         let element = self.element();
         let mut loaded = Vec::with_capacity(strips);
         for strip in 0..strips {
-            let pointer = self.element_pointer_at(buffer, strip, strips, offset)?;
+            let pointer = self.element_pointer_at(buffer, base, strip, offset)?;
             loaded.push(self.module().load(element, pointer)?);
         }
 
@@ -85,7 +90,8 @@ impl<T: Element> Kernel<T> {
     /// [`LaneError::NoSuchBuffer`] if `index` was not bound.
     pub fn store_scalar(&mut self, index: u32, value: Id) -> Result<(), LaneError> {
         let buffer = self.buffer(index)?;
-        let pointer = self.element_pointer_at(buffer, 0, 1, 0)?;
+        let base = self.run_start(1)?;
+        let pointer = self.element_pointer_at(buffer, base, 0, 0)?;
         Ok(self.module().store(pointer, value)?)
     }
 
@@ -101,9 +107,10 @@ impl<T: Element> Kernel<T> {
     ) -> Result<(), LaneError> {
         let buffer = self.buffer(index)?;
         let strips = value.strip_count();
+        let base = self.run_start(strips)?;
 
         for (strip, &id) in value.strips().iter().enumerate() {
-            let pointer = self.element_pointer_at(buffer, strip, strips, 0)?;
+            let pointer = self.element_pointer_at(buffer, base, strip, 0)?;
             self.module().store(pointer, id)?;
         }
         Ok(())
@@ -129,6 +136,7 @@ impl<T: Element> Kernel<T> {
     ) -> Result<Vector<T, LANES>, LaneError> {
         let buffer = self.buffer(index)?;
         let strips = self.strips::<LANES>()?;
+        let base = self.run_start(strips)?;
 
         let element = self.element();
         let uint = self.uint();
@@ -136,7 +144,7 @@ impl<T: Element> Kernel<T> {
         for strip in 0..strips {
             // The constant part of the address first, then the value on top of it — so a strip's
             // own stride still folds at build time and only the open offset costs an instruction.
-            let at = self.address(strip, strips, 0)?;
+            let at = self.address(base, strip, 0)?;
             let shifted = self.module().i_add(uint, at, offset)?;
 
             let element_pointer = self.element_pointer();
@@ -150,15 +158,15 @@ impl<T: Element> Kernel<T> {
         self.lanes()?.from_strips(&loaded)
     }
 
-    /// A pointer to this invocation's element on `strip` of an access that has `strips` of them.
+    /// A pointer to this invocation's element on `strip` of the run starting at `base`.
     fn element_pointer_at(
         &mut self,
         buffer: Id,
+        base: Id,
         strip: usize,
-        strips: usize,
         offset: u32,
     ) -> Result<Id, LaneError> {
-        let at = self.address(strip, strips, offset)?;
+        let at = self.address(base, strip, offset)?;
         let element_pointer = self.element_pointer();
         let zero = self.zero();
         Ok(self
@@ -166,22 +174,40 @@ impl<T: Element> Kernel<T> {
             .access_chain(element_pointer, buffer, &[zero, at])?)
     }
 
-    /// The element index this invocation touches on `strip`.
+    /// Where this workgroup's run begins: `group × workgroup × strips`.
+    ///
+    /// Hoisted out of [`Kernel::address`] rather than computed inside it, because every strip of
+    /// one access shares it. It was inside, and a four-strip load emitted four identical
+    /// multiplies — which any driver folds back to one, and which made the module say something
+    /// the arithmetic does not.
+    ///
+    /// [`super::plane`] wants it for the same reason, and shares its row the same way.
+    pub(super) fn run_start(&mut self, strips: usize) -> Result<Id, LaneError> {
+        let uint = self.uint();
+        let workgroup = self.shape().workgroup;
+        let (_, group) = self.position();
+
+        // Both factors are invocation counts below `MAX_STRIPS` times a workgroup size, so this
+        // saturates only for a shape no device would accept.
+        let run = self
+            .module()
+            .constant_u32(workgroup.saturating_mul(strips as u32))?;
+        Ok(self.module().i_mul(uint, group, run)?)
+    }
+
+    /// The element index this invocation touches on `strip` of the run starting at `base`.
     ///
     /// With one strip and no offset it collapses to `group × workgroup + local`, the plain global
     /// invocation index. Strip zero skips one addition, which is the common case and one
     /// instruction fewer; `offset` folds into the same addition rather than costing another.
-    fn address(&mut self, strip: usize, strips: usize, offset: u32) -> Result<Id, LaneError> {
+    ///
+    /// [`super::plane`] uses the same expression as its *column*, which is why this is visible
+    /// there: a grid's address is this index within a row, plus the row's own offset. Two
+    /// arithmetics that agreed by being written twice would not stay agreed.
+    pub(super) fn address(&mut self, base: Id, strip: usize, offset: u32) -> Result<Id, LaneError> {
         let uint = self.uint();
         let workgroup = self.shape().workgroup;
-        let (local, group) = self.position();
-
-        // Both factors are invocation counts below `MAX_STRIPS` times a workgroup size, so these
-        // saturate only for a shape no device would accept.
-        let run = self
-            .module()
-            .constant_u32(workgroup.saturating_mul(strips as u32))?;
-        let base = self.module().i_mul(uint, group, run)?;
+        let (local, _) = self.position();
 
         // The strip's stride and the caller's offset are both constants, so they add at build time
         // and cost one instruction between them rather than two.
@@ -225,6 +251,20 @@ mod tests {
             count(&kernel.finish().expect("finished"), op::ACCESS_CHAIN),
             4
         );
+    }
+
+    #[test]
+    fn the_workgroups_own_run_is_multiplied_out_once_per_access() {
+        // It used to be once per *strip*, so a four-strip load emitted four identical multiplies.
+        // Every driver folds those back into one, which is exactly why nothing caught it: the
+        // module said something the arithmetic does not, and the answer was right anyway.
+        let mut kernel = Kernel::<F32>::new(Shape::new(32, 64, 2)).expect("built");
+        let value = kernel.load::<128>(0).expect("loaded");
+        kernel.store(1, value).expect("stored");
+
+        let words = kernel.finish().expect("finished");
+        assert_eq!(count(&words, op::ACCESS_CHAIN), 8, "four strips each way");
+        assert_eq!(count(&words, op::I_MUL), 2, "one per access");
     }
 
     #[test]

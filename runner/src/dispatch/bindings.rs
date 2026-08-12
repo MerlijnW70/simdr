@@ -119,7 +119,7 @@ impl Gpu {
         let pipeline =
             unsafe { Pipeline::new(self, spirv, &bound, &super::Specialization::none()) }?;
 
-        let dispatched = unsafe { self.dispatch(&pipeline, workgroups, 1) };
+        let dispatched = unsafe { self.dispatch(&pipeline, super::Grid::linear(workgroups), 1) };
         unsafe { pipeline.destroy(self) };
         dispatched?;
 
