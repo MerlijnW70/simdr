@@ -220,20 +220,48 @@ The prediction was that the extra multiply and add would be invisible on a memor
 kernel of `subgroup` invocations moved the occupancy at the same time. The example is a two-by-two
 now. `notes/FINDINGS.md` has both halves and `decisions/DR-0006` records why there is no z.
 
-## 1. Choose the workgroup size, rather than having chosen 64 once
+### 12. The workgroup size — **swept, and the constant does not move**
 
-The confound above is a finding in its own right. Eight subgroups per workgroup instead of one is
-**2.04× faster on the RTX 4080 and 1.12× slower on the integrated Radeon**, at 131 072 invocations
-on an elementwise kernel — a larger effect than most of what has been optimised here.
+The confound above was a finding in its own right, and `runner/examples/occupancy.rs` chased it
+down: three kernel shapes across every workgroup size, on all three devices, with the invocation
+count and the total work held fixed.
 
-`WORKGROUP_SIZE` is 64 in `runner/src/kernels/mod.rs` and has been since the first kernel. On the
-three devices here that is eight subgroups, two, and one. Nothing has ever measured it.
+| 262 144 invocations | 1 subgroup | best | at | spread |
+| --- | --- | --- | --- | --- |
+| RTX 4080, memory-bound | 5.35 µs | 2.13 µs | 16 | **2.51×** |
+| RTX 4080, arithmetic-bound | 14.94 µs | 13.32 µs | 16 | 1.12× |
+| integrated Radeon, memory-bound | 40.61 µs | 40.61 µs | **1** | 1.07× |
+| integrated Radeon, arithmetic-bound | 1422 µs | 1422 µs | **1** | 1.29× |
 
-What makes this an open question rather than a change to make: the two devices disagree in
-*direction*, so there is no constant to move it to. It would have to come from the device, and
-`Gpu::limits()` reports `maxComputeWorkGroupInvocations` already — what it does not report is which
-multiple of the subgroup width this particular kernel wants. The honest first step is a sweep, over
-more than one kernel shape, before anything is wired to it.
+**64 is optimal on the Radeon and 1.54× off on the 4080**, and the two want opposite things — so
+there is no better constant. `Gpu::limits()` reports `maxComputeWorkGroupInvocations` now, the
+`occupancy` kernels take the size as an argument, and `notes/FINDINGS.md` says which sizes are
+worth trying. Wiring a heuristic to three data points would be inventing a device model.
+
+It is also **not an occupancy effect in general**: the arithmetic-bound kernel moves 1.12× where
+the memory-bound one moves 2.51×, so whatever the larger workgroup buys, it buys in the load path.
+
+**And the arithmetic row was folded away twice before it was arithmetic.** `x × f + s` composes
+into a closed form and the driver found it; `min(_, u32::MAX)` is the identity and was deleted, so
+the fold came back. Both were caught by running the loop at 64 iterations and at 512 and seeing the
+number not move. `notes/FINDINGS.md` has it under the heading that names it.
+
+## 1. The reduction chain copies the whole buffer between passes
+
+`Gpu::replay` copies `bytes` from destination back to source after every fold, and `bytes` is the
+*original* buffer's size for all of them. A 15-fold reduction over 2²⁰ elements copies 4 MB fifteen
+times, and after the first fold all but 2¹⁹ of those elements are ones nobody will read again.
+
+The hypothesis is that this is most of what `Reducer::sum` still costs at large sizes — it is 5.0×
+faster than `Gpu::sum` over 8 192 elements and only 1.6× over 2²⁰, and a per-call setup saving does
+not explain a gap that *shrinks* with size. Copying that grows with size does.
+
+The copy length is known at every step: the chain already knows how many elements each fold leaves.
+So this is arithmetic rather than architecture, and the measurement to beat is in
+`runner/examples/reducer.rs`.
+
+**What would refute it:** the copy being a negligible share of a 1.9 ms reduction, in which case
+the 1.6× is the arithmetic and there is nothing here. Time the copies before shortening them.
 
 ---
 

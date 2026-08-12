@@ -116,12 +116,12 @@ pub fn histogram_incrementing(
 pub fn claim_slots(subgroup: u32) -> Result<Vec<u32>, LaneError> {
     let mut kernel = Kernel::<U32>::new(shape(subgroup))?;
 
-    // Unsigned, and it matters less than it looks: `OpIAdd` is sign-agnostic and these values are
-    // small, so a signed type here would compute the same answer. What it would *not* do is reuse
-    // the `u32` the kernel already interned — it would declare a second 32-bit integer type, and
-    // the module would carry two types that mean the same thing with an index of one and a
-    // constant of the other. The test below is what says so.
-    let uint = kernel.module().type_int(32, false)?;
+    // The kernel's own index type. Asking the module for `type_int(32, false)` returned the same
+    // id — the module interns types — and asking for a *signed* one would have returned a second
+    // 32-bit integer type that computes the same answers, because `OpIAdd` is sign-agnostic. So
+    // the sign was a decision written down twice where only one copy could matter, which is
+    // exactly what `Kernel::index_type` exists to stop. The test below still says so.
+    let uint = kernel.index_type();
     let counter = kernel.module().constant_u32(0)?;
     let one = kernel.module().constant_u32(1)?;
 

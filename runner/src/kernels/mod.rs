@@ -17,6 +17,7 @@ pub mod dot;
 pub mod extended;
 pub mod narrow;
 pub mod network;
+pub mod occupancy;
 pub mod plane;
 pub mod reduce;
 pub mod scatter;
@@ -27,10 +28,13 @@ pub use control::{
     any_above, branch_in_loop, branch_only, loop_in_branch, rolled_counter_sum, rolled_doubling,
     scale_if_any_above, sum_or_max,
 };
-pub use dot::{mixed_dot, packed_dot, repeated_packed_dot, repeated_unpacked_dot, unpacked_dot};
+pub use dot::{
+    byte_component, mixed_dot, packed_dot, repeated_packed_dot, repeated_unpacked_dot, unpacked_dot,
+};
 pub use extended::{clamped, fused_square, larger, magnitude, root, smaller};
 pub use narrow::{narrow_add, narrow_clamp, narrow_sum, narrow_sum_whole};
 pub use network::{Layer, clipped_dot, clipped_dot_split, unclipped_dot};
+pub use occupancy::{sized_lane_sum, sized_repeated_scale};
 pub use plane::{flat_scale, row_bias, row_index, row_scale, row_sum};
 pub use reduce::{
     FOLD_HALF_SPEC_ID, butterfly_pair_sum, butterfly_tree_sum, dot_product, dot_product_whole,
@@ -47,6 +51,12 @@ use simdr::kernel::{Kernel, Shape};
 use simdr::lanes::LaneError;
 
 /// How many invocations each kernel here runs per workgroup.
+///
+/// **Chosen once, and measured much later.** On the three devices this runs on, 64 invocations is
+/// eight subgroups, two, or one — so it is not the same quantity on any two of them.
+/// `runner/examples/occupancy.rs` sweeps it, and `notes/FINDINGS.md` records what the sweep says:
+/// the best size differs by device *and* by kernel shape, so there is no better constant to move
+/// this to. [`occupancy`] holds the kernels that take it as an argument instead.
 pub const WORKGROUP_SIZE: u32 = 64;
 
 /// Build a kernel whose vector has to be exactly as wide as the subgroup.

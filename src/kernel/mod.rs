@@ -168,6 +168,23 @@ impl<T: Element> Kernel<T> {
         self.local
     }
 
+    /// The type this kernel's addresses are computed in — a 32-bit *unsigned* integer.
+    ///
+    /// What a caller building an offset needs. [`Kernel::load_offset_by`] and
+    /// [`Kernel::element_pointer_to`] both take an [`Id`] and both add it to an address, so the
+    /// value has to be of this type; a caller that asks the module for one itself is
+    /// reconstructing a decision this kernel already made, and can reconstruct it differently.
+    ///
+    /// It came from a mutation survivor. `runner/src/kernels/reduce.rs` wrote
+    /// `module().type_int(32, false)` and flipping that `false` changed nothing observable —
+    /// `OpIAdd` is sign-agnostic, so a signed spec constant computes the same address. The sign was
+    /// untestable because it was never load-bearing, and the honest fix is not a test for it but
+    /// not writing it down twice.
+    #[must_use]
+    pub const fn index_type(&self) -> Id {
+        self.uint
+    }
+
     /// Close `main` and hand back the finished module.
     ///
     /// # Errors

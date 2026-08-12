@@ -101,7 +101,11 @@ pub fn fold_halves_open(subgroup: u32) -> Result<Vec<u32>, LaneError> {
     use simdr::lanes::F32;
 
     let mut kernel = Kernel::<F32>::new(shape(subgroup))?;
-    let element = kernel.module().type_int(32, false)?;
+    // The kernel's own index type, not one built here: the offset is added to an address, so it
+    // has to be whatever the addresses are. This used to be `type_int(32, false)` and the `false`
+    // was not load-bearing — `OpIAdd` is sign-agnostic — which is a decision written down twice
+    // where only one copy could ever matter.
+    let element = kernel.index_type();
     let half = kernel
         .module()
         .spec_constant(element, 0, FOLD_HALF_SPEC_ID)?;

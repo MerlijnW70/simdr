@@ -60,12 +60,20 @@ fn unpacked_dot_at<const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneErro
     kernel.finish()
 }
 
-/// One packed byte, sign-extended and squared.
+/// One packed byte, sign-extended into a whole `i32`.
 ///
 /// Shift it to the top of the word and arithmetic-shift it back: the 24 bits above become copies
 /// of its sign. A mask would extract the same bits and read every negative byte as a number
 /// between 128 and 255 — which is the mistake `OpSDot` exists partly to make unwriteable.
-fn square_of_byte<const LANES: u32>(
+///
+/// **The byte index is the part worth testing.** `24 - byte × 8` is the only place the four
+/// positions are told apart, and every kernel below sums the squares of all four — which is
+/// symmetric, so a *permutation* of the positions computes the same answer. A mutation of the
+/// minus to a plus gives shift counts of 32, 40 and 48; SPIR-V leaves a shift at or past the
+/// operand's width undefined, this device masks it to five bits, and the result was byte 0, 3, 2, 1
+/// squared and summed — the same number, from the wrong bytes. It survived because nothing here
+/// could see a single position on its own. [`byte_component`] is what can.
+fn signed_byte<const LANES: u32>(
     lanes: &mut simdr::lanes::Lanes<'_>,
     packed: Vector<U32, LANES>,
     byte: u32,
@@ -75,9 +83,43 @@ fn square_of_byte<const LANES: u32>(
 
     let raised = lanes.shift_left(packed, up)?;
     let signed = lanes.reinterpret_unsigned(raised)?;
-    let component = lanes.shift_right_arithmetic(signed, down)?;
+    lanes.shift_right_arithmetic(signed, down)
+}
 
+/// The same byte, squared.
+fn square_of_byte<const LANES: u32>(
+    lanes: &mut simdr::lanes::Lanes<'_>,
+    packed: Vector<U32, LANES>,
+    byte: u32,
+) -> Result<Vector<I32, LANES>, LaneError> {
+    let component = signed_byte::<LANES>(lanes, packed, byte)?;
     lanes.mul(component, component)
+}
+
+/// `out[i] = signed_bytes(in[i])[byte]` — one packed byte on its own, sign and all.
+///
+/// The discriminator the summing kernels cannot be. Every other kernel here folds all four
+/// positions together with an operation that does not care which is which; this one names a
+/// position and writes what it found, so a shift amount that lands on the wrong byte is a wrong
+/// answer rather than the same answer by a different route.
+///
+/// # Errors
+///
+/// [`LaneError`] if the module cannot be built.
+pub fn byte_component(subgroup: u32, byte: u32) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup!(subgroup, byte_component_at, byte)
+}
+
+fn byte_component_at<const LANES: u32>(subgroup: u32, byte: u32) -> Result<Vec<u32>, LaneError> {
+    let mut kernel = Kernel::<U32>::new(shape(subgroup))?;
+    let packed = kernel.load::<LANES>(0)?;
+    let component = {
+        let mut lanes = kernel.lanes()?;
+        let signed = signed_byte::<LANES>(&mut lanes, packed, byte)?;
+        lanes.reinterpret(signed)?
+    };
+    kernel.store(1, component)?;
+    kernel.finish()
 }
 
 /// `packed_dot_at` over a vector as wide as this device's subgroup.

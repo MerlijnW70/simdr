@@ -135,7 +135,7 @@ did not.
 
 | Layer | What it is | What it caught |
 | --- | --- | --- |
-| **Unit tests** | 320 in the emitter, decoding what was emitted; 571 across the workspace | Everything cheap |
+| **Unit tests** | 320 in the emitter, decoding what was emitted; 576 across the workspace | Everything cheap |
 | **`spirv-val`** | Khronos' validator, at `--target-env vulkan1.1` | `OpLoopMerge` in the wrong position — a unit test asserted "merge before branch" and passed while the comparison sat between them |
 | **Execution** | Real dispatches on a real GPU, against CPU references | A missing staging write: every computing kernel returned garbage and the empty-kernel test still passed |
 | **Other devices** | The same suite at 64 lanes and at 8, as well as at 32 | Ten tests that had conflated "32 lanes" with "the subgroup", four of which could not build at all because a vote has no clustered form. Then, at 8: a fuzzer generating shuffles that leave the subgroup, and three tests assuming uninitialised device memory is zero |
@@ -183,6 +183,26 @@ inferred from the fact that it produced a lot of agreements:
 
 Each had to be said separately, because each was invisible from the others.
 
+### A scoped run is not the gate
+
+The gate is normally run with `NOHA_ONLY` naming the files a piece of work touched. Running it one
+file at a time afterwards turned up **two survivors the batched runs over the same files had
+scored 100%**. Both were real:
+
+- `24 - byte * 8` → `24 + byte * 8` in the written-out dot product. The shift counts become 32, 40
+  and 48; SPIR-V leaves a shift past the operand width undefined, this device masks it to five
+  bits, and the kernel read bytes 0, 3, 2, 1 — a *permutation*. Every test summed the squares of
+  all four, and a sum does not care about order, so two GPU kernels and a host reference agreed
+  exactly on the wrong bytes. **An operation that folds N things symmetrically cannot test how the
+  N were chosen.**
+- `type_int(32, false)` → `true`, in two kernels that built their own index type. Equivalent —
+  `OpIAdd` is sign-agnostic. Deleted rather than tested: `Kernel::index_type()` hands back the type
+  the kernel already decided on, and there is no longer a sign to get wrong.
+
+And a limit worth knowing: some files generate **no mutants at all**. `runner/src/kernels/plane.rs`
+is straight-line module construction with no comparison, boolean or branch, so the gate has nothing
+to change and scores it 100% on an empty set. Device tests are what cover those.
+
 ### A survivor is only a finding if it reproduces
 
 Survivors were chased down one at a time on 2026-08-12, each applied by hand before being believed.
@@ -213,7 +233,10 @@ current set of callers has an expiry date and does not say when.**
 
 ### The paperwork is checked too
 
-`tests/integrity.rs` compares the mutation tool's source list against the tree in both directions,
+`tests/integrity.rs` reads `noha.yaml` — which is in the repository, and for three sittings was
+not: a *global* gitignore excluded it, which is invisible from inside a working tree where the file
+is present and `git status` is clean. The check ran here and could not have run from a clone. It
+compares the mutation tool's source list against the tree in both directions,
 holds the list of files deliberately *not* mutated with a reason for each, checks that each of
 those still contains the `unsafe` that excused it, and extracts every `Thing::member` written in
 backticks in `decisions/` and fails when the source no longer defines it. All of it because
@@ -258,6 +281,7 @@ cargo run --release --example specialize -p runner # emitting a module against b
 cargo run --release --example reducer   -p runner  # a reduction that keeps its pipelines
 cargo run --release --example dot       -p runner  # OpSDot against the eleven instructions it replaces
 cargo run --release --example plane     -p runner  # what a second dispatch axis costs, against what it was confounded with
+cargo run --release --example occupancy -p runner  # how many subgroups a workgroup should hold, swept
 ```
 
 To run any of it against a different device:

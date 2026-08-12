@@ -88,6 +88,60 @@ fn one_instruction_agrees_with_the_four_it_replaces() {
 }
 
 #[test]
+fn each_byte_position_is_the_one_it_says_it_is() {
+    // Every other test here folds all four positions together with a sum, which does not care
+    // which byte is which — so a shift that lands on the wrong byte gives the right total. That is
+    // not hypothetical: `24 - byte * 8` mutated to `24 + byte * 8` produces shift counts of 32, 40
+    // and 48, this device masks them to 0, 8 and 16, and the result is bytes 0, 3, 2, 1 squared and
+    // summed. The same number, from the wrong bytes, and nothing here could see it.
+    //
+    // So this reads one position at a time and compares against `signed_bytes`, which is the host
+    // function the corpus was packed with.
+    let Some(gpu) = device("dot-positions") else {
+        return;
+    };
+    if !supported(&gpu, "dot-positions") {
+        return;
+    }
+    let width = gpu.limits().subgroup_size;
+
+    // A corpus whose four bytes are all different in every word, so no two positions can be
+    // confused for each other by luck.
+    let input: Vec<u32> = (0..count())
+        .map(|index| {
+            let base = index as i32;
+            pack([
+                (base % 61) - 30,
+                (base % 47) + 40,
+                -((base % 53) + 1),
+                (base % 29) - 100,
+            ])
+        })
+        .collect();
+
+    for byte in 0..4_u32 {
+        let output = gpu
+            .run_u32(
+                &kernels::byte_component(width, byte).expect("built"),
+                &input,
+                1,
+            )
+            .expect("dispatched");
+
+        let expected: Vec<u32> = input
+            .iter()
+            .map(|word| signed_bytes(*word)[byte as usize] as u32)
+            .collect();
+
+        assert_eq!(
+            output.get(..count()),
+            Some(expected.as_slice()),
+            "byte {byte} is not the byte the kernel read"
+        );
+    }
+}
+
+#[test]
 fn the_negatives_are_where_it_matters() {
     // A sum of squares is positive whatever the signs, so the test above would pass against a
     // kernel that read every byte as unsigned. This one puts a negative and a positive byte of the

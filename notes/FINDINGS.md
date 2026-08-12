@@ -1226,9 +1226,13 @@ A device-dependent number would have to come from the device, and nothing here m
 startup.
 
 What this does say is that the workgroup size is worth more than most of what has been optimised
-here, and that it has never been chosen — it has been 64 since the first kernel. It is on
-`notes/NEXT.md` as a question rather than as an answer, because one elementwise kernel on two
-devices is not enough to pick a number.
+here, and that it has never been chosen — it has been 64 since the first kernel. One elementwise
+kernel on two devices is not enough to pick a number.
+
+> Swept properly the same day, over three kernel shapes and three devices — see **The workgroup
+> size is worth 2.5×, or nothing** below. The answer is that the constant does not move, and the
+> reason is stronger than "not enough data": the two devices want opposite things, and within one
+> device it depends on whether the kernel is memory-bound.
 
 ### What the address arithmetic gained on the way past
 
@@ -1238,3 +1242,152 @@ emitted four identical multiplies. Every driver folds those back into one, which
 nothing had caught it — the answer was right and the module said something the arithmetic does not.
 
 It is one per access now, and `src/kernel/access.rs` has the test. Nothing measurable changed.
+
+## The workgroup size is worth 2.5×, or nothing, and which one is not portable — 2026-08-12
+
+`kernels::WORKGROUP_SIZE` has been 64 since the first kernel in this project and was never
+measured. The item before this one turned up a 2× hiding behind it, so `runner/examples/occupancy.rs`
+sweeps it: every column holds the invocation count, the element type, the lane mapping and the
+total work fixed, and varies only how many subgroups share a workgroup.
+
+`Gpu::limits()` reports `maxComputeWorkGroupInvocations` now, because a sweep needs to know where
+to stop and asking for more fails at pipeline creation with no useful message.
+
+### 262 144 invocations, best size per row
+
+| device | shape | 1 subgroup | best | at | spread |
+| --- | --- | --- | --- | --- | --- |
+| RTX 4080 (width 32, ceiling 32 subgroups) | memory-bound | 5.35 µs | 2.13 µs | 16 | **2.51×** |
+| | arithmetic-bound | 14.94 µs | 13.32 µs | 16 | 1.12× |
+| | subgroup reduction | 5.34 µs | 2.14 µs | 8 | 2.49× |
+| integrated Radeon (width 64, ceiling 16) | memory-bound | 40.61 µs | 40.61 µs | **1** | 1.07× |
+| | arithmetic-bound | 1422 µs | 1422 µs | **1** | 1.29×, all of it at 16 |
+| | subgroup reduction | 45.77 µs | 43.40 µs | 16 | 1.06× |
+| lavapipe (width 8, on the CPU) | all three | — | — | — | no trend above the noise |
+
+Four things fall out of it, and only the first was expected:
+
+- **It is worth 2.5× on the 4080 and nothing on the Radeon.** The discrete part wants many
+  subgroups per workgroup; the integrated part is already at its best with one, and the current
+  constant of 64 *is* one subgroup there. So 64 is optimal on one device and 1.54× off on the other.
+- **It is a memory-system effect, not an occupancy effect in general.** The arithmetic-bound kernel
+  moves 1.12× across the whole range on the 4080 while the memory-bound one moves 2.51×. Whatever
+  the larger workgroup is buying, it is buying it in the load path.
+- **The largest size is never the best.** 32 subgroups is worse than 16 on the 4080 (2.13 to 2.48)
+  and 16 is worse than 8 on the Radeon (1422 to 1828, 28%). There is a peak, and running to the
+  device's ceiling walks past it.
+- **Lavapipe has no trend at all.** Its repeats move by more than the differences between its
+  columns, which is the honest reading of a CPU implementation: there is no occupancy to tune.
+
+### So the constant does not move
+
+The two devices want opposite things, and within one device the answer depends on whether the
+kernel is memory-bound. There is no number to change 64 to.
+
+What there is: `kernels::occupancy` holds kernels that take the size as an argument, `Gpu::limits()`
+reports the ceiling, and this table says which sizes are worth trying. Wiring a heuristic to it
+would need a device model this project does not have and cannot get from three data points.
+
+### The arithmetic row was folded away twice before it was arithmetic
+
+It first came out **identical to the elementwise row**, to the hundredth of a microsecond, on both
+sizes and all six columns. A kernel doing 512 multiply-adds per element does not cost what one
+multiply costs, so the loop was not running.
+
+- **Attempt one** was `x * f + s` per iteration. That is affine, and `times` iterations of it
+  compose into a single `x * f^times + c` — which the driver folded, correctly.
+- **Attempt two** added `min(_, u32::MAX)` to break the affinity. `min(x, u32::MAX)` is the
+  identity function, so it was deleted and the fold came back. This one is worse than the first
+  mistake, because the fix was written *specifically* to prevent the fold and looked like it had.
+
+What caught both was the same one-line check: run the loop at 64 iterations and at 512 and see
+whether the number moves. It did not — 2.14 µs either way — and 2.14 µs was also what the
+elementwise kernel cost.
+
+The limit is `0x00FF_FFFF` now, low enough that it clamps within a few iterations, and 512
+iterations cost 13.3 µs against 2.1. `runner/tests/occupancy.rs` asserts that the clamp actually
+fires, because the property the benchmark depends on is not the answer — it is that the answer took
+work to get.
+
+**The general shape:** a benchmark whose result is *too good* is reporting that the work did not
+happen. This is the third time in this file — a probe that measured allocation as pipeline
+creation, a grid comparison that measured occupancy as addressing, and now a loop that was not
+there. Each was caught by the number being better than the mechanism could explain.
+
+## A test that could never have run from a clone — 2026-08-12
+
+`tests/integrity.rs` reads `noha.yaml`, compares its source list against the tree in both
+directions, and fails when either has something the other does not. It has caught every file added
+in the last three sittings.
+
+It could not have run from a fresh clone, because `noha.yaml` was not in the repository. This
+machine's **global** gitignore excludes `noha.yaml` and `.noha/`, and a global exclusion is
+invisible from inside the project: `git status` is clean, the file is there, the test passes.
+
+The repository's own `.gitignore` had been asserting the opposite for months —
+
+> `.noha/baseline.tsv` and `.noha/tia.tsv` are *not* ignored
+
+— and neither had ever been committed. A comment describing an intention that the tool it describes
+was silently overruling.
+
+The fix is three lines: `!noha.yaml` and `!.noha/` in the repository's own `.gitignore`, which
+outranks `core.excludesFile`, with the scratch directories re-excluded after. `!.noha/` has to come
+first, because git will not re-include a file whose parent directory is excluded.
+
+**The shape worth carrying:** a check that reads a file it does not own has a second failure mode
+beside being wrong — being absent. `git ls-files <the file>` is the whole test, and nothing in a
+working tree distinguishes "tracked" from "present" without asking.
+
+## Two survivors the batched gate never reported — 2026-08-12
+
+The mutation gate is normally run scoped: `NOHA_ONLY` naming the files a piece of work touched.
+Running it one file at a time turned up two survivors that the batched runs over the same files had
+reported as 100%. Both are real, and neither is a wrong answer in the shipped code.
+
+### `24 - byte * 8` → `24 + byte * 8`, in the written-out dot product
+
+`square_of_byte` extracted packed byte `b` by shifting left `24 - 8b` and arithmetic-shifting right
+24. The mutant gives shift counts of 24, **32, 40 and 48**.
+
+SPIR-V leaves a shift at or past the operand's width undefined. This device masks the count to five
+bits, so 32, 40 and 48 became 0, 8 and 16 — and the kernel read bytes **0, 3, 2, 1**. Every kernel
+using the helper sums the *squares* of all four, and a sum is symmetric, so the answer was
+identical. Two GPU kernels and a host reference all agreed, exactly, on the wrong bytes.
+
+Nothing here could have caught it: not the twin-kernel comparison, not the host reference, not the
+negative-byte discriminator. The fold that made the two spellings comparable is the same fold that
+made the positions invisible.
+
+`kernels::dot::byte_component` is the fix — a kernel that writes one position on its own, checked
+against `simdr::lanes::signed_bytes` for each of the four. It kills the mutant, and it is the only
+thing in the suite that says which byte is which.
+
+**The general shape:** an operation that folds N things symmetrically cannot test how the N were
+chosen. That is worth looking for wherever a test's reference is a sum, a maximum, or a product.
+
+### `type_int(32, false)` → `type_int(32, true)`, twice
+
+Two kernels built their own 32-bit integer type for a value they were about to add to an address.
+Flipping the sign changes nothing observable: `OpIAdd` is sign-agnostic, and two's-complement
+addition is the same either way. An equivalent mutant.
+
+This project's habit with those is to delete the thing rather than write a test that cannot exist,
+and the deletion here is `Kernel::index_type()` — the kernel already decided what its addresses are
+computed in, and both call sites were reconstructing that decision from scratch. A caller that
+reconstructs it differently (a 64-bit integer, say) gets a validation failure rather than a wrong
+number, so the sign was never load-bearing — which is exactly why no test could reach it.
+
+Both files use the accessor now. `runner/src/kernels/scatter.rs` went from one mutant to none, and
+its existing test — that the module declares exactly one integer type — still guards the property
+the accessor now makes true by construction.
+
+### And a limit of the gate worth knowing
+
+`runner/src/kernels/plane.rs` and `runner/src/kernels/occupancy.rs` generate **zero** mutants. They
+are straight-line module construction with no comparison, no boolean literal and no branch, and the
+gate has nothing to mutate. A 100% score over them is not evidence of anything.
+
+What covers them is `runner/tests/plane.rs` and `runner/tests/occupancy.rs`, on a device, against
+host references. Worth saying out loud: a green mutation score is a statement about the mutants
+that were generated, and for some files that set is empty.

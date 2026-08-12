@@ -139,6 +139,14 @@ fn probe() -> ExitCode {
     println!();
     println!("  subgroup width      {}", limits.subgroup_size);
     println!(
+        "  workgroup ceiling   {} invocations, so up to {} subgroups in one",
+        limits.max_workgroup_invocations,
+        limits
+            .max_workgroup_invocations
+            .checked_div(limits.subgroup_size)
+            .unwrap_or(0)
+    );
+    println!(
         "  timestamp period    {}",
         if limits.timestamp_period_ns > 0.0 {
             format!("{:.1} ns per tick", limits.timestamp_period_ns)

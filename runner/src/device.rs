@@ -38,6 +38,12 @@ pub struct Limits {
     pub subgroup_ballot: bool,
     /// What the device offers for elements narrower than 32 bits.
     pub narrow: Narrow,
+    /// The most invocations one workgroup may hold — `maxComputeWorkGroupInvocations`.
+    ///
+    /// The ceiling on `Shape::workgroup`, and on `workgroup × rows` for a grid. Asking for more
+    /// fails at pipeline creation with no useful message, which is why it is reported here rather
+    /// than discovered: a caller sweeping workgroup sizes needs to know where to stop.
+    pub max_workgroup_invocations: u32,
     /// Nanoseconds per timestamp tick, or zero when the device cannot be asked.
     ///
     /// Non-zero means [`crate::Gpu::time`] reports what the *device* spent rather than what the
@@ -365,6 +371,7 @@ unsafe fn describe(
         subgroup_shuffle: has(vk::SubgroupFeatureFlags::SHUFFLE),
         subgroup_ballot: has(vk::SubgroupFeatureFlags::BALLOT),
         narrow,
+        max_workgroup_invocations: core.limits.max_compute_work_group_invocations,
         timestamp_period_ns,
     }
 }

@@ -1,0 +1,460 @@
+# noha-core TIA kill-matrix — a CACHE with ZERO authority over any verdict.
+# It only remembers which test killed each mutant last time, so a run can try that one
+# focused test FIRST; a missing, stale, or wrong row costs one fallback to the full kill
+# set, never a classification. Safe to delete at any time.
+# Columns: file<TAB>op<TAB>killer_test<TAB>text (text LAST — a trimmed source line can
+# itself contain tabs, so it must absorb the remainder).
+cli/src/main.rs	&&→||	dispatch::specialization::tests::each_value_lands_at_its_own_offset	.any(|kind| kind.host_visible && kind.host_coherent && kind.host_cached);
+cli/src/main.rs	>→<	dispatch::specialization::tests::each_value_lands_at_its_own_offset	if limits.timestamp_period_ns > 0.0 {
+cli/src/main.rs	>→>=	fuzz::interpret::tests::a_butterfly_pairs_within_the_subgroup_and_not_across_it	if limits.timestamp_period_ns > 0.0 {
+cli/src/main.rs	cond→!(cond)	fuzz::interpret::tests::a_butterfly_pairs_within_the_subgroup_and_not_across_it	if cached {
+cli/src/main.rs	cond→!(cond)	fuzz::interpret::tests::a_butterfly_pairs_within_the_subgroup_and_not_across_it	if limits.timestamp_period_ns > 0.0 {
+cli/src/main.rs	cond→!(cond)	fuzz::interpret::tests::a_butterfly_pairs_within_the_subgroup_and_not_across_it	if names.is_empty() {
+cli/src/main.rs	cond→!(cond)	dispatch::specialization::tests::each_value_lands_at_its_own_offset	if usable.is_empty() {
+cli/src/main.rs	cond→false	fuzz::interpret::tests::a_butterfly_pairs_within_the_subgroup_and_not_across_it	if cached {
+cli/src/main.rs	cond→false	fuzz::interpret::tests::a_butterfly_pairs_within_the_subgroup_and_not_across_it	if limits.timestamp_period_ns > 0.0 {
+cli/src/main.rs	cond→false	fuzz::interpret::tests::a_butterfly_pairs_within_the_subgroup_and_not_across_it	if names.is_empty() {
+cli/src/main.rs	cond→false	dispatch::specialization::tests::each_value_lands_at_its_own_offset	if usable.is_empty() {
+cli/src/main.rs	cond→true	dispatch::specialization::tests::each_value_lands_at_its_own_offset	if cached {
+cli/src/main.rs	cond→true	dispatch::specialization::tests::each_value_lands_at_its_own_offset	if limits.timestamp_period_ns > 0.0 {
+cli/src/main.rs	cond→true	fuzz::interpret::tests::a_butterfly_pairs_within_the_subgroup_and_not_across_it	if names.is_empty() {
+cli/src/main.rs	cond→true	fuzz::interpret::tests::a_butterfly_pairs_within_the_subgroup_and_not_across_it	if usable.is_empty() {
+runner/src/dispatch/grid.rs	*→/	dispatch::grid::tests::the_total_is_counted_in_something_wider_than_either_axis	(self.x as u64) * (self.y as u64)
+runner/src/dispatch/grid.rs	==→!=	dispatch::grid::tests::a_grid_that_needs_no_flooring_passes_its_counts_through	if self.x == 0 { 1 } else { self.x },
+runner/src/dispatch/grid.rs	==→!=	dispatch::grid::tests::a_grid_that_needs_no_flooring_passes_its_counts_through	if self.y == 0 { 1 } else { self.y },
+runner/src/dispatch/run.rs	<<→>>	generated_narrow_programs_agree_with_the_cpu_reference	[low, high] => u32::from(*low) | (u32::from(*high) << 16),
+runner/src/dispatch/run.rs	>>→<<	generated_narrow_programs_agree_with_the_cpu_reference	.flat_map(|word| [*word as u16, (word >> 16) as u16])
+runner/src/dispatch/specialization.rs	*→/	dispatch::specialization::tests::each_value_lands_at_its_own_offset	.offset((index * size_of::<u32>()) as u32)
+runner/src/dispatch/specialization.rs	==→!=	dispatch::specialization::tests::each_value_lands_at_its_own_offset	.find(|(existing, _)| *existing == spec_id)
+runner/src/fuzz/domain.rs	&→|	fuzz::domain::tests::a_narrow_domain_never_produces_a_value_outside_its_width	value & self.mask()
+runner/src/fuzz/domain.rs	*→/	a_strip_mined_dot_product_folds_four_products_per_lane	(f32::from_bits(left) * f32::from_bits(right)).to_bits()
+runner/src/fuzz/domain.rs	*→/	generated_float_programs_agree_with_the_cpu_reference	Self::Float => (f32::from_bits(left) * f32::from_bits(right)).to_bits(),
+runner/src/fuzz/domain.rs	+→-	fuzz::domain::tests::a_float_sum_within_the_ceiling_is_exact_whatever_the_order	(f32::from_bits(left) + f32::from_bits(right)).to_bits()
+runner/src/fuzz/domain.rs	+→-	fuzz::domain::tests::a_float_sum_within_the_ceiling_is_exact_whatever_the_order	Self::Float => (f32::from_bits(left) + f32::from_bits(right)).to_bits(),
+runner/src/fuzz/domain.rs	-→+	fuzz::domain::tests::a_narrow_domain_never_produces_a_value_outside_its_width	bits => (1 << bits) - 1,
+runner/src/fuzz/domain.rs	-→+	fuzz::domain::tests::an_unsigned_domain_refuses_to_hold_a_negative	let spare = 32 - self.bits();
+runner/src/fuzz/domain.rs	-→+	fuzz::domain::tests::the_extremes_bracket_everything_the_generator_can_produce	self.truncate(1 << (self.bits() - 1))
+runner/src/fuzz/domain.rs	<<→>>	fuzz::domain::tests::an_unsigned_domain_refuses_to_hold_a_negative	((value << spare) as i32) >> spare
+runner/src/fuzz/domain.rs	<<→>>	fuzz::domain::tests::a_narrow_domain_never_produces_a_value_outside_its_width	bits => (1 << bits) - 1,
+runner/src/fuzz/domain.rs	<<→>>	fuzz::domain::tests::the_extremes_bracket_everything_the_generator_can_produce	self.truncate(1 << (self.bits() - 1))
+runner/src/fuzz/domain.rs	>>→<<	fuzz::domain::tests::an_unsigned_domain_refuses_to_hold_a_negative	((value << spare) as i32) >> spare
+runner/src/fuzz/domain.rs	>>→<<	fuzz::domain::tests::a_narrow_domain_never_produces_a_value_outside_its_width	self.mask() >> 1
+runner/src/fuzz/domain.rs	>→<	fuzz::domain::tests::comparison_is_ordered_for_floats	Self::Float => f32::from_bits(left) > f32::from_bits(right),
+runner/src/fuzz/domain.rs	>→<	fuzz::domain::tests::min_and_max_are_each_others_opposite	Self::Signed => (left as i32) > (right as i32),
+runner/src/fuzz/domain.rs	>→<	fuzz::domain::tests::min_and_max_are_each_others_opposite	Self::Unsigned => left > right,
+runner/src/fuzz/domain.rs	>→<	fuzz::domain::tests::comparison_is_ordered_for_floats	return f32::from_bits(left) > f32::from_bits(right);
+runner/src/fuzz/domain.rs	>→<	fuzz::domain::tests::min_and_max_are_each_others_opposite_in_every_domain	self.signed_value(left) > self.signed_value(right)
+runner/src/fuzz/domain.rs	>→<	fuzz::domain::tests::min_and_max_are_each_others_opposite_in_every_domain	self.truncate(left) > self.truncate(right)
+runner/src/fuzz/domain.rs	>→>=	generated_float_programs_agree_with_the_cpu_reference	Self::Float => f32::from_bits(left) > f32::from_bits(right),
+runner/src/fuzz/domain.rs	>→>=	module::layout::tests::the_version_word_places_major_and_minor_in_their_own_bytes	Self::Signed => (left as i32) > (right as i32),
+runner/src/fuzz/domain.rs	>→>=	module::constants::tests::constants_of_different_types_are_distinct_even_with_the_same_bits	Self::Unsigned => left > right,
+runner/src/fuzz/domain.rs	>→>=	generated_float_programs_agree_with_the_cpu_reference	return f32::from_bits(left) > f32::from_bits(right);
+runner/src/fuzz/domain.rs	>→>=	generated_narrow_programs_agree_with_the_cpu_reference	self.signed_value(left) > self.signed_value(right)
+runner/src/fuzz/domain.rs	>→>=	a_strip_mined_dot_product_folds_four_products_per_lane	self.truncate(left) > self.truncate(right)
+runner/src/fuzz/domain.rs	cond→!(cond)	fuzz::domain::tests::min_and_max_are_each_others_opposite	if self.greater(left, right) {
+runner/src/fuzz/domain.rs	cond→!(cond)	fuzz::interpret::tests::elementwise_steps_run_before_the_reduction	if self.is_float() {
+runner/src/fuzz/domain.rs	cond→!(cond)	fuzz::domain::tests::the_extremes_bracket_everything_the_generator_can_produce	if self.is_signed() {
+runner/src/fuzz/domain.rs	cond→false	generated_float_programs_agree_with_the_cpu_reference	if self.greater(left, right) {
+runner/src/fuzz/domain.rs	cond→false	generated_float_programs_agree_with_the_cpu_reference	if self.is_float() {
+runner/src/fuzz/domain.rs	cond→false	fuzz::domain::tests::the_extremes_bracket_everything_the_generator_can_produce	if self.is_signed() {
+runner/src/fuzz/domain.rs	cond→true	fuzz::domain::tests::min_and_max_are_each_others_opposite	if self.greater(left, right) {
+runner/src/fuzz/domain.rs	cond→true	fuzz::interpret::tests::elementwise_steps_run_before_the_reduction	if self.is_float() {
+runner/src/fuzz/domain.rs	cond→true	fuzz::domain::tests::the_extremes_bracket_everything_the_generator_can_produce	if self.is_signed() {
+runner/src/fuzz/generate.rs	%→*	fuzz::generate::tests::a_clustered_program_never_asks_for_a_shuffle_or_a_vote	self.next() % bound
+runner/src/fuzz/generate.rs	+→-	fuzz::generate::tests::a_clustered_program_never_asks_for_a_shuffle_or_a_vote	1 => Op::MulConstant(1 + rng.below(3) as u32),
+runner/src/fuzz/generate.rs	+→-	module::constants::tests::constants_of_different_types_are_distinct_even_with_the_same_bits	ELEMENTWISE + 3
+runner/src/fuzz/generate.rs	+→-	fuzz::generate::tests::a_clustered_program_never_asks_for_a_shuffle_or_a_vote	Kind::MulConstant => Op::MulConstant(1 + rng.below(3) as u32),
+runner/src/fuzz/generate.rs	+→-	fuzz::generate::tests::a_clustered_program_never_asks_for_a_shuffle_or_a_vote	add: 1 + rng.below(8) as u32,
+runner/src/fuzz/generate.rs	+→-	fuzz::generate::coverage::every_generated_program_dispatches_and_reads_something	groups: 1 + rng.below(2) as u32,
+runner/src/fuzz/generate.rs	+→-	fuzz::generate::tests::a_clustered_program_never_asks_for_a_shuffle_or_a_vote	let steps_wanted = 1 + rng.below(4) as usize;
+runner/src/fuzz/generate.rs	+→-	fuzz::generate::tests::the_generator_reaches_every_operation_it_knows	n if n == ELEMENTWISE + 1 => Op::AddIfAnyAbove {
+runner/src/fuzz/generate.rs	<<→>>	module::constants::tests::constants_of_different_types_are_distinct_even_with_the_same_bits	n if n == ELEMENTWISE => Op::ButterflyAdd(1 << rng.below(4)),
+runner/src/fuzz/generate.rs	<→<=	fuzz::generate::coverage::a_whole_subgroup_program_does_ask_for_shuffles_and_votes	let clustered = lanes < subgroup;
+runner/src/fuzz/generate.rs	<→>	fuzz::generate::tests::a_clustered_program_never_asks_for_a_shuffle_or_a_vote	let clustered = lanes < subgroup;
+runner/src/fuzz/generate.rs	==→!=	kernel::tests::a_clustered_kernel_does_declare_it	n if n == ELEMENTWISE + 1 => Op::AddIfAnyAbove {
+runner/src/fuzz/generate.rs	==→!=	fuzz::generate::tests::the_generator_reaches_every_operation_it_knows	n if n == ELEMENTWISE => Op::ButterflyAdd(1 << rng.below(4)),
+runner/src/fuzz/generate.rs	>>→<<	fuzz::generate::coverage::the_generator_is_splitmix64	z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+runner/src/fuzz/generate.rs	>>→<<	the_fuzzer_notices_when_the_answer_is_wrong	z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+runner/src/fuzz/generate.rs	>>→<<	fuzz::generate::coverage::the_generator_is_splitmix64	z ^ (z >> 31)
+runner/src/fuzz/generate.rs	^→&	fuzz::generate::coverage::the_generator_is_splitmix64	z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+runner/src/fuzz/generate.rs	^→&	fuzz::generate::coverage::the_generator_is_splitmix64	z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+runner/src/fuzz/generate.rs	^→&	fuzz::generate::coverage::the_random_stream_spreads_across_its_range	z ^ (z >> 31)
+runner/src/fuzz/generate/vocabulary.rs	+→-	fuzz::generate::tests::a_clustered_program_never_asks_for_a_shuffle_or_a_vote	Kind::MulConstant => Op::MulConstant(1 + rng.below(3) as u32),
+runner/src/fuzz/generate/vocabulary.rs	+→-	fuzz::generate::tests::a_clustered_program_never_asks_for_a_shuffle_or_a_vote	add: 1 + rng.below(8) as u32,
+runner/src/fuzz/generate/vocabulary.rs	+→-	fuzz::generate::coverage::a_generated_clamp_never_has_its_bounds_crossed	high: low.saturating_add(1 + rng.below(u64::from(domain.ceiling())) as u32),
+runner/src/fuzz/generate/vocabulary.rs	<<→>>	fuzz::generate::coverage::the_generator_reaches_every_butterfly_distance	Kind::ButterflyAdd => Op::ButterflyAdd(1 << rng.below(4)),
+runner/src/fuzz/generate/vocabulary.rs	<<→>>	fuzz::generate::coverage::the_generator_reaches_every_butterfly_distance	Kind::ButterflyAdd => Op::ButterflyAdd(1 << rng.below(distances(subgroup))),
+runner/src/fuzz/generate/vocabulary.rs	<→<=	a_strip_mined_dot_product_folds_four_products_per_lane	} else if usable < 4 {
+runner/src/fuzz/generate/vocabulary.rs	<→>	fuzz::generate::coverage::no_generated_butterfly_reaches_outside_its_subgroup	} else if usable < 4 {
+runner/src/fuzz/generate/vocabulary.rs	==→!=	fuzz::generate::coverage::the_generator_reaches_every_butterfly_distance	if usable == 0 {
+runner/src/fuzz/generate/vocabulary.rs	cond→!(cond)	fuzz::generate::coverage::the_generator_reaches_every_butterfly_distance	if usable == 0 {
+runner/src/fuzz/generate/vocabulary.rs	cond→!(cond)	fuzz::generate::coverage::no_generated_butterfly_reaches_outside_its_subgroup	} else if usable < 4 {
+runner/src/fuzz/generate/vocabulary.rs	cond→false	fuzz::generate::vocabulary::tests::a_subgroup_of_one_still_leaves_something_to_draw_from	if usable == 0 {
+runner/src/fuzz/generate/vocabulary.rs	cond→false	fuzz::generate::coverage::no_generated_butterfly_reaches_outside_its_subgroup	} else if usable < 4 {
+runner/src/fuzz/generate/vocabulary.rs	cond→true	fuzz::generate::coverage::the_generator_reaches_every_butterfly_distance	if usable == 0 {
+runner/src/fuzz/generate/vocabulary.rs	cond→true	fuzz::generate::coverage::the_generator_reaches_every_butterfly_distance	} else if usable < 4 {
+runner/src/fuzz/interpret.rs	%→*	fuzz::interpret::tests::a_butterfly_pairs_within_the_subgroup_and_not_across_it	let local = invocation % program.workgroup as usize;
+runner/src/fuzz/interpret.rs	*→/	generated_float_programs_agree_with_the_cpu_reference	.skip(subgroup * width)
+runner/src/fuzz/interpret.rs	*→/	fuzz::interpret::tests::a_strip_mined_sum_covers_both_of_each_lanes_elements	let at = base + local + strip * program.workgroup as usize;
+runner/src/fuzz/interpret.rs	*→/	generated_float_programs_agree_with_the_cpu_reference	let base = group * program.workgroup as usize * strips;
+runner/src/fuzz/interpret.rs	*→/	fuzz::interpret::tests::a_butterfly_pairs_within_the_subgroup_and_not_across_it	let first = invocation / group_size * group_size;
+runner/src/fuzz/interpret.rs	*→/	fuzz::interpret::tests::a_butterfly_pairs_within_the_subgroup_and_not_across_it	let invocations = (program.groups * program.workgroup) as usize;
+runner/src/fuzz/interpret.rs	+→-	fuzz::interpret::tests::a_strip_mined_sum_covers_both_of_each_lanes_elements	let at = base + local + strip * program.workgroup as usize;
+runner/src/fuzz/interpret.rs	+→-	fuzz::interpret::tests::a_butterfly_pairs_within_the_subgroup_and_not_across_it	let members = first..(first + group_size).min(invocations);
+runner/src/fuzz/interpret.rs	/→*	generated_float_programs_agree_with_the_cpu_reference	(program.lanes / program.subgroup) as usize
+runner/src/fuzz/interpret.rs	/→*	fuzz::interpret::tests::elementwise_steps_run_before_the_reduction	(program.lanes / program.subgroup.max(1)).max(1) as usize
+runner/src/fuzz/interpret.rs	/→*	generated_float_programs_agree_with_the_cpu_reference	if voted.get(invocation / width).copied().unwrap_or(false) {
+runner/src/fuzz/interpret.rs	/→*	fuzz::interpret::tests::a_butterfly_pairs_within_the_subgroup_and_not_across_it	let first = invocation / group_size * group_size;
+runner/src/fuzz/interpret.rs	/→*	fuzz::interpret::tests::a_butterfly_pairs_within_the_subgroup_and_not_across_it	let group = invocation / program.workgroup as usize;
+runner/src/fuzz/interpret.rs	<→<=	module::constants::tests::constants_of_different_types_are_distinct_even_with_the_same_bits	let group_size = if program.lanes < program.subgroup {
+runner/src/fuzz/interpret.rs	<→>	module::layout::tests::the_version_word_places_major_and_minor_in_their_own_bytes	let group_size = if program.lanes < program.subgroup {
+runner/src/fuzz/interpret.rs	>→<	module::layout::tests::the_version_word_places_major_and_minor_in_their_own_bytes	if program.lanes > program.subgroup {
+runner/src/fuzz/interpret.rs	>→>=	module::layout::tests::the_version_word_places_major_and_minor_in_their_own_bytes	if program.lanes > program.subgroup {
+runner/src/fuzz/interpret.rs	cond→!(cond)	module::constants::tests::constants_of_different_types_are_distinct_even_with_the_same_bits	if program.lanes > program.subgroup {
+runner/src/fuzz/interpret.rs	cond→!(cond)	generated_float_programs_agree_with_the_cpu_reference	if takes_the_sum {
+runner/src/fuzz/interpret.rs	cond→!(cond)	generated_float_programs_agree_with_the_cpu_reference	if voted.get(invocation / width).copied().unwrap_or(false) {
+runner/src/fuzz/interpret.rs	cond→false	fuzz::interpret::tests::a_strip_mined_sum_covers_both_of_each_lanes_elements	if program.lanes > program.subgroup {
+runner/src/fuzz/interpret.rs	cond→false	generated_float_programs_agree_with_the_cpu_reference	if takes_the_sum {
+runner/src/fuzz/interpret.rs	cond→false	generated_float_programs_agree_with_the_cpu_reference	if voted.get(invocation / width).copied().unwrap_or(false) {
+runner/src/fuzz/interpret.rs	cond→true	fuzz::interpret::tests::a_clustered_sum_covers_only_its_own_cluster	if program.lanes > program.subgroup {
+runner/src/fuzz/interpret.rs	cond→true	generated_float_programs_agree_with_the_cpu_reference	if takes_the_sum {
+runner/src/fuzz/interpret.rs	cond→true	generated_float_programs_agree_with_the_cpu_reference	if voted.get(invocation / width).copied().unwrap_or(false) {
+runner/src/fuzz/interpret.rs	false→true	module::constants::tests::constants_of_different_types_are_distinct_even_with_the_same_bits	if voted.get(invocation / width).copied().unwrap_or(false) {
+runner/src/fuzz/interpret/steps.rs	%→*	fuzz::interpret::tests::a_butterfly_pairs_within_the_subgroup_and_not_across_it	let lane = invocation % width;
+runner/src/fuzz/interpret/steps.rs	*→/	fuzz::interpret::tests::a_uniform_branch_applies_per_subgroup_and_not_per_lane	.skip(subgroup * width)
+runner/src/fuzz/interpret/steps.rs	*→/	fuzz::interpret::tests::a_butterfly_pairs_within_the_subgroup_and_not_across_it	let partner = invocation / width * width + (lane ^ mask as usize);
+runner/src/fuzz/interpret/steps.rs	+→-	module::layout::tests::the_version_word_places_major_and_minor_in_their_own_bytes	fn elementwise(held: &[Vec<u32>], op: impl Fn(u32) -> u32 + Copy) -> Vec<Vec<u32>> {
+runner/src/fuzz/interpret/steps.rs	+→-	fuzz::interpret::tests::a_butterfly_pairs_within_the_subgroup_and_not_across_it	let partner = invocation / width * width + (lane ^ mask as usize);
+runner/src/fuzz/interpret/steps.rs	/→*	fuzz::interpret::tests::a_butterfly_pairs_within_the_subgroup_and_not_across_it	let partner = invocation / width * width + (lane ^ mask as usize);
+runner/src/fuzz/interpret/steps.rs	/→*	fuzz::interpret::tests::a_uniform_branch_applies_per_subgroup_and_not_per_lane	let takes = passed.get(invocation / width).copied().unwrap_or(false);
+runner/src/fuzz/interpret/steps.rs	^→&	fuzz::interpret::tests::a_butterfly_pairs_within_the_subgroup_and_not_across_it	let partner = invocation / width * width + (lane ^ mask as usize);
+runner/src/fuzz/interpret/steps.rs	cond→!(cond)	fuzz::interpret::tests::a_uniform_branch_applies_per_subgroup_and_not_per_lane	if takes {
+runner/src/fuzz/interpret/steps.rs	cond→false	fuzz::interpret::tests::a_uniform_branch_applies_per_subgroup_and_not_per_lane	if takes {
+runner/src/fuzz/interpret/steps.rs	cond→true	fuzz::interpret::tests::a_uniform_branch_applies_per_subgroup_and_not_per_lane	if takes {
+runner/src/fuzz/interpret/steps.rs	false→true	module::layout::tests::the_version_word_places_major_and_minor_in_their_own_bytes	let takes = passed.get(invocation / width).copied().unwrap_or(false);
+runner/src/fuzz/mod.rs	!=→==	fuzz::tests::a_disagreement_reports_the_first_index_that_differs	.position(|(left, right)| left != right)
+runner/src/fuzz/program.rs	*→/	fuzz::program::tests::the_input_length_covers_every_strip	(self.groups * self.workgroup * strips) as usize
+runner/src/fuzz/program.rs	/→*	fuzz::program::tests::the_input_length_covers_every_strip	self.lanes / self.subgroup
+runner/src/fuzz/program.rs	>→<	fuzz::program::tests::the_input_length_covers_every_strip	let strips = if self.lanes > self.subgroup {
+runner/src/fuzz/program.rs	>→>=	kernel::tests::a_clustered_kernel_does_declare_it	let strips = if self.lanes > self.subgroup {
+runner/src/kernels/dot.rs	*→/	one_instruction_agrees_with_the_four_it_replaces	let up = lanes.splat_bits::<U32, LANES>(24 - byte * 8)?;
+runner/src/kernels/dot.rs	-→+	each_byte_position_is_the_one_it_says_it_is	let up = lanes.splat_bits::<U32, LANES>(24 - byte * 8)?;
+runner/src/kernels/reduce.rs	!x→x	a_workgroup_reduction_crosses_between_subgroups	if subgroup == 0 || !workgroup.is_multiple_of(subgroup) {
+runner/src/kernels/reduce.rs	*→/	a_workgroup_reduction_crosses_between_subgroups	let next = kernel.load_shared(shared, index * subgroup)?;
+runner/src/kernels/reduce.rs	/→*	a_workgroup_reduction_crosses_between_subgroups	let subgroups = workgroup / subgroup;
+runner/src/kernels/reduce.rs	<<→>>	an_unrolled_loop_reimplements_the_subgroup_sum_exactly	let partner = lanes.butterfly(held, 1 << step)?;
+runner/src/kernels/reduce.rs	==→!=	a_workgroup_reduction_crosses_between_subgroups	if subgroup == 0 || !workgroup.is_multiple_of(subgroup) {
+runner/src/kernels/reduce.rs	cond→!(cond)	a_workgroup_reduction_crosses_between_subgroups	if subgroup == 0 || !workgroup.is_multiple_of(subgroup) {
+runner/src/kernels/reduce.rs	cond→false	kernels::reduce::tests::a_subgroup_of_zero_is_refused_before_it_divides	if subgroup == 0 || !workgroup.is_multiple_of(subgroup) {
+runner/src/kernels/reduce.rs	cond→true	a_workgroup_reduction_crosses_between_subgroups	if subgroup == 0 || !workgroup.is_multiple_of(subgroup) {
+runner/src/kernels/reduce.rs	false→true	a_strip_mined_dot_product_folds_four_products_per_lane	let element = kernel.module().type_int(32, false)?;
+runner/src/kernels/reduce.rs	||→&&	kernels::reduce::tests::a_subgroup_the_workgroup_does_not_divide_by_is_refused	if subgroup == 0 || !workgroup.is_multiple_of(subgroup) {
+runner/src/kernels/scatter.rs	false→true	kernels::scatter::tests::the_allocator_declares_one_32_bit_integer_type_and_not_two	let uint = kernel.module().type_int(32, false)?;
+runner/src/reduction.rs	!x→x	a_buffer_larger_than_a_workgroup_reduces_to_one_number	if !input.len().is_power_of_two() {
+runner/src/reduction.rs	*→/	a_length_that_cannot_be_halved_is_refused_by_name	let minimum = 2 * WORKGROUP_SIZE as usize;
+runner/src/reduction.rs	+=→-=	reduction::tests::a_buffer_of_two_workgroups_folds_once_and_finishes	folds += 1;
+runner/src/reduction.rs	+→-	reduction::tests::a_buffer_of_two_workgroups_folds_once_and_finishes	folds + 1
+runner/src/reduction.rs	+→-	reduction::tests::a_buffer_of_two_workgroups_folds_once_and_finishes	folds(length).len() + 1
+runner/src/reduction.rs	/=→*=	a_buffer_larger_than_a_workgroup_reduces_to_one_number	half /= 2;
+runner/src/reduction.rs	/=→*=	reduction::tests::a_buffer_of_two_workgroups_folds_once_and_finishes	remaining /= 2;
+runner/src/reduction.rs	/→*	a_buffer_larger_than_a_workgroup_reduces_to_one_number	let mut half = input.len() / 2;
+runner/src/reduction.rs	/→*	reduction::tests::a_buffer_of_two_workgroups_folds_once_and_finishes	let mut half = length / 2;
+runner/src/reduction.rs	/→*	reduction::tests::a_buffer_of_two_workgroups_folds_once_and_finishes	let mut remaining = length / 2;
+runner/src/reduction.rs	/→*	kernel::tests::a_clustered_kernel_does_declare_it	modules.push((words, half as u32 / WORKGROUP_SIZE));
+runner/src/reduction.rs	/→*	reduction::tests::a_buffer_of_two_workgroups_folds_once_and_finishes	workgroups: half / WORKGROUP_SIZE,
+runner/src/reduction.rs	<→<=	a_length_that_cannot_be_halved_is_refused_by_name	if input.len() < minimum {
+runner/src/reduction.rs	<→>	a_buffer_larger_than_a_workgroup_reduces_to_one_number	if input.len() < minimum {
+runner/src/reduction.rs	>=→<=	module::constants::tests::constants_of_different_types_are_distinct_even_with_the_same_bits	while half >= WORKGROUP_SIZE as usize {
+runner/src/reduction.rs	>=→>	a_buffer_larger_than_a_workgroup_reduces_to_one_number	while half >= WORKGROUP_SIZE as usize {
+runner/src/reduction.rs	>=→>	reduction::tests::a_buffer_of_two_workgroups_folds_once_and_finishes	while remaining >= WORKGROUP_SIZE as usize {
+runner/src/reduction.rs	cond→!(cond)	a_buffer_larger_than_a_workgroup_reduces_to_one_number	if !input.len().is_power_of_two() {
+runner/src/reduction.rs	cond→!(cond)	a_buffer_larger_than_a_workgroup_reduces_to_one_number	if input.len() < minimum {
+runner/src/reduction.rs	cond→!(cond)	a_buffer_larger_than_a_workgroup_reduces_to_one_number	while half >= WORKGROUP_SIZE as usize {
+runner/src/reduction.rs	cond→false	a_length_that_cannot_be_halved_is_refused_by_name	if !input.len().is_power_of_two() {
+runner/src/reduction.rs	cond→false	a_length_that_cannot_be_halved_is_refused_by_name	if input.len() < minimum {
+runner/src/reduction.rs	cond→false	a_buffer_larger_than_a_workgroup_reduces_to_one_number	while half >= WORKGROUP_SIZE as usize {
+runner/src/reduction.rs	cond→false	reduction::tests::a_buffer_of_two_workgroups_folds_once_and_finishes	while remaining >= WORKGROUP_SIZE as usize {
+runner/src/reduction.rs	cond→true	a_buffer_larger_than_a_workgroup_reduces_to_one_number	if !input.len().is_power_of_two() {
+runner/src/reduction.rs	cond→true	a_buffer_larger_than_a_workgroup_reduces_to_one_number	if input.len() < minimum {
+runner/src/reduction/mod.rs	!x→x	a_held_reducer_gives_the_same_answer_as_a_fresh_sum	if !input.len().is_power_of_two() {
+runner/src/reduction/mod.rs	*→/	a_length_that_cannot_be_halved_is_refused_by_name	let minimum = 2 * WORKGROUP_SIZE as usize;
+runner/src/reduction/mod.rs	+→-	reduction::tests::a_buffer_of_two_workgroups_folds_once_and_finishes	folds(length).len() + 1
+runner/src/reduction/mod.rs	/=→*=	reduction::tests::a_buffer_of_two_workgroups_folds_once_and_finishes	remaining /= 2;
+runner/src/reduction/mod.rs	/→*	reduction::tests::a_buffer_of_two_workgroups_folds_once_and_finishes	let mut remaining = length / 2;
+runner/src/reduction/mod.rs	/→*	reduction::tests::a_buffer_of_two_workgroups_folds_once_and_finishes	workgroups: half / WORKGROUP_SIZE,
+runner/src/reduction/mod.rs	<→<=	a_length_that_cannot_be_halved_is_refused_by_name	if input.len() < minimum {
+runner/src/reduction/mod.rs	<→>	a_held_reducer_gives_the_same_answer_as_a_fresh_sum	if input.len() < minimum {
+runner/src/reduction/mod.rs	>=→>	reduction::tests::a_buffer_of_two_workgroups_folds_once_and_finishes	while remaining >= WORKGROUP_SIZE as usize {
+runner/src/reduction/mod.rs	cond→!(cond)	a_held_reducer_gives_the_same_answer_as_a_fresh_sum	if !input.len().is_power_of_two() {
+runner/src/reduction/mod.rs	cond→!(cond)	a_held_reducer_gives_the_same_answer_as_a_fresh_sum	if input.len() < minimum {
+runner/src/reduction/mod.rs	cond→false	a_length_that_cannot_be_halved_is_refused_by_name	if !input.len().is_power_of_two() {
+runner/src/reduction/mod.rs	cond→false	a_length_that_cannot_be_halved_is_refused_by_name	if input.len() < minimum {
+runner/src/reduction/mod.rs	cond→false	reduction::tests::a_buffer_of_two_workgroups_folds_once_and_finishes	while remaining >= WORKGROUP_SIZE as usize {
+runner/src/reduction/mod.rs	cond→true	a_held_reducer_gives_the_same_answer_as_a_fresh_sum	if !input.len().is_power_of_two() {
+runner/src/reduction/mod.rs	cond→true	a_held_reducer_gives_the_same_answer_as_a_fresh_sum	if input.len() < minimum {
+runner/src/timing.rs	/→*	timing::tests::a_steady_measurement_is_one_whose_repeats_agree	median: *sorted.get(sorted.len() / 2)?,
+runner/src/timing.rs	/→*	timing::tests::a_steady_measurement_is_one_whose_repeats_agree	self.worst.as_secs_f64() / best
+runner/src/timing.rs	<=→<	timing::tests::a_best_of_zero_reports_a_spread_of_one_rather_than_infinity	if best <= 0.0 {
+runner/src/timing.rs	<=→<	timing::tests::the_boundary_of_steadiness_is_where_it_says_it_is	self.spread() <= 1.2
+runner/src/timing.rs	<=→>=	timing::tests::a_steady_measurement_is_one_whose_repeats_agree	if best <= 0.0 {
+runner/src/timing.rs	<=→>=	timing::tests::a_steady_measurement_is_one_whose_repeats_agree	self.spread() <= 1.2
+runner/src/timing.rs	cond→!(cond)	timing::tests::a_steady_measurement_is_one_whose_repeats_agree	if best <= 0.0 {
+runner/src/timing.rs	cond→!(cond)	timing::tests::a_steady_measurement_is_one_whose_repeats_agree	if samples.is_empty() {
+runner/src/timing.rs	cond→false	timing::tests::a_best_of_zero_reports_a_spread_of_one_rather_than_infinity	if best <= 0.0 {
+runner/src/timing.rs	cond→false	kernel::tests::a_clustered_kernel_does_declare_it	if samples.is_empty() {
+runner/src/timing.rs	cond→true	timing::tests::a_steady_measurement_is_one_whose_repeats_agree	if best <= 0.0 {
+runner/src/timing.rs	cond→true	timing::tests::a_steady_measurement_is_one_whose_repeats_agree	if samples.is_empty() {
+src/decode.rs	&→|	decode::tests::a_stream_of_several_reads_back_in_order	let opcode = (first & 0xffff) as u16;
+src/decode.rs	+→-	decode::tests::an_instruction_reads_back_the_way_it_was_written	self.operands.len() + 1
+src/decode.rs	>>→<<	decode::tests::a_stream_of_several_reads_back_in_order	let count = (first >> 16) as usize;
+src/encode.rs	*→/	encode::tests::a_multibyte_character_is_counted_in_bytes_not_characters	word |= Word::from(byte) << (8 * filled);
+src/encode.rs	+=→-=	encode::tests::a_multibyte_character_is_counted_in_bytes_not_characters	filled += 1;
+src/encode.rs	+→-	encode::tests::a_multibyte_character_is_counted_in_bytes_not_characters	text.len() / 4 + 1
+src/encode.rs	/→*	encode::tests::a_multibyte_character_is_counted_in_bytes_not_characters	text.len() / 4 + 1
+src/encode.rs	<<→>>	decode::tests::a_stream_of_several_reads_back_in_order	out.push((Word::from(count) << 16) | Word::from(opcode));
+src/encode.rs	<<→>>	encode::tests::a_string_packs_its_bytes_low_byte_first	word |= Word::from(byte) << (8 * filled);
+src/encode.rs	==→!=	encode::tests::a_multibyte_character_is_counted_in_bytes_not_characters	if filled == 4 {
+src/encode.rs	cond→!(cond)	encode::tests::a_multibyte_character_is_counted_in_bytes_not_characters	if filled == 4 {
+src/encode.rs	cond→false	encode::tests::a_multibyte_character_is_counted_in_bytes_not_characters	if filled == 4 {
+src/encode.rs	cond→true	encode::tests::a_multibyte_character_is_counted_in_bytes_not_characters	if filled == 4 {
+src/half.rs	!=→==	half::tests::a_value_between_two_subnormals_rounds_to_the_nearer_and_ties_to_even	if round_bit == 1 && (sticky != 0 || (truncated & 1) == 1) {
+src/half.rs	&&→||	half::tests::every_half_survives_a_round_trip_through_f32	if round_bit == 1 && (sticky != 0 || (truncated & 1) == 1) {
+src/half.rs	&→|	half::tests::a_value_between_two_subnormals_rounds_to_the_nearer_and_ties_to_even	if round_bit == 1 && (sticky != 0 || (truncated & 1) == 1) {
+src/half.rs	&→|	a_half_kernel_computes_in_halves_and_not_in_floats	let exponent = ((bits >> 10) & 0x1f) as u32;
+src/half.rs	&→|	a_half_kernel_computes_in_halves_and_not_in_floats	let exponent = ((bits >> 23) & 0xff) as i32;
+src/half.rs	&→|	half::tests::every_half_survives_a_round_trip_through_f32	let fraction = (mantissa << (23 - highest)) & 0x007f_ffff;
+src/half.rs	&→|	a_half_kernel_computes_in_halves_and_not_in_floats	let mantissa = (bits & 0x03ff) as u32;
+src/half.rs	&→|	a_half_kernel_computes_in_halves_and_not_in_floats	let mantissa = bits & 0x007f_ffff;
+src/half.rs	&→|	a_half_kernel_computes_in_halves_and_not_in_floats	let round_bit = (mantissa >> 12) & 1;
+src/half.rs	&→|	half::tests::a_value_between_two_subnormals_rounds_to_the_nearer_and_ties_to_even	let round_bit = (with_implicit >> (shift - 1)) & 1;
+src/half.rs	&→|	a_half_kernel_computes_in_halves_and_not_in_floats	let sign = ((bits & 0x8000) as u32) << 16;
+src/half.rs	&→|	a_half_kernel_computes_in_halves_and_not_in_floats	let sign = ((bits >> 16) & 0x8000) as u16;
+src/half.rs	&→|	a_half_kernel_computes_in_halves_and_not_in_floats	let sticky = mantissa & 0x0fff;
+src/half.rs	&→|	half::tests::a_value_between_two_subnormals_rounds_to_the_nearer_and_ties_to_even	let sticky = with_implicit & ((1 << (shift - 1)) - 1);
+src/half.rs	+→-	a_half_kernel_computes_in_halves_and_not_in_floats	f32::from_bits(sign | ((exponent + 127 - 15) << 23) | (mantissa << 13))
+src/half.rs	+→-	half::tests::every_half_survives_a_round_trip_through_f32	let exponent = 127 - 24 + highest;
+src/half.rs	+→-	a_half_kernel_computes_in_halves_and_not_in_floats	let shifted = exponent - 127 + 15;
+src/half.rs	+→-	half::tests::a_value_between_two_subnormals_rounds_to_the_nearer_and_ties_to_even	return sign | (half + 1);
+src/half.rs	+→-	a_half_kernel_computes_in_halves_and_not_in_floats	return sign | (truncated + 1);
+src/half.rs	-→+	a_half_kernel_computes_in_halves_and_not_in_floats	f32::from_bits(sign | ((exponent + 127 - 15) << 23) | (mantissa << 13))
+src/half.rs	-→+	half::tests::every_half_survives_a_round_trip_through_f32	let exponent = 127 - 24 + highest;
+src/half.rs	-→+	half::tests::every_half_survives_a_round_trip_through_f32	let fraction = (mantissa << (23 - highest)) & 0x007f_ffff;
+src/half.rs	-→+	half::tests::every_half_survives_a_round_trip_through_f32	let highest = 31 - mantissa.leading_zeros();
+src/half.rs	-→+	half::tests::every_half_survives_a_round_trip_through_f32	let round_bit = (with_implicit >> (shift - 1)) & 1;
+src/half.rs	-→+	half::tests::every_half_survives_a_round_trip_through_f32	let shift = (14 - shifted) as u32;
+src/half.rs	-→+	a_half_kernel_computes_in_halves_and_not_in_floats	let shifted = exponent - 127 + 15;
+src/half.rs	-→+	half::tests::a_value_between_two_subnormals_rounds_to_the_nearer_and_ties_to_even	let sticky = with_implicit & ((1 << (shift - 1)) - 1);
+src/half.rs	<<→>>	a_half_kernel_computes_in_halves_and_not_in_floats	f32::from_bits(sign | ((exponent + 127 - 15) << 23) | (mantissa << 13))
+src/half.rs	<<→>>	half::tests::every_half_survives_a_round_trip_through_f32	let fraction = (mantissa << (23 - highest)) & 0x007f_ffff;
+src/half.rs	<<→>>	half::tests::every_half_survives_a_round_trip_through_f32	let sign = ((bits & 0x8000) as u32) << 16;
+src/half.rs	<<→>>	half::tests::every_half_survives_a_round_trip_through_f32	let sticky = with_implicit & ((1 << (shift - 1)) - 1);
+src/half.rs	<<→>>	a_half_kernel_computes_in_halves_and_not_in_floats	let truncated = ((shifted as u16) << 10) | ((mantissa >> 13) as u16);
+src/half.rs	<<→>>	half::tests::every_half_survives_a_round_trip_through_f32	return f32::from_bits(sign | (exponent << 23) | fraction);
+src/half.rs	<<→>>	half::tests::a_nan_stays_a_nan_in_both_directions	return f32::from_bits(sign | 0x7f80_0000 | (mantissa << 13));
+src/half.rs	<=→<	half::tests::every_half_survives_a_round_trip_through_f32	if shifted <= 0 {
+src/half.rs	<=→>=	a_half_kernel_computes_in_halves_and_not_in_floats	if shifted <= 0 {
+src/half.rs	<→<=	half::tests::the_bottom_of_the_subnormal_range_rounds_rather_than_being_cut_off	if shifted < -10 {
+src/half.rs	<→>	half::tests::a_value_too_small_becomes_a_zero_of_the_right_sign	if shifted < -10 {
+src/half.rs	==→!=	a_half_kernel_computes_in_halves_and_not_in_floats	if exponent == 0 {
+src/half.rs	==→!=	a_half_kernel_computes_in_halves_and_not_in_floats	if exponent == 0x1f {
+src/half.rs	==→!=	a_half_kernel_computes_in_halves_and_not_in_floats	if exponent == 0xff {
+src/half.rs	==→!=	half::tests::every_half_survives_a_round_trip_through_f32	if mantissa == 0 {
+src/half.rs	==→!=	half::tests::a_value_between_two_subnormals_rounds_to_the_nearer_and_ties_to_even	if round_bit == 1 && (sticky != 0 || (truncated & 1) == 1) {
+src/half.rs	>=→<=	a_half_kernel_computes_in_halves_and_not_in_floats	if shifted >= 0x1f {
+src/half.rs	>=→>	half::tests::the_first_value_too_large_for_the_format_is_an_infinity_and_not_a_nan	if shifted >= 0x1f {
+src/half.rs	>>→<<	a_half_kernel_computes_in_halves_and_not_in_floats	let exponent = ((bits >> 10) & 0x1f) as u32;
+src/half.rs	>>→<<	a_half_kernel_computes_in_halves_and_not_in_floats	let exponent = ((bits >> 23) & 0xff) as i32;
+src/half.rs	>>→<<	a_half_kernel_computes_in_halves_and_not_in_floats	let round_bit = (mantissa >> 12) & 1;
+src/half.rs	>>→<<	half::tests::a_value_between_two_subnormals_rounds_to_the_nearer_and_ties_to_even	let round_bit = (with_implicit >> (shift - 1)) & 1;
+src/half.rs	>>→<<	half::tests::a_value_too_large_becomes_an_infinity_rather_than_the_largest_half	let sign = ((bits >> 16) & 0x8000) as u16;
+src/half.rs	>>→<<	a_half_kernel_computes_in_halves_and_not_in_floats	let truncated = ((shifted as u16) << 10) | ((mantissa >> 13) as u16);
+src/half.rs	>>→<<	half::tests::every_half_survives_a_round_trip_through_f32	let truncated = with_implicit >> shift;
+src/half.rs	>>→<<	half::tests::a_nan_stays_a_nan_in_both_directions	return sign | 0x7c00 | (((mantissa >> 13) as u16) | 1);
+src/half.rs	cond→!(cond)	a_half_kernel_computes_in_halves_and_not_in_floats	if exponent == 0 {
+src/half.rs	cond→!(cond)	a_half_kernel_computes_in_halves_and_not_in_floats	if exponent == 0x1f {
+src/half.rs	cond→!(cond)	a_half_kernel_computes_in_halves_and_not_in_floats	if exponent == 0xff {
+src/half.rs	cond→!(cond)	half::tests::every_half_survives_a_round_trip_through_f32	if mantissa == 0 {
+src/half.rs	cond→!(cond)	half::tests::every_half_survives_a_round_trip_through_f32	if round_bit == 1 && (sticky != 0 || (truncated & 1) == 1) {
+src/half.rs	cond→!(cond)	half::tests::a_value_too_small_becomes_a_zero_of_the_right_sign	if shifted < -10 {
+src/half.rs	cond→!(cond)	a_half_kernel_computes_in_halves_and_not_in_floats	if shifted <= 0 {
+src/half.rs	cond→!(cond)	a_half_kernel_computes_in_halves_and_not_in_floats	if shifted >= 0x1f {
+src/half.rs	cond→false	half::tests::every_half_survives_a_round_trip_through_f32	if exponent == 0 {
+src/half.rs	cond→false	half::tests::a_nan_stays_a_nan_in_both_directions	if exponent == 0x1f {
+src/half.rs	cond→false	half::tests::a_nan_stays_a_nan_in_both_directions	if exponent == 0xff {
+src/half.rs	cond→false	half::tests::every_half_survives_a_round_trip_through_f32	if mantissa == 0 {
+src/half.rs	cond→false	half::tests::a_value_between_two_subnormals_rounds_to_the_nearer_and_ties_to_even	if round_bit == 1 && (sticky != 0 || (truncated & 1) == 1) {
+src/half.rs	cond→false	half::tests::a_value_too_small_becomes_a_zero_of_the_right_sign	if shifted < -10 {
+src/half.rs	cond→false	half::tests::a_value_too_small_becomes_a_zero_of_the_right_sign	if shifted <= 0 {
+src/half.rs	cond→false	half::tests::a_value_too_large_becomes_an_infinity_rather_than_the_largest_half	if shifted >= 0x1f {
+src/half.rs	cond→true	a_half_kernel_computes_in_halves_and_not_in_floats	if exponent == 0 {
+src/half.rs	cond→true	a_half_kernel_computes_in_halves_and_not_in_floats	if exponent == 0x1f {
+src/half.rs	cond→true	a_half_kernel_computes_in_halves_and_not_in_floats	if exponent == 0xff {
+src/half.rs	cond→true	half::tests::every_half_survives_a_round_trip_through_f32	if mantissa == 0 {
+src/half.rs	cond→true	half::tests::every_half_survives_a_round_trip_through_f32	if round_bit == 1 && (sticky != 0 || (truncated & 1) == 1) {
+src/half.rs	cond→true	half::tests::every_half_survives_a_round_trip_through_f32	if shifted < -10 {
+src/half.rs	cond→true	a_half_kernel_computes_in_halves_and_not_in_floats	if shifted <= 0 {
+src/half.rs	cond→true	a_half_kernel_computes_in_halves_and_not_in_floats	if shifted >= 0x1f {
+src/half.rs	||→&&	half::tests::a_value_between_two_subnormals_rounds_to_the_nearer_and_ties_to_even	if round_bit == 1 && (sticky != 0 || (truncated & 1) == 1) {
+src/kernel/access.rs	==→!=	kernel::access::tests::an_offset_load_folds_into_the_addition_strip_zero_already_had	let within = if shift == 0 {
+src/kernel/binding.rs	==→!=	a_named_row_is_read_instead_of_this_ones	if rows == 1 {
+src/kernel/binding.rs	==→!=	kernel::access::tests::a_buffer_that_was_never_bound_is_refused_by_index	if shape.buffers == 0 || shape.workgroup == 0 {
+src/kernel/binding.rs	==→!=	fuzz::generate::tests::every_generated_program_builds_in_both_domains	if shape.rows == Some(0) {
+src/kernel/binding.rs	cond→!(cond)	a_named_row_is_read_instead_of_this_ones	if rows == 1 {
+src/kernel/binding.rs	cond→!(cond)	kernel::access::tests::a_buffer_that_was_never_bound_is_refused_by_index	if shape.buffers == 0 || shape.workgroup == 0 {
+src/kernel/binding.rs	cond→!(cond)	fuzz::generate::tests::every_generated_program_builds_in_both_domains	if shape.rows == Some(0) {
+src/kernel/binding.rs	cond→false	kernel::plane::tests::a_named_row_is_the_one_multiplied_and_not_this_invocations	if rows == 1 {
+src/kernel/binding.rs	cond→false	kernel::tests::a_shape_with_no_buffers_describes_nothing_and_is_refused	if shape.buffers == 0 || shape.workgroup == 0 {
+src/kernel/binding.rs	cond→false	kernel::plane::tests::a_grid_with_no_rows_in_it_is_refused_by_name	if shape.rows == Some(0) {
+src/kernel/binding.rs	cond→true	a_named_row_is_read_instead_of_this_ones	if rows == 1 {
+src/kernel/binding.rs	cond→true	kernel::access::tests::a_buffer_that_was_never_bound_is_refused_by_index	if shape.buffers == 0 || shape.workgroup == 0 {
+src/kernel/binding.rs	cond→true	fuzz::generate::tests::every_generated_program_builds_in_both_domains	if shape.rows == Some(0) {
+src/kernel/binding.rs	false→true	kernel::tests::the_index_type_is_unsigned_because_the_built_ins_are	let uint = module.type_int(32, false)?;
+src/kernel/binding.rs	||→&&	kernel::tests::a_shape_with_no_buffers_describes_nothing_and_is_refused	if shape.buffers == 0 || shape.workgroup == 0 {
+src/kernel/mod.rs	==→!=	kernel::tests::strip_zero_costs_one_addition_fewer_than_the_rest	let within = if strip == 0 {
+src/kernel/plane.rs	==→!=	a_named_row_is_read_instead_of_this_ones	if pitch == 0 {
+src/kernel/plane.rs	cond→!(cond)	a_named_row_is_read_instead_of_this_ones	if pitch == 0 {
+src/kernel/plane.rs	cond→false	kernel::plane::tests::a_pitch_of_zero_is_refused_rather_than_treated_as_one_row	if pitch == 0 {
+src/kernel/plane.rs	cond→true	a_named_row_is_read_instead_of_this_ones	if pitch == 0 {
+src/kernel/shared.rs	==→!=	kernel::shared::tests::a_shared_array_declares_its_length_as_a_constant_and_not_a_literal	if length == 0 {
+src/kernel/shared.rs	==→!=	kernel::shared::tests::a_shared_array_declares_its_length_as_a_constant_and_not_a_literal	self.length == 0
+src/kernel/shared.rs	>=→<=	kernel::shared::tests::a_store_and_a_load_reach_the_same_variable	if index >= shared.length {
+src/kernel/shared.rs	>=→>	kernel::shared::tests::reading_past_the_end_is_refused_by_index	if index >= shared.length {
+src/kernel/shared.rs	cond→!(cond)	kernel::shared::tests::a_store_and_a_load_reach_the_same_variable	if index >= shared.length {
+src/kernel/shared.rs	cond→!(cond)	kernel::shared::tests::a_shared_array_declares_its_length_as_a_constant_and_not_a_literal	if length == 0 {
+src/kernel/shared.rs	cond→false	kernel::shared::tests::reading_past_the_end_is_refused_by_index	if index >= shared.length {
+src/kernel/shared.rs	cond→false	kernel::shared::tests::a_shared_array_of_nothing_is_refused	if length == 0 {
+src/kernel/shared.rs	cond→true	kernel::shared::tests::a_store_and_a_load_reach_the_same_variable	if index >= shared.length {
+src/kernel/shared.rs	cond→true	kernel::shared::tests::a_shared_array_declares_its_length_as_a_constant_and_not_a_literal	if length == 0 {
+src/lanes/arithmetic.rs	>→<	lanes::arithmetic::tests::a_comparison_yields_bools_rather_than_elements	if ids.len() > super::MAX_STRIPS {
+src/lanes/arithmetic.rs	cond→!(cond)	lanes::arithmetic::tests::a_comparison_yields_bools_rather_than_elements	if ids.len() > super::MAX_STRIPS {
+src/lanes/arithmetic.rs	cond→true	lanes::arithmetic::tests::a_comparison_yields_bools_rather_than_elements	if ids.len() > super::MAX_STRIPS {
+src/lanes/dot.rs	&→|	the_mixed_form_reads_one_operand_signed_and_the_other_not	((packed >> 16) & 0xff) as i32,
+src/lanes/dot.rs	&→|	the_mixed_form_reads_one_operand_signed_and_the_other_not	((packed >> 24) & 0xff) as i32,
+src/lanes/dot.rs	&→|	the_mixed_form_reads_one_operand_signed_and_the_other_not	((packed >> 8) & 0xff) as i32,
+src/lanes/dot.rs	&→|	the_negatives_are_where_it_matters	(bytes[0] as u32 & 0xff)
+src/lanes/dot.rs	&→|	the_mixed_form_reads_one_operand_signed_and_the_other_not	(packed & 0xff) as i32,
+src/lanes/dot.rs	&→|	lanes::dot::tests::packing_and_unpacking_are_each_others_opposite	| ((bytes[1] as u32 & 0xff) << 8)
+src/lanes/dot.rs	&→|	the_negatives_are_where_it_matters	| ((bytes[2] as u32 & 0xff) << 16)
+src/lanes/dot.rs	&→|	the_negatives_are_where_it_matters	| ((bytes[3] as u32 & 0xff) << 24)
+src/lanes/dot.rs	<<→>>	the_negatives_are_where_it_matters	| ((bytes[1] as u32 & 0xff) << 8)
+src/lanes/dot.rs	<<→>>	lanes::dot::tests::packing_and_unpacking_are_each_others_opposite	| ((bytes[2] as u32 & 0xff) << 16)
+src/lanes/dot.rs	<<→>>	lanes::dot::tests::packing_and_unpacking_are_each_others_opposite	| ((bytes[3] as u32 & 0xff) << 24)
+src/lanes/dot.rs	>>→<<	the_mixed_form_reads_one_operand_signed_and_the_other_not	((packed >> 16) & 0xff) as i32,
+src/lanes/dot.rs	>>→<<	a_strip_mined_dot_covers_every_strip	((packed >> 16) as u8) as i8 as i32,
+src/lanes/dot.rs	>>→<<	the_mixed_form_reads_one_operand_signed_and_the_other_not	((packed >> 24) & 0xff) as i32,
+src/lanes/dot.rs	>>→<<	a_strip_mined_dot_covers_every_strip	((packed >> 24) as u8) as i8 as i32,
+src/lanes/dot.rs	>>→<<	the_mixed_form_reads_one_operand_signed_and_the_other_not	((packed >> 8) & 0xff) as i32,
+src/lanes/dot.rs	>>→<<	a_strip_mined_dot_covers_every_strip	((packed >> 8) as u8) as i8 as i32,
+src/lanes/element.rs	false→true	lanes::element::tests::each_element_declares_its_own_type	module.type_int(32, false)
+src/lanes/element.rs	true→false	lanes::element::tests::each_element_declares_its_own_type	module.type_int(32, true)
+src/lanes/loops.rs	==→!=	lanes::loops::tests::a_rolled_loop_declares_its_merge_before_the_branch_that_leaves_it	if times == 0 {
+src/lanes/loops.rs	cond→!(cond)	lanes::loops::tests::a_rolled_loop_declares_its_merge_before_the_branch_that_leaves_it	if times == 0 {
+src/lanes/loops.rs	cond→false	lanes::loops::tests::a_rolled_loop_of_zero_emits_nothing_at_all	if times == 0 {
+src/lanes/loops.rs	cond→true	lanes::loops::tests::a_rolled_loop_declares_its_merge_before_the_branch_that_leaves_it	if times == 0 {
+src/lanes/loops.rs	false→true	a_rolled_loop_is_valid_spirv	let uint = self.module().type_int(32, false)?;
+src/lanes/mapping.rs	!x→x	kernel::access::tests::a_scalar_store_uses_the_one_strip_layout_whatever_was_loaded	if !LANES.is_multiple_of(self.width()) {
+src/lanes/mapping.rs	/→*	kernel::access::tests::a_scalar_store_uses_the_one_strip_layout_whatever_was_loaded	let count = LANES / self.width();
+src/lanes/mapping.rs	==→!=	kernel::access::tests::a_scalar_store_uses_the_one_strip_layout_whatever_was_loaded	if LANES == 0 {
+src/lanes/mapping.rs	==→!=	kernel::access::tests::a_scalar_store_uses_the_one_strip_layout_whatever_was_loaded	if LANES == self.width() {
+src/lanes/mapping.rs	>→>=	lanes::mapping::tests::exactly_the_inline_maximum_of_strips_is_accepted	if count as usize > MAX_STRIPS {
+src/lanes/mapping.rs	cond→!(cond)	kernel::access::tests::a_scalar_store_uses_the_one_strip_layout_whatever_was_loaded	if !LANES.is_multiple_of(self.width()) {
+src/lanes/mapping.rs	cond→!(cond)	kernel::access::tests::a_scalar_store_uses_the_one_strip_layout_whatever_was_loaded	if LANES == 0 {
+src/lanes/mapping.rs	cond→!(cond)	kernel::access::tests::a_scalar_store_uses_the_one_strip_layout_whatever_was_loaded	if LANES == self.width() {
+src/lanes/mapping.rs	cond→!(cond)	kernel::access::tests::a_scalar_store_uses_the_one_strip_layout_whatever_was_loaded	if count as usize > MAX_STRIPS {
+src/lanes/mapping.rs	cond→!(cond)	kernel::access::tests::a_scalar_store_uses_the_one_strip_layout_whatever_was_loaded	if self.width().is_multiple_of(LANES) {
+src/lanes/mapping.rs	cond→false	lanes::mapping::tests::a_width_that_neither_divides_nor_multiplies_has_no_mapping	if !LANES.is_multiple_of(self.width()) {
+src/lanes/mapping.rs	cond→false	lanes::mapping::tests::a_vector_of_no_lanes_has_no_mapping	if LANES == 0 {
+src/lanes/mapping.rs	cond→false	kernel::tests::a_full_width_kernel_does_not_declare_the_clustered_capability	if LANES == self.width() {
+src/lanes/mapping.rs	cond→false	lanes::mapping::tests::more_strips_than_fit_inline_are_refused	if count as usize > MAX_STRIPS {
+src/lanes/mapping.rs	cond→false	kernel::tests::a_clustered_kernel_does_declare_it	if self.width().is_multiple_of(LANES) {
+src/lanes/mapping.rs	cond→true	kernel::access::tests::a_scalar_store_uses_the_one_strip_layout_whatever_was_loaded	if !LANES.is_multiple_of(self.width()) {
+src/lanes/mapping.rs	cond→true	kernel::access::tests::a_scalar_store_uses_the_one_strip_layout_whatever_was_loaded	if LANES == 0 {
+src/lanes/mapping.rs	cond→true	kernel::access::tests::a_scalar_store_uses_the_one_strip_layout_whatever_was_loaded	if LANES == self.width() {
+src/lanes/mapping.rs	cond→true	kernel::access::tests::a_scalar_store_uses_the_one_strip_layout_whatever_was_loaded	if count as usize > MAX_STRIPS {
+src/lanes/mapping.rs	cond→true	kernel::access::tests::a_scalar_store_uses_the_one_strip_layout_whatever_was_loaded	if self.width().is_multiple_of(LANES) {
+src/lanes/mod.rs	!=→==	lanes::reduce::tests::a_narrow_vector_reduces_in_clusters_of_its_own_width	if LANES == 0 || self.width % LANES != 0 {
+src/lanes/mod.rs	!=→==	lanes::arithmetic::tests::a_comparison_yields_bools_rather_than_elements	if ids.len() != wanted {
+src/lanes/mod.rs	!x→x	lanes::arithmetic::tests::a_strip_mined_add_is_one_instruction_per_strip_and_no_more	if !LANES.is_multiple_of(self.width) {
+src/lanes/mod.rs	!x→x	lanes::arithmetic::tests::an_add_within_the_subgroup_is_one_instruction_whatever_the_lane_count	if !self.width.is_multiple_of(LANES) {
+src/lanes/mod.rs	!x→x	lanes::reduce::tests::a_narrow_vector_reduces_in_clusters_of_its_own_width	if LANES == 0 || !self.width.is_multiple_of(LANES) {
+src/lanes/mod.rs	!x→x	lanes::arithmetic::tests::a_comparison_yields_bools_rather_than_elements	if width == 0 || !width.is_power_of_two() {
+src/lanes/mod.rs	%→*	lanes::reduce::tests::a_narrow_vector_reduces_in_clusters_of_its_own_width	if LANES == 0 || self.width % LANES != 0 {
+src/lanes/mod.rs	/→*	lanes::arithmetic::tests::a_strip_mined_add_is_one_instruction_per_strip_and_no_more	let count = LANES / self.width;
+src/lanes/mod.rs	<→>	lanes::arithmetic::tests::a_strip_mined_add_is_one_instruction_per_strip_and_no_more	if LANES < self.width {
+src/lanes/mod.rs	==→!=	lanes::arithmetic::tests::a_comparison_yields_bools_rather_than_elements	if LANES == 0 {
+src/lanes/mod.rs	==→!=	lanes::reduce::tests::a_narrow_vector_reduces_in_clusters_of_its_own_width	if LANES == 0 || !self.width.is_multiple_of(LANES) {
+src/lanes/mod.rs	==→!=	lanes::reduce::tests::a_narrow_vector_reduces_in_clusters_of_its_own_width	if LANES == 0 || self.width % LANES != 0 {
+src/lanes/mod.rs	==→!=	lanes::arithmetic::tests::a_strip_mined_add_is_one_instruction_per_strip_and_no_more	if LANES == self.width {
+src/lanes/mod.rs	==→!=	lanes::arithmetic::tests::a_comparison_yields_bools_rather_than_elements	if width == 0 || !width.is_power_of_two() {
+src/lanes/mod.rs	>→<	lanes::reduce::tests::a_narrow_prefix_sum_is_refused_because_a_clustered_scan_does_not_exist	if LANES > self.width {
+src/lanes/mod.rs	>→>=	lanes::reduce::tests::a_full_width_vector_reduces_over_the_whole_subgroup	if LANES > self.width {
+src/lanes/mod.rs	>→>=	lanes::tests::exactly_the_inline_maximum_of_strips_is_accepted	if count as usize > MAX_STRIPS {
+src/lanes/mod.rs	cond→!(cond)	lanes::arithmetic::tests::a_strip_mined_add_is_one_instruction_per_strip_and_no_more	if !LANES.is_multiple_of(self.width) {
+src/lanes/mod.rs	cond→!(cond)	lanes::arithmetic::tests::an_add_within_the_subgroup_is_one_instruction_whatever_the_lane_count	if !self.width.is_multiple_of(LANES) {
+src/lanes/mod.rs	cond→!(cond)	lanes::arithmetic::tests::a_strip_mined_add_is_one_instruction_per_strip_and_no_more	if LANES < self.width {
+src/lanes/mod.rs	cond→!(cond)	lanes::arithmetic::tests::a_comparison_yields_bools_rather_than_elements	if LANES == 0 {
+src/lanes/mod.rs	cond→!(cond)	lanes::reduce::tests::a_narrow_vector_reduces_in_clusters_of_its_own_width	if LANES == 0 || !self.width.is_multiple_of(LANES) {
+src/lanes/mod.rs	cond→!(cond)	lanes::reduce::tests::a_narrow_vector_reduces_in_clusters_of_its_own_width	if LANES == 0 || self.width % LANES != 0 {
+src/lanes/mod.rs	cond→!(cond)	lanes::arithmetic::tests::a_strip_mined_add_is_one_instruction_per_strip_and_no_more	if LANES == self.width {
+src/lanes/mod.rs	cond→!(cond)	lanes::reduce::tests::a_full_width_vector_reduces_over_the_whole_subgroup	if LANES > self.width {
+src/lanes/mod.rs	cond→!(cond)	lanes::arithmetic::tests::a_strip_mined_add_is_one_instruction_per_strip_and_no_more	if count as usize > MAX_STRIPS {
+src/lanes/mod.rs	cond→!(cond)	lanes::arithmetic::tests::a_comparison_yields_bools_rather_than_elements	if ids.len() != wanted {
+src/lanes/mod.rs	cond→!(cond)	lanes::arithmetic::tests::a_strip_mined_add_is_one_instruction_per_strip_and_no_more	if self.width.is_multiple_of(LANES) {
+src/lanes/mod.rs	cond→!(cond)	lanes::arithmetic::tests::a_comparison_yields_bools_rather_than_elements	if width == 0 || !width.is_power_of_two() {
+src/lanes/mod.rs	cond→false	lanes::tests::a_width_that_neither_divides_nor_multiplies_has_no_mapping	if !LANES.is_multiple_of(self.width) {
+src/lanes/mod.rs	cond→false	lanes::reduce::tests::a_lane_count_with_no_mapping_is_refused	if !self.width.is_multiple_of(LANES) {
+src/lanes/mod.rs	cond→false	lanes::arithmetic::tests::an_add_within_the_subgroup_is_one_instruction_whatever_the_lane_count	if LANES < self.width {
+src/lanes/mod.rs	cond→false	lanes::tests::a_vector_of_no_lanes_has_no_mapping	if LANES == 0 {
+src/lanes/mod.rs	cond→false	lanes::tests::a_width_that_does_not_divide_the_subgroup_has_no_clustered_form	if LANES == 0 || !self.width.is_multiple_of(LANES) {
+src/lanes/mod.rs	cond→false	lanes::tests::a_width_that_does_not_divide_the_subgroup_has_no_clustered_form	if LANES == 0 || self.width % LANES != 0 {
+src/lanes/mod.rs	cond→false	lanes::reduce::tests::a_prefix_sum_scans_when_the_vector_is_the_whole_subgroup	if LANES == self.width {
+src/lanes/mod.rs	cond→false	lanes::reduce::tests::a_vector_wider_than_the_subgroup_is_refused	if LANES > self.width {
+src/lanes/mod.rs	cond→false	lanes::tests::more_strips_than_fit_inline_are_refused	if count as usize > MAX_STRIPS {
+src/lanes/mod.rs	cond→false	lanes::tests::adopting_the_wrong_number_of_strips_is_refused	if ids.len() != wanted {
+src/lanes/mod.rs	cond→false	lanes::arithmetic::tests::an_add_within_the_subgroup_is_one_instruction_whatever_the_lane_count	if self.width.is_multiple_of(LANES) {
+src/lanes/mod.rs	cond→false	lanes::tests::a_width_of_zero_is_refused	if width == 0 || !width.is_power_of_two() {
+src/lanes/mod.rs	cond→true	lanes::arithmetic::tests::a_strip_mined_add_is_one_instruction_per_strip_and_no_more	if !LANES.is_multiple_of(self.width) {
+src/lanes/mod.rs	cond→true	lanes::arithmetic::tests::an_add_within_the_subgroup_is_one_instruction_whatever_the_lane_count	if !self.width.is_multiple_of(LANES) {
+src/lanes/mod.rs	cond→true	lanes::arithmetic::tests::a_strip_mined_add_is_one_instruction_per_strip_and_no_more	if LANES < self.width {
+src/lanes/mod.rs	cond→true	lanes::arithmetic::tests::a_comparison_yields_bools_rather_than_elements	if LANES == 0 {
+src/lanes/mod.rs	cond→true	lanes::reduce::tests::a_narrow_vector_reduces_in_clusters_of_its_own_width	if LANES == 0 || !self.width.is_multiple_of(LANES) {
+src/lanes/mod.rs	cond→true	lanes::reduce::tests::a_narrow_vector_reduces_in_clusters_of_its_own_width	if LANES == 0 || self.width % LANES != 0 {
+src/lanes/mod.rs	cond→true	lanes::arithmetic::tests::a_strip_mined_add_is_one_instruction_per_strip_and_no_more	if LANES == self.width {
+src/lanes/mod.rs	cond→true	lanes::reduce::tests::a_full_width_vector_reduces_over_the_whole_subgroup	if LANES > self.width {
+src/lanes/mod.rs	cond→true	lanes::arithmetic::tests::a_strip_mined_add_is_one_instruction_per_strip_and_no_more	if count as usize > MAX_STRIPS {
+src/lanes/mod.rs	cond→true	lanes::arithmetic::tests::a_comparison_yields_bools_rather_than_elements	if ids.len() != wanted {
+src/lanes/mod.rs	cond→true	lanes::arithmetic::tests::a_strip_mined_add_is_one_instruction_per_strip_and_no_more	if self.width.is_multiple_of(LANES) {
+src/lanes/mod.rs	cond→true	lanes::arithmetic::tests::a_comparison_yields_bools_rather_than_elements	if width == 0 || !width.is_power_of_two() {
+src/lanes/mod.rs	||→&&	lanes::tests::a_width_that_does_not_divide_the_subgroup_has_no_clustered_form	if LANES == 0 || !self.width.is_multiple_of(LANES) {
+src/lanes/mod.rs	||→&&	lanes::tests::a_width_that_does_not_divide_the_subgroup_has_no_clustered_form	if LANES == 0 || self.width % LANES != 0 {
+src/lanes/mod.rs	||→&&	lanes::tests::a_width_that_is_not_a_power_of_two_did_not_come_from_a_device	if width == 0 || !width.is_power_of_two() {
+src/lanes/narrow.rs	&→|	a_strip_mined_byte_kernel_reaches_every_strip	module.constant_scalar(of_type, bits & 0xff)
+src/lanes/narrow.rs	&→|	a_half_kernel_computes_in_halves_and_not_in_floats	module.constant_scalar(of_type, bits & 0xffff)
+src/lanes/narrow.rs	-→+	a_16_bit_kernel_adds_at_sixteen_bits	let spare = 32 - width;
+src/lanes/narrow.rs	<<→>>	a_16_bit_kernel_adds_at_sixteen_bits	(((bits << spare) as i32) >> spare) as u32
+src/lanes/narrow.rs	>>→<<	a_16_bit_kernel_adds_at_sixteen_bits	(((bits << spare) as i32) >> spare) as u32
+src/lanes/narrow.rs	false→true	lanes::narrow::tests::the_two_widths_of_one_signedness_are_two_types	module.type_int(16, false)
+src/lanes/narrow.rs	false→true	lanes::narrow::tests::the_two_widths_of_one_signedness_are_two_types	module.type_int(8, false)
+src/lanes/narrow.rs	true→false	every_narrow_element_type_produces_a_valid_kernel	module.type_int(16, true)
+src/lanes/narrow.rs	true→false	lanes::narrow::tests::the_two_widths_of_one_signedness_are_two_types	module.type_int(8, true)
+src/lanes/vector.rs	>→<	lanes::arithmetic::tests::a_comparison_yields_bools_rather_than_elements	if ids.len() > MAX_STRIPS {
+src/lanes/vector.rs	>→>=	lanes::vector::tests::exactly_the_inline_maximum_is_accepted	if ids.len() > MAX_STRIPS {
+src/lanes/vector.rs	cond→!(cond)	lanes::arithmetic::tests::a_comparison_yields_bools_rather_than_elements	if ids.len() > MAX_STRIPS {
+src/lanes/vector.rs	cond→false	lanes::vector::tests::one_more_than_the_maximum_is_refused_rather_than_truncated	if ids.len() > MAX_STRIPS {
+src/lanes/vector.rs	cond→true	lanes::arithmetic::tests::a_comparison_yields_bools_rather_than_elements	if ids.len() > MAX_STRIPS {
+src/lanes/vote.rs	cond→!(cond)	lanes::vote::tests::a_ballot_yields_a_four_component_mask	if matches!(self.mapping::<LANES>()?, Mapping::Strips { .. }) {
+src/lanes/vote.rs	cond→false	lanes::vote::tests::a_strip_mined_ballot_is_refused	if matches!(self.mapping::<LANES>()?, Mapping::Strips { .. }) {
+src/lanes/vote.rs	cond→true	lanes::vote::tests::a_ballot_yields_a_four_component_mask	if matches!(self.mapping::<LANES>()?, Mapping::Strips { .. }) {
+src/lanes/vote.rs	false→true	lanes::vote::tests::a_ballot_yields_a_four_component_mask	let uint = self.module().type_int(32, false)?;
+src/module/constants.rs	false→true	module::constants::tests::constants_of_different_types_are_distinct_even_with_the_same_bits	let of_type = self.type_int(32, false)?;
+src/module/constants.rs	true→false	module::constants::tests::constants_of_different_types_are_distinct_even_with_the_same_bits	let of_type = self.type_int(32, true)?;
+src/module/layout.rs	<<→>>	module::layout::tests::the_version_word_places_major_and_minor_in_their_own_bytes	(self.major as Word) << 16 | (self.minor as Word) << 8
+src/module/mod.rs	!x→x	kernel::tests::a_clustered_kernel_does_declare_it	if !self.capabilities.insert(capability.word()) {
+src/module/mod.rs	!x→x	lanes::narrow::tests::a_buffer_of_8_bit_elements_declares_the_storage_capability_and_its_extension	if !self.extensions.insert(name.to_owned()) {
+src/module/mod.rs	<<→>>	module::tests::the_version_word_places_major_and_minor_in_their_own_bytes	(self.major as Word) << 16 | (self.minor as Word) << 8
+src/module/mod.rs	cond→!(cond)	kernel::tests::a_clustered_kernel_does_declare_it	if !self.capabilities.insert(capability.word()) {
+src/module/mod.rs	cond→!(cond)	lanes::narrow::tests::a_buffer_of_8_bit_elements_declares_the_storage_capability_and_its_extension	if !self.extensions.insert(name.to_owned()) {
+src/module/mod.rs	cond→false	module::tests::a_capability_asked_for_twice_is_declared_once	if !self.capabilities.insert(capability.word()) {
+src/module/mod.rs	cond→false	module::tests::an_extension_asked_for_twice_is_declared_once	if !self.extensions.insert(name.to_owned()) {
+src/module/mod.rs	cond→true	kernel::tests::a_clustered_kernel_does_declare_it	if !self.capabilities.insert(capability.word()) {
+src/module/mod.rs	cond→true	lanes::narrow::tests::a_buffer_of_8_bit_elements_declares_the_storage_capability_and_its_extension	if !self.extensions.insert(name.to_owned()) {
