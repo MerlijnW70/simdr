@@ -5,7 +5,8 @@ mod narrow;
 pub use narrow::Narrow;
 
 use self::narrow::{
-    EIGHT_BIT_STORAGE, SHADER_FLOAT16_INT8, SIXTEEN_BIT_STORAGE, SUBGROUP_EXTENDED_TYPES, WANTED,
+    EIGHT_BIT_STORAGE, INTEGER_DOT_PRODUCT, SHADER_FLOAT16_INT8, SIXTEEN_BIT_STORAGE,
+    SUBGROUP_EXTENDED_TYPES, WANTED,
 };
 use crate::{Error, Gpu};
 use ash::vk;
@@ -262,7 +263,7 @@ unsafe fn open_on(
     let narrow = unsafe { narrow::supported(&instance, physical, &offers) };
     let limits = unsafe { describe(&instance, physical, queue_family, narrow) };
 
-    let (mut storage8, mut storage16, mut float16int8, mut extended_types) =
+    let (mut storage8, mut storage16, mut float16int8, mut extended_types, mut dot_product) =
         narrow::to_enable(narrow);
 
     let mut features = vk::PhysicalDeviceFeatures2::default()
@@ -278,6 +279,9 @@ unsafe fn open_on(
     }
     if offers(SUBGROUP_EXTENDED_TYPES) {
         features = features.push_next(&mut extended_types);
+    }
+    if offers(INTEGER_DOT_PRODUCT) {
+        features = features.push_next(&mut dot_product);
     }
 
     let priorities = [1.0_f32];

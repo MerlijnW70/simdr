@@ -12,6 +12,7 @@
 //! that reach the GLSL.std.450 set in [`extended`].
 
 pub mod control;
+pub mod dot;
 pub mod extended;
 pub mod narrow;
 pub mod network;
@@ -24,6 +25,7 @@ pub use control::{
     any_above, branch_in_loop, branch_only, loop_in_branch, rolled_counter_sum, rolled_doubling,
     scale_if_any_above, sum_or_max,
 };
+pub use dot::{mixed_dot, packed_dot, repeated_packed_dot, repeated_unpacked_dot, unpacked_dot};
 pub use extended::{clamped, fused_square, larger, magnitude, root, smaller};
 pub use narrow::{narrow_add, narrow_clamp, narrow_sum, narrow_sum_whole};
 pub use network::{Layer, clipped_dot, clipped_dot_split, unclipped_dot};

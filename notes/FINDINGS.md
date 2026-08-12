@@ -1133,3 +1133,42 @@ back to the caller's length — is inside the gate for the first time.
 The check that caught it was written months earlier for a different reason: an excuse that names
 FFI should expire when the file stops being FFI. It had never fired. **A file split is exactly the
 event that makes a blanket exemption wrong**, and nothing but that check would have noticed.
+
+
+## The integer dot product is worth nine times, or nothing — 2026-08-12
+
+`OpSDot` computes four 8-bit products and their sum in one instruction. Written out that is eleven:
+four shifts up, four bitcasts, four shifts down, four multiplies and three adds — and
+`runner/tests/dot_product.rs` runs both spellings and checks they agree, against each other and
+against a host reference.
+
+`runner/examples/dot.rs`, 262 144 invocations:
+
+| kernel | RTX 4080 | integrated Radeon |
+| --- | --- | --- |
+| one dot product per element | 1.00× | 1.52× |
+| thirty-two per element | 1.18× | **9.08×** |
+
+Both devices report `integerDotProduct4x8BitPackedSignedAccelerated`. **The flag says the hardware
+has the instruction; it does not say anyone will notice.** The discrete part has enough integer
+throughput that eleven instructions cost nearly what one does, and at one dot product per element
+it is memory-bound anyway.
+
+Two things worth carrying:
+
+- **The first version of the benchmark measured the wrong thing**, and looked fine doing it: one
+  dot product per element is a *memory-bound* kernel, so it reported 1.00× on the 4080 and would
+  have been written up as "the instruction does nothing". The second shape — thirty-two dot
+  products per element, salted so a driver cannot fold them — is what has the arithmetic in it. A
+  benchmark of an arithmetic instruction has to be arithmetic-bound, and saying so in the doc
+  comment is not the same as being it.
+- **Lavapipe supports the instruction and reports it not accelerated**, which is the case the flag
+  exists to distinguish and is why it is reported rather than assumed. Three devices, three
+  answers.
+
+### It does not make a packed mapping
+
+`decisions/DR-0004` declines to pack four `i8` into a lane, and this does not change that. A
+`Simd<u32, N>` is still one `u32` per lane; `OpSDot` reads each of those `u32`s as four bytes. The
+packing is a property of the *instruction's operands*, and the two readings of the same buffer —
+`Simd<i8, N>` arithmetic and a packed dot product — coexist without either knowing about the other.

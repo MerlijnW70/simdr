@@ -41,7 +41,8 @@ The arrow points one way. Nothing in the emitter can reach the runner.
 ```
 spec/      Khronos' numbers — opcodes, capabilities, enumerants, GLSL.std.450
 module/    A SPIR-V module being assembled: types, constants, blocks, phis, subgroup ops, atomics
-lanes/     Simd<T, N> semantics: mappings, reductions, shuffles, votes, loops, branches, min/max/clamp
+lanes/     Simd<T, N> semantics: mappings, reductions, shuffles, votes, loops, branches,
+           min/max/clamp, shifts, and the packed integer dot product
 kernel/    The buffer interface, workgroup shared memory, the barrier, and atomic scatter
 half/      f32 ↔ f16, because Rust has no stable f16 and this crate has nothing to borrow one from
 decode/    Reading a module back, which is how the tests inspect what was emitted
@@ -133,7 +134,7 @@ did not.
 
 | Layer | What it is | What it caught |
 | --- | --- | --- |
-| **Unit tests** | 286 in the emitter, decoding what was emitted; 514 across the workspace | Everything cheap |
+| **Unit tests** | 308 in the emitter, decoding what was emitted; 544 across the workspace | Everything cheap |
 | **`spirv-val`** | Khronos' validator, at `--target-env vulkan1.1` | `OpLoopMerge` in the wrong position — a unit test asserted "merge before branch" and passed while the comparison sat between them |
 | **Execution** | Real dispatches on a real GPU, against CPU references | A missing staging write: every computing kernel returned garbage and the empty-kernel test still passed |
 | **Other devices** | The same suite at 64 lanes and at 8, as well as at 32 | Ten tests that had conflated "32 lanes" with "the subgroup", four of which could not build at all because a vote has no clustered form. Then, at 8: a fuzzer generating shuffles that leave the subgroup, and three tests assuming uninitialised device memory is zero |
@@ -254,6 +255,7 @@ cargo run --release --example sweep    -p runner  # working-set sweep, with spre
 cargo run --release --example narrow   -p runner  # i8 and i16 against i32, at the same element count
 cargo run --release --example specialize -p runner # emitting a module against building a pipeline
 cargo run --release --example reducer   -p runner  # a reduction that keeps its pipelines
+cargo run --release --example dot       -p runner  # OpSDot against the eleven instructions it replaces
 ```
 
 To run any of it against a different device:
@@ -311,6 +313,33 @@ The two numbers are why the test that guards this asserts a factor of three. Ten
 for as long as there was one device to run it on, and was a property of that device wearing the
 costume of a property of sessions.
 
+## One instruction where there were eleven
+
+`VK_KHR_shader_integer_dot_product` sums four 8-bit products in one instruction. What it replaces
+is four shifts up, four bitcasts, four shifts down, four multiplies and three adds — and
+`runner/tests/dot_product.rs` runs both spellings against each other and against a host reference.
+
+```rust
+let packed = kernel.load::<32>(0)?;              // one u32 per lane, four i8 inside it
+let totals = lanes.dot_signed(packed, packed)?;  // Vector<I32, 32>
+```
+
+**Whether it is worth using depends entirely on the device**, and both of the ones here report it
+as accelerated:
+
+| kernel, 262 144 invocations | RTX 4080 | integrated Radeon |
+| --- | --- | --- |
+| one dot product per element | 1.00× | 1.52× |
+| thirty-two per element | 1.18× | **9.08×** |
+
+The first row is memory-bound: the load hides the arithmetic, and eleven instructions cost what one
+does. The discrete part has enough integer throughput that even the second row barely moves; the
+integrated part does not.
+
+This is **not** a packed lane mapping. A `Simd<u32, N>` is still one `u32` per lane — `OpSDot` is
+an operation that reads each of them as four bytes, and `decisions/DR-0004` says why that
+distinction is worth keeping.
+
 ## What this is not
 
 - **Not a shader language.** There is no Rust-to-GPU compiler here. You write the kernel against
@@ -325,8 +354,7 @@ costume of a property of sessions.
   50 MB and *three* explanations have now been tested and refuted — L2 capacity, eviction of a
   single allocation, and placement under three simultaneous ones.
 - **Not matrices or cooperative matrices.** `i8`, `u8`, `i16`, `u16` and `f16` are here and run on
-  both devices; matrix types are not, and neither is the integer dot-product extension a packed
-  `i8` mapping would want.
+  every device tried; matrix types are not.
 - **No multi-dimensional dispatch.** `cmd_dispatch(x, 1, 1)`.
 - **Nothing here defers a value.** Specialization constants work end to end and no kernel uses one
   outside the tests and the measurement written for them. That is a conclusion rather than a gap:

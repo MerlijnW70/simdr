@@ -14,6 +14,7 @@ mod atomic;
 mod body;
 mod constants;
 mod control;
+mod dot;
 mod extended;
 mod globals;
 mod layout;

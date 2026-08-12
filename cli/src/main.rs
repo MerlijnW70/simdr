@@ -207,6 +207,16 @@ fn narrow(limits: &runner::Limits) {
             narrow.subgroup_extended_types,
             "reductions and shuffles over narrow types — no capability says so",
         ),
+        (
+            "dot product",
+            narrow.integer_dot_product,
+            "OpSDot: four 8-bit products summed in one instruction",
+        ),
+        (
+            "  accelerated",
+            narrow.packed_dot_accelerated,
+            "and the hardware does it in one go rather than lowering it",
+        ),
     ] {
         println!(
             "    {:<16} {:<5}  {needed_for}",

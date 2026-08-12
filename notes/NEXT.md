@@ -1,15 +1,15 @@
 # What is worth doing next
 
-Rewritten 2026-08-12, after eight items were worked through in two sittings. Every item here has a
+Rewritten 2026-08-12, after ten items were worked through in two sittings. Every item here has a
 number behind it or a named thing it blocks. Ordered by value per line of work, not by size.
 
 The point of the file is that the ordering should be arguable. If a later reader disagrees, the
-measurements are here to disagree *with* — and two of the eight were **refuted by their own
-measurement**, which is what the ordering is for.
+measurements are here to disagree *with* — and two of the ten were **refuted by their own
+measurement** and left undone, which is what the ordering is for.
 
 ## What is done, and what each one actually turned out to be
 
-Listed with their outcomes rather than crossed off, because four of the eight came out differently
+Listed with their outcomes rather than crossed off, because five of the ten came out differently
 from the argument that put them on the list — two of them differently enough that the work was not
 done at all.
 
@@ -66,8 +66,7 @@ taking the width up front was that it could not. **It can.** `spirv-val` accepts
 runs the same module at cluster sizes 4, 8 and 16. `decisions/DR-0005` writes it up and DR-0002
 carries the correction; the decision survives for a better reason than the one it was given.
 
-Nothing in `runner/src/kernels` defers a value outside the tests written for it, so `Gpu::sum` still
-builds ten modules for ten fold sizes. That is the next item below.
+Nothing defers a value outside the tests written for it — item 6 is why.
 
 ### 4. GLSL.std.450 — **built, and it bought no speed, as predicted**
 
@@ -181,17 +180,32 @@ behind a resize that would rebuild what the object exists to keep.
 points at particular buffers. Caching pipelines apart from their buffers would be a use-after-free
 in safe-looking code. One type owns both and drops the pipelines first.
 
-## 2. Integer dot product — `OpSDot` and friends
+### 10. Integer dot product — **built, and it depends entirely on the device**
 
-**What it blocks.** The packed `i8` mapping `decisions/DR-0004` declines to build.
-`VK_KHR_shader_integer_dot_product` gives a four-element dot product in one instruction, which is
-the thing that would make packing worth the fourth mapping.
+`OpSDot`, `OpUDot`, `OpSUDot` and `OpSDotAccSat`, over four 8-bit components packed into a 32-bit
+integer. Both devices here support it and both report the packed signed form as accelerated.
 
-**Why it is not urgent.** DR-0004's measurement says strip mining already recovers the bandwidth,
-so this is about *arithmetic* throughput on a kernel that is not arithmetic-bound. It would need a
-kernel that is.
+One instruction against the eleven it replaces — four shifts up, four bitcasts, four shifts down,
+four multiplies and three adds. `runner/examples/dot.rs`:
 
-## 3. Multi-dimensional dispatch
+| kernel | RTX 4080 | integrated Radeon |
+| --- | --- | --- |
+| one dot product per element, 262 144 invocations | 1.00× | 1.52× |
+| thirty-two per element, 262 144 invocations | 1.18× | **9.08×** |
+
+The first row is memory-bound and the second is not, which is why both are there. The discrete part
+has enough integer throughput that eleven instructions cost nearly what one does; the integrated
+part does not, and the difference is nine times.
+
+**It does not overturn `decisions/DR-0004`.** The packing is in the instruction's operands, not in
+the vector: a `Simd<u32, N>` is still one `u32` per lane and `OpSDot` reads each of them as four
+bytes. DR-0004 carries the table and says so.
+
+Along the way the lane API gained the shifts — `shift_left`, `shift_right_logical`,
+`shift_right_arithmetic` — because the written-out twin needs them, and the two right shifts are
+another pair that agree on every value with the top bit clear.
+
+## 1. Multi-dimensional dispatch
 
 `cmd_dispatch(x, 1, 1)` and a one-dimensional address. Everything with a natural 2-D shape — an
 image, a matrix tile — has to linearise itself before it reaches a kernel.

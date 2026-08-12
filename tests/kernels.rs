@@ -334,6 +334,51 @@ fn a_narrow_conversion_from_a_loop_counter_is_valid_spirv() {
 }
 
 #[test]
+fn an_integer_dot_product_is_valid_spirv() {
+    // Two capabilities and an extension between them, and the validator is what says all three are
+    // present. It is also the only thing that checks the result type is wide enough — four 8-bit
+    // products do not fit in an 8-bit result and `OpSDot` says so.
+    let mut kernel = Kernel::<U32>::new(shape()).expect("built");
+    let packed = kernel.load::<32>(0).expect("loaded");
+    let totals = {
+        let mut lanes = kernel.lanes().expect("lanes");
+        let products = lanes.dot_signed(packed, packed).expect("dot");
+        lanes.reinterpret(products).expect("back to u32")
+    };
+    kernel.store(1, totals).expect("stored");
+
+    expect_valid(
+        &kernel.finish().expect("finished"),
+        "kernel-dot",
+        VULKAN_1_1,
+    );
+}
+
+#[test]
+fn a_saturating_dot_product_chain_is_valid_spirv() {
+    let mut kernel = Kernel::<U32>::new(shape()).expect("built");
+    let packed = kernel.load::<32>(0).expect("loaded");
+    let totals = {
+        let mut lanes = kernel.lanes().expect("lanes");
+        let zero = lanes.splat_bits::<simdr::lanes::I32, 32>(0).expect("zero");
+        let first = lanes
+            .dot_signed_saturating(packed, packed, zero)
+            .expect("first");
+        let second = lanes
+            .dot_signed_saturating(packed, packed, first)
+            .expect("second");
+        lanes.reinterpret(second).expect("back to u32")
+    };
+    kernel.store(1, totals).expect("stored");
+
+    expect_valid(
+        &kernel.finish().expect("finished"),
+        "kernel-dot-saturating",
+        VULKAN_1_1,
+    );
+}
+
+#[test]
 fn an_atomic_scatter_is_valid_spirv() {
     // Where the validator earns its place here: the scope and the semantics are ids of constants,
     // and an atomic naming a literal where an id belongs is rejected for a type mismatch rather

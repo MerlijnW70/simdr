@@ -33,6 +33,7 @@
 
 mod arithmetic;
 mod branch;
+mod dot;
 mod element;
 mod error;
 mod extremes;
@@ -41,12 +42,14 @@ mod mapping;
 mod math;
 mod narrow;
 mod reduce;
+mod shift;
 mod shuffle;
 mod uniform;
 mod vector;
 mod vote;
 
 pub use self::arithmetic::Predicate;
+pub use self::dot::{pack, signed_bytes, unsigned_bytes};
 pub use self::element::{Element, F32, I32, Signed, U32};
 pub use self::error::LaneError;
 pub use self::mapping::Mapping;

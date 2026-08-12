@@ -83,6 +83,11 @@ pub const MEMBER_DECORATE: u16 = 72;
 pub const COMPOSITE_EXTRACT: u16 = 81;
 /// `OpCopyObject` — the same value under a new id.
 pub const COPY_OBJECT: u16 = 83;
+/// `OpConvertSToF` — a signed integer's numeric value, as a float.
+///
+/// What a dot product's result needs on the way into float arithmetic: a *conversion*, so −7
+/// becomes −7.0 rather than the float whose bits are `0xfffffff9`.
+pub const CONVERT_S_TO_F: u16 = 111;
 /// `OpConvertUToF` — an unsigned integer's numeric value, as a float.
 ///
 /// A *conversion*, not a reinterpretation: 7u32 becomes 7.0f32 rather than a denormal.
@@ -109,6 +114,15 @@ pub const F_ADD: u16 = 129;
 pub const I_MUL: u16 = 132;
 /// `OpFMul` — floating-point multiplication.
 pub const F_MUL: u16 = 133;
+/// `OpShiftRightLogical` — shift right, filling with zeros.
+pub const SHIFT_RIGHT_LOGICAL: u16 = 194;
+/// `OpShiftRightArithmetic` — shift right, filling with copies of the sign bit.
+///
+/// The difference from [`SHIFT_RIGHT_LOGICAL`] is invisible for values with the top bit clear,
+/// which is every value a small test uses.
+pub const SHIFT_RIGHT_ARITHMETIC: u16 = 195;
+/// `OpShiftLeftLogical` — shift left.
+pub const SHIFT_LEFT_LOGICAL: u16 = 196;
 /// `OpLogicalOr` — boolean or.
 pub const LOGICAL_OR: u16 = 166;
 /// `OpLogicalAnd` — boolean and.
@@ -167,6 +181,17 @@ pub const GROUP_NON_UNIFORM_S_MAX: u16 = 356;
 pub const GROUP_NON_UNIFORM_U_MAX: u16 = 357;
 /// `OpGroupNonUniformFMax` — floating-point maximum across the group.
 pub const GROUP_NON_UNIFORM_F_MAX: u16 = 358;
+/// `OpSDot` — four signed 8-bit products summed into one 32-bit result.
+///
+/// Takes an optional `PackedVectorFormat`. Left off, the operands are integer *vectors* rather
+/// than packed scalars — so the operand's absence is a different instruction, not a default.
+pub const S_DOT: u16 = 4450;
+/// `OpUDot` — the same over unsigned components.
+pub const U_DOT: u16 = 4451;
+/// `OpSUDot` — signed on the left, unsigned on the right. Not symmetric.
+pub const SU_DOT: u16 = 4452;
+/// `OpSDotAccSat` — [`S_DOT`] plus an accumulator, saturating rather than wrapping.
+pub const S_DOT_ACC_SAT: u16 = 4453;
 /// `OpAtomicLoad` — read a location without another invocation's write landing in the middle.
 pub const ATOMIC_LOAD: u16 = 227;
 /// `OpAtomicStore` — the same for a write. Produces no id.

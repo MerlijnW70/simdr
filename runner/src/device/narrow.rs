@@ -34,6 +34,19 @@ pub struct Narrow {
     /// module reducing over `i8` is byte-for-byte what it would be if the feature existed
     /// everywhere — it validates, and then a device without the feature refuses the pipeline.
     pub subgroup_extended_types: bool,
+    /// `shaderIntegerDotProduct`: `OpSDot` and its relatives exist.
+    ///
+    /// Whether the packed 4×8-bit form is *accelerated* is a separate thing the device reports,
+    /// and [`Narrow::packed_dot_accelerated`] carries it. An implementation may support the
+    /// instruction and lower it to the four multiplies it replaces, which is correct and is not
+    /// the reason anyone reaches for it.
+    pub integer_dot_product: bool,
+    /// `integerDotProduct4x8BitPackedSignedAccelerated`: and the hardware does it in one go.
+    ///
+    /// Reported rather than required. A kernel using `OpSDot` runs either way; this is what says
+    /// whether it is worth using, and it is the only one of these flags that is a *performance*
+    /// statement rather than a legality one.
+    pub packed_dot_accelerated: bool,
 }
 
 impl Narrow {
@@ -68,13 +81,16 @@ pub(super) const SIXTEEN_BIT_STORAGE: &CStr = c"VK_KHR_16bit_storage";
 pub(super) const SHADER_FLOAT16_INT8: &CStr = c"VK_KHR_shader_float16_int8";
 /// `VK_KHR_shader_subgroup_extended_types` — subgroup operations over narrow types.
 pub(super) const SUBGROUP_EXTENDED_TYPES: &CStr = c"VK_KHR_shader_subgroup_extended_types";
+/// `VK_KHR_shader_integer_dot_product` — `OpSDot` and its relatives.
+pub(super) const INTEGER_DOT_PRODUCT: &CStr = c"VK_KHR_shader_integer_dot_product";
 
 /// Every extension the narrow types need, for a caller filtering by what the device offers.
-pub(super) const WANTED: [&CStr; 4] = [
+pub(super) const WANTED: [&CStr; 5] = [
     EIGHT_BIT_STORAGE,
     SIXTEEN_BIT_STORAGE,
     SHADER_FLOAT16_INT8,
     SUBGROUP_EXTENDED_TYPES,
+    INTEGER_DOT_PRODUCT,
 ];
 
 /// Which narrow-type features this device reports.
@@ -91,6 +107,7 @@ pub(super) unsafe fn supported(
     let mut storage16 = vk::PhysicalDevice16BitStorageFeatures::default();
     let mut float16int8 = vk::PhysicalDeviceShaderFloat16Int8Features::default();
     let mut extended_types = vk::PhysicalDeviceShaderSubgroupExtendedTypesFeatures::default();
+    let mut dot_product = vk::PhysicalDeviceShaderIntegerDotProductFeatures::default();
 
     // Only the structs whose extension the device has. Chaining one it does not know is not an
     // error the loader reports — it is a struct the driver skips, leaving the flags at zero, which
@@ -108,12 +125,22 @@ pub(super) unsafe fn supported(
     if offers(SUBGROUP_EXTENDED_TYPES) {
         features = features.push_next(&mut extended_types);
     }
+    if offers(INTEGER_DOT_PRODUCT) {
+        features = features.push_next(&mut dot_product);
+    }
 
     unsafe { instance.get_physical_device_features2(physical, &mut features) };
 
     // The core features are copied out at the chain's last use, and only then can the chained
     // structs be read: `push_next` leaves `features` holding a mutable borrow of each.
     let core = features.features;
+    let integer_dot_product = dot_product.shader_integer_dot_product == vk::TRUE;
+
+    // Whether the packed form is *accelerated* is a device **property**, not a feature, so it
+    // arrives through a different call — and it is worth asking only if the instruction exists.
+    let packed_dot_accelerated =
+        integer_dot_product && unsafe { packed_dot_is_accelerated(instance, physical) };
+
     Narrow {
         int8: float16int8.shader_int8 == vk::TRUE,
         int16: core.shader_int16 == vk::TRUE,
@@ -121,7 +148,33 @@ pub(super) unsafe fn supported(
         storage8: storage8.storage_buffer8_bit_access == vk::TRUE,
         storage16: storage16.storage_buffer16_bit_access == vk::TRUE,
         subgroup_extended_types: extended_types.shader_subgroup_extended_types == vk::TRUE,
+        integer_dot_product,
+        packed_dot_accelerated,
     }
+}
+
+/// Whether the device does a packed 4×8-bit signed dot product in hardware.
+///
+/// A *property* rather than a feature, so it comes from `vkGetPhysicalDeviceProperties2` and not
+/// from the feature chain. Nothing depends on it — a kernel using `OpSDot` runs either way — and
+/// it is the only thing here that answers "is this worth doing" rather than "is this allowed".
+///
+/// # Safety
+///
+/// `physical` must belong to `instance`.
+unsafe fn packed_dot_is_accelerated(
+    instance: &ash::Instance,
+    physical: vk::PhysicalDevice,
+) -> bool {
+    let mut dot = vk::PhysicalDeviceShaderIntegerDotProductProperties::default();
+    {
+        // Scoped, so the chain's borrow of `dot` ends before `dot` is read. A `drop` would not do
+        // it — the struct is `Copy`, so dropping a copy releases nothing.
+        let mut properties = vk::PhysicalDeviceProperties2::default().push_next(&mut dot);
+        unsafe { instance.get_physical_device_properties2(physical, &mut properties) };
+    }
+
+    dot.integer_dot_product4x8_bit_packed_signed_accelerated == vk::TRUE
 }
 
 /// The feature structs to hand `vkCreateDevice`, enabling exactly what `narrow` reports.
@@ -135,6 +188,7 @@ pub(super) fn to_enable(
     vk::PhysicalDevice16BitStorageFeatures<'static>,
     vk::PhysicalDeviceShaderFloat16Int8Features<'static>,
     vk::PhysicalDeviceShaderSubgroupExtendedTypesFeatures<'static>,
+    vk::PhysicalDeviceShaderIntegerDotProductFeatures<'static>,
 ) {
     (
         vk::PhysicalDevice8BitStorageFeatures::default()
@@ -146,6 +200,8 @@ pub(super) fn to_enable(
             .shader_float16(narrow.float16),
         vk::PhysicalDeviceShaderSubgroupExtendedTypesFeatures::default()
             .shader_subgroup_extended_types(narrow.subgroup_extended_types),
+        vk::PhysicalDeviceShaderIntegerDotProductFeatures::default()
+            .shader_integer_dot_product(narrow.integer_dot_product),
     )
 }
 
@@ -224,14 +280,42 @@ mod tests {
             storage8: true,
             storage16: false,
             subgroup_extended_types: true,
+            integer_dot_product: true,
+            packed_dot_accelerated: false,
         };
 
-        let (storage8, storage16, float16int8, extended) = to_enable(narrow);
+        let (storage8, storage16, float16int8, extended, dot) = to_enable(narrow);
 
         assert_eq!(storage8.storage_buffer8_bit_access, vk::TRUE);
         assert_eq!(storage16.storage_buffer16_bit_access, vk::FALSE);
         assert_eq!(float16int8.shader_int8, vk::TRUE);
         assert_eq!(float16int8.shader_float16, vk::TRUE);
         assert_eq!(extended.shader_subgroup_extended_types, vk::TRUE);
+        assert_eq!(dot.shader_integer_dot_product, vk::TRUE);
+    }
+
+    #[test]
+    fn acceleration_is_reported_and_never_enabled() {
+        // `packed_dot_accelerated` is a device *property*, not a feature: there is nothing to turn
+        // on. A version of `to_enable` that tried to pass it would be passing a performance hint
+        // as a permission, and the two are in different Vulkan structures for a reason.
+        let accelerated = Narrow {
+            integer_dot_product: true,
+            packed_dot_accelerated: true,
+            ..Narrow::default()
+        };
+        let lowered = Narrow {
+            integer_dot_product: true,
+            packed_dot_accelerated: false,
+            ..Narrow::default()
+        };
+
+        let (.., accelerated_dot) = to_enable(accelerated);
+        let (.., lowered_dot) = to_enable(lowered);
+
+        assert_eq!(
+            accelerated_dot.shader_integer_dot_product, lowered_dot.shader_integer_dot_product,
+            "acceleration must not change what is enabled — only whether it is worth using"
+        );
     }
 }

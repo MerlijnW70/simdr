@@ -60,6 +60,34 @@ are 64 MB each and land in the regime `notes/NEXT.md` records as unsteady past ~
 elements every unstripped row takes the same 9 µs whatever its width, because at that size the
 dispatch is not bandwidth-bound at all and the narrow types buy nothing.
 
+## The dot product does not overturn this — 2026-08-12
+
+`VK_KHR_shader_integer_dot_product` is built now, and `OpSDot` reads a 32-bit integer as four
+packed `i8`. That looks like the packed mapping this record declines, and it is not one.
+
+**The packing is in the instruction's operands, not in the vector.** A `Simd<u32, N>` is still `N`
+lanes each holding one `u32`; `OpSDot` is an operation that reads each of those `u32`s as four
+bytes. Nothing about the lane count, the mapping or the buffer changes, and a caller who wants
+`i8` *arithmetic* still reaches for `Simd<i8, N>` and gets one element per lane.
+
+So the two coexist: `runner/tests/dot_product.rs` runs the dot product over the same bytes that
+`runner/tests/narrow.rs` runs `i8` arithmetic over, and neither knows about the other.
+
+**What the measurement says about when it is worth using**, from `runner/examples/dot.rs`:
+
+| kernel | RTX 4080 | integrated Radeon |
+| --- | --- | --- |
+| one dot product per element, 262 144 invocations | 1.00× | 1.52× |
+| thirty-two per element, 262 144 invocations | 1.18× | **9.08×** |
+
+One instruction against the eleven it replaces. On the discrete part that is worth 18% when the
+arithmetic is the bottleneck and nothing at all when it is not — it has enough integer throughput
+that eleven instructions cost nearly what one does. On the integrated part it is worth **nine
+times**.
+
+Both devices report `integerDotProduct4x8BitPackedSignedAccelerated`. That flag says the hardware
+has the instruction, not that anyone will notice.
+
 ## Consequences
 
 - `Element::STRIDE` is the only new number in the type table, and `kernel/binding.rs` decorates

@@ -48,6 +48,18 @@ pub enum Capability {
     /// Core in SPIR-V 1.3 — unlike its 8-bit counterpart, which arrived two versions later — so a
     /// module emitting this declares no extension for it.
     StorageBuffer16BitAccess,
+    /// The integer dot-product instructions exist.
+    ///
+    /// `OpSDot` and its relatives: several narrow products summed into one wider accumulator, in
+    /// a single instruction. This says the *instructions* exist; a second capability says which
+    /// input formats they accept.
+    DotProduct,
+    /// A dot product may take its four 8-bit inputs **packed into a 32-bit integer**.
+    ///
+    /// The form both devices here report as accelerated. Note what it is not: this does not make
+    /// `Simd<i8, N>` four elements per lane — `decisions/DR-0004` is unchanged. The packing is in
+    /// the *instruction's operands*, which happen to be 32-bit integers whose bytes it reads.
+    DotProductInput4x8BitPacked,
 }
 
 impl Capability {
@@ -68,6 +80,8 @@ impl Capability {
             Self::Float16 => 9,
             Self::StorageBuffer16BitAccess => 4433,
             Self::StorageBuffer8BitAccess => 4448,
+            Self::DotProductInput4x8BitPacked => 6018,
+            Self::DotProduct => 6019,
         }
     }
 
@@ -81,6 +95,10 @@ impl Capability {
     pub const fn extension(self) -> Option<&'static str> {
         match self {
             Self::StorageBuffer8BitAccess => Some("SPV_KHR_8bit_storage"),
+            // Core only in SPIR-V 1.6, which is three versions above what this crate emits.
+            Self::DotProduct | Self::DotProductInput4x8BitPacked => {
+                Some("SPV_KHR_integer_dot_product")
+            }
             _ => None,
         }
     }
@@ -90,7 +108,9 @@ impl Capability {
 mod tests {
     use super::*;
 
-    const ALL: [Capability; 13] = [
+    const ALL: [Capability; 15] = [
+        Capability::DotProduct,
+        Capability::DotProductInput4x8BitPacked,
         Capability::Shader,
         Capability::GroupNonUniform,
         Capability::GroupNonUniformVote,
@@ -121,20 +141,36 @@ mod tests {
         assert_eq!(Capability::Int8.word(), 39);
         assert_eq!(Capability::StorageBuffer16BitAccess.word(), 4433);
         assert_eq!(Capability::StorageBuffer8BitAccess.word(), 4448);
+        assert_eq!(Capability::DotProductInput4x8BitPacked.word(), 6018);
+        assert_eq!(Capability::DotProduct.word(), 6019);
     }
 
     #[test]
-    fn only_the_8_bit_storage_capability_needs_an_extension_at_this_version() {
+    fn a_capability_names_the_extension_it_needs_at_this_version() {
         // The asymmetry that would be easy to get wrong in either direction: 16-bit storage is
-        // core in SPIR-V 1.3, 8-bit only in 1.5, and this crate emits 1.3.
+        // core in SPIR-V 1.3, 8-bit only in 1.5, and the dot product only in 1.6. This crate emits
+        // 1.3, so two of the three need an `OpExtension` beside them and one does not.
         assert_eq!(
             Capability::StorageBuffer8BitAccess.extension(),
             Some("SPV_KHR_8bit_storage")
         );
+        assert_eq!(
+            Capability::DotProduct.extension(),
+            Some("SPV_KHR_integer_dot_product")
+        );
+        assert_eq!(
+            Capability::DotProductInput4x8BitPacked.extension(),
+            Some("SPV_KHR_integer_dot_product")
+        );
         assert_eq!(Capability::StorageBuffer16BitAccess.extension(), None);
 
+        let needs_one = [
+            Capability::StorageBuffer8BitAccess,
+            Capability::DotProduct,
+            Capability::DotProductInput4x8BitPacked,
+        ];
         for capability in ALL {
-            if capability != Capability::StorageBuffer8BitAccess {
+            if !needs_one.contains(&capability) {
                 assert_eq!(capability.extension(), None, "{capability:?}");
             }
         }
