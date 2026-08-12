@@ -1,14 +1,32 @@
-//! What a chain runs, and how much each pass is handed from the one before it.
+//! What a chain runs, and which end of the pair each pass reads.
 //!
 //! Split from [`super::chain`], which records and submits. This file decides *what* to record and
 //! contains no `unsafe`, which is the difference that matters: `tests/integrity.rs` excuses the
 //! FFI half of `runner` from mutation because a mutant there kills the process rather than failing
-//! a test, and a wrong copy length is not that — it is a wrong number, and it belongs inside the
-//! gate.
+//! a test, and a buffer pair chosen the wrong way round is not that — it is a wrong answer, and it
+//! belongs inside the gate.
 //!
-//! The same seam was found once before, in `dispatch.rs`, and 200 lines of pure conversion turned
-//! out to have been sitting behind a blanket FFI exemption. This is the second time that split has
-//! been worth making, which is why it was made before waiting to be told.
+//! # The ping-pong
+//!
+//! Every kernel this crate emits binds buffer 0 read and buffer 1 written, baked into the module.
+//! Two device buffers are enough to chain any number of passes: pass 0 reads A and writes B, pass 1
+//! reads B and writes A, and so on. The *module* never knows — only the descriptor set the pipeline
+//! was built with changes.
+//!
+//! This replaced a device-to-device copy of B back into A after every pass. That copy was measured
+//! at 22% of a held reduction over 2²⁰ elements, of which only a third was the data and two thirds
+//! were the pair of pipeline barriers around it. Alternating removes the copy, and one of the two
+//! barriers with it.
+//!
+//! **It is not the speed-up that predicted.** Removing the second barrier saved about 2 µs of the
+//! 19 the pair cost, so paired against the old build on the same machine there is no measurable
+//! difference on an RTX 4080 or on lavapipe — and **5.5%** on the integrated Radeon, where
+//! bandwidth is scarce enough for 4 MB of copying to show. It is kept for being simpler and never
+//! slower, not for being faster. `notes/FINDINGS.md` has the runs.
+//!
+//! **The price is that the answer moves.** A chain of an odd number of passes leaves it in B and an
+//! even number leaves it in A, which is [`answer_in_destination`] and is the only arithmetic here
+//! that a caller can get wrong.
 
 /// One dispatch of a chain.
 #[derive(Debug, Clone, Copy)]
@@ -17,178 +35,127 @@ pub struct Pass<'words> {
     pub spirv: &'words [u32],
     /// How many workgroups of it.
     pub workgroups: u32,
-    /// How many words this pass writes, or `None` for "assume the whole buffer".
-    ///
-    /// Only the copy that feeds the *next* pass reads this, so the last pass's value is never
-    /// used. `None` is the safe answer and the default: copying more than the next pass reads is
-    /// wasted work, and copying less is a wrong answer.
-    pub outputs: Option<usize>,
 }
 
 impl<'words> Pass<'words> {
-    /// A pass running `workgroups` groups of `spirv`, writing an unknown amount.
+    /// A pass running `workgroups` groups of `spirv`.
     ///
-    /// The whole buffer is copied to the next pass. Correct for any kernel, and wasteful for one
-    /// that writes a prefix — see [`Pass::writing`].
+    /// Each pass reads what the one before it wrote. **A pass must write everything the pass after
+    /// it reads** — there is no copy filling the rest in, so a region this pass leaves alone holds
+    /// what the pass *two* before it put there rather than what the one before it did. For a
+    /// halving fold that is automatic: a pass folding `2h` into `h` writes all `h` that the next
+    /// one reads.
     #[must_use]
     pub const fn new(spirv: &'words [u32], workgroups: u32) -> Self {
-        Self {
-            spirv,
-            workgroups,
-            outputs: None,
-        }
-    }
-
-    /// The same, saying how many words the pass writes.
-    ///
-    /// Only that many are handed to the pass after it. **A count smaller than what the next pass
-    /// reads is a wrong answer, not a slower one** — the tail it reads would hold whatever the
-    /// source buffer held before, which for a repeated call is the previous call's data.
-    ///
-    /// For a halving fold the count is the fold's own half: a pass folding `2h` elements into `h`
-    /// writes `h`, and the pass after it reads `in[j]` and `in[j + h/2]` for `j < h/2` — every one
-    /// of them inside the first `h`.
-    #[must_use]
-    pub const fn writing(spirv: &'words [u32], workgroups: u32, outputs: usize) -> Self {
-        Self {
-            spirv,
-            workgroups,
-            outputs: Some(outputs),
-        }
+        Self { spirv, workgroups }
     }
 }
 
-/// One recorded step: a dispatch, and what to hand it from the pass before.
+/// Which way round a pass has its two buffers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Step {
-    /// Workgroups to dispatch.
-    pub(crate) workgroups: u32,
-    /// Bytes to copy from destination back into source *before* this dispatch.
-    ///
-    /// Zero on the first step, which has no predecessor — and zero is also how "copy nothing" is
-    /// spelled, so [`crate::Gpu::replay`] does not have to special-case the index.
-    pub(crate) copy_bytes: u64,
+pub(crate) enum Ends {
+    /// Reads the source, writes the destination.
+    Forward,
+    /// Reads the destination, writes the source.
+    Back,
 }
 
-impl Step {
-    /// The steps for `passes` over a buffer of `bytes`.
+impl Ends {
+    /// How pass `index` is bound.
     ///
-    /// A pass that did not say how much it writes gets the whole buffer copied, which is what every
-    /// pass got before [`Pass::writing`] existed.
-    pub(crate) fn plan(passes: &[Pass<'_>], bytes: u64) -> Vec<Self> {
-        let mut steps = Vec::with_capacity(passes.len());
-        let mut previous: Option<&Pass<'_>> = None;
-
-        for pass in passes {
-            steps.push(Self {
-                workgroups: pass.workgroups,
-                copy_bytes: previous.map_or(0, |before| copy_for(before.outputs, bytes)),
-            });
-            previous = Some(pass);
+    /// Pass zero reads the buffer the host filled, so it is [`Ends::Forward`]; every pass after it
+    /// swaps.
+    pub(crate) const fn of(index: usize) -> Self {
+        if index.is_multiple_of(2) {
+            Self::Forward
+        } else {
+            Self::Back
         }
-        steps
+    }
+
+    /// The two buffers in binding order — 0 read, 1 written — given the source and the destination.
+    pub(crate) const fn order<T: Copy>(self, source: T, destination: T) -> (T, T) {
+        match self {
+            Self::Forward => (source, destination),
+            Self::Back => (destination, source),
+        }
     }
 }
 
-/// How many bytes to copy on behalf of a pass that wrote `outputs` words.
+/// Whether a chain of `passes` leaves its answer in the destination buffer.
 ///
-/// Floored at one word and capped at `bytes`: a zero-length `vkCmdCopyBuffer` is not allowed, and
-/// a length past the end of the allocation is undefined rather than merely wrong.
-fn copy_for(outputs: Option<usize>, bytes: u64) -> u64 {
-    match outputs {
-        None => bytes,
-        Some(words) => ((words.max(1) * size_of::<u32>()) as u64).min(bytes),
-    }
+/// Pass `i` writes the destination when `i` is even, so the last pass — `passes - 1` — writes it
+/// exactly when `passes` is odd.
+///
+/// **A chain of none is `false`**, and that is not a degenerate case being tidied away: nothing ran,
+/// so the answer is the input, and the input is in the source.
+pub(crate) const fn answer_in_destination(passes: usize) -> bool {
+    passes % 2 == 1
 }
 
 #[cfg(test)]
 mod tests {
-    // A test may panic — that is how it reports.
-    #![allow(clippy::expect_used, clippy::indexing_slicing)]
-
     use super::*;
 
-    /// Words enough for the tests below to have somewhere to be capped against.
-    const BYTES: u64 = 4096;
+    #[test]
+    fn the_first_pass_reads_what_the_host_filled() {
+        assert_eq!(Ends::of(0), Ends::Forward);
+        assert_eq!(Ends::of(0).order('a', 'b'), ('a', 'b'));
+    }
 
-    /// A pass over an empty module, which none of these dispatch.
-    fn pass(outputs: Option<usize>) -> Pass<'static> {
-        match outputs {
-            None => Pass::new(&[], 1),
-            Some(words) => Pass::writing(&[], 1, words),
+    #[test]
+    fn every_pass_after_it_swaps() {
+        let bound: Vec<(char, char)> = (0..5).map(|i| Ends::of(i).order('a', 'b')).collect();
+
+        assert_eq!(
+            bound,
+            vec![('a', 'b'), ('b', 'a'), ('a', 'b'), ('b', 'a'), ('a', 'b')],
+            "a pass must read what the one before it wrote"
+        );
+    }
+
+    #[test]
+    fn what_one_pass_writes_is_what_the_next_reads() {
+        // The property the whole scheme rests on, asserted directly rather than inferred from the
+        // pattern above: pass i's *write* end is pass i+1's *read* end, for every i.
+        for index in 0..8_usize {
+            let (_, written) = Ends::of(index).order("source", "destination");
+            let (read, _) = Ends::of(index + 1).order("source", "destination");
+
+            assert_eq!(written, read, "between pass {index} and {}", index + 1);
         }
     }
 
     #[test]
-    fn the_first_step_copies_nothing_because_nothing_ran_before_it() {
-        let steps = Step::plan(&[pass(Some(16)), pass(Some(8))], BYTES);
-
-        assert_eq!(steps[0].copy_bytes, 0);
-        assert_eq!(
-            steps[1].copy_bytes, 64,
-            "sixteen words, from the pass before"
-        );
+    fn no_pass_reads_and_writes_the_same_buffer() {
+        for index in 0..8_usize {
+            let (read, written) = Ends::of(index).order("source", "destination");
+            assert_ne!(read, written, "pass {index}");
+        }
     }
 
     #[test]
-    fn each_step_is_handed_what_the_pass_before_it_wrote_and_not_its_own_count() {
-        // The mistake that would still run: reading this pass's `outputs` instead of the previous
-        // one's. Every count below is different, so the two readings cannot coincide.
-        let steps = Step::plan(&[pass(Some(64)), pass(Some(32)), pass(Some(16))], BYTES);
+    fn the_answer_is_wherever_the_last_pass_wrote() {
+        // Derived independently of `answer_in_destination`, so the two have to agree rather than
+        // being the same expression twice.
+        for passes in 1..10_usize {
+            let (_, written) = Ends::of(passes - 1).order("source", "destination");
+            let expected = written == "destination";
 
-        assert_eq!(steps[1].copy_bytes, 256, "the first pass wrote 64 words");
-        assert_eq!(steps[2].copy_bytes, 128, "the second wrote 32");
+            assert_eq!(answer_in_destination(passes), expected, "{passes} passes");
+        }
     }
 
     #[test]
-    fn a_pass_that_says_nothing_hands_on_the_whole_buffer() {
-        let steps = Step::plan(&[pass(None), pass(Some(8))], BYTES);
-
-        assert_eq!(steps[1].copy_bytes, BYTES);
+    fn an_odd_chain_ends_in_the_destination_and_an_even_one_in_the_source() {
+        assert!(answer_in_destination(1));
+        assert!(!answer_in_destination(2));
+        assert!(answer_in_destination(15), "the 2^20 reduction");
+        assert!(!answer_in_destination(8), "the 8192 one");
     }
 
     #[test]
-    fn a_count_larger_than_the_buffer_is_capped_rather_than_read_past_the_end() {
-        let steps = Step::plan(&[pass(Some(1_000_000)), pass(None)], BYTES);
-
-        assert_eq!(steps[1].copy_bytes, BYTES);
-    }
-
-    #[test]
-    fn a_count_of_zero_becomes_one_word_because_an_empty_copy_is_not_allowed() {
-        // Vulkan refuses a zero-size `vkCmdCopyBuffer`, and `copy_bytes == 0` already means "no
-        // copy at all" here — so a pass claiming to write nothing must not collide with that.
-        let steps = Step::plan(&[pass(Some(0)), pass(None)], BYTES);
-
-        assert_eq!(steps[1].copy_bytes, 4);
-        assert_ne!(steps[1].copy_bytes, 0, "that would skip the copy entirely");
-    }
-
-    #[test]
-    fn every_step_keeps_its_own_pass_workgroup_count() {
-        let passes = [
-            Pass::writing(&[], 7, 16),
-            Pass::writing(&[], 3, 8),
-            Pass::new(&[], 1),
-        ];
-        let steps = Step::plan(&passes, BYTES);
-
-        assert_eq!(
-            steps.iter().map(|step| step.workgroups).collect::<Vec<_>>(),
-            vec![7, 3, 1]
-        );
-    }
-
-    #[test]
-    fn a_chain_of_one_is_one_step_that_copies_nothing() {
-        let steps = Step::plan(&[pass(Some(16))], BYTES);
-
-        assert_eq!(steps.len(), 1);
-        assert_eq!(steps[0].copy_bytes, 0);
-    }
-
-    #[test]
-    fn no_passes_is_no_steps() {
-        assert!(Step::plan(&[], BYTES).is_empty());
+    fn a_chain_of_none_leaves_the_answer_where_the_host_put_it() {
+        assert!(!answer_in_destination(0));
     }
 }

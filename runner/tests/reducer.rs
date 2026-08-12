@@ -169,25 +169,34 @@ fn two_reducers_of_different_lengths_do_not_interfere() {
 }
 
 #[test]
-fn a_shortened_copy_still_hands_the_next_pass_everything_it_reads() {
-    // The chain copies only as many words as the pass before it wrote. Copy one word too few and
-    // the tail the next pass reads holds whatever the source buffer held before — which, on a
-    // reducer being called a second time, is the *previous call's* data. So this runs a reducer
-    // twice with different inputs and checks the second answer against its own reference, at
-    // several lengths: each length has a different number of folds, and therefore a different
-    // number of copies to get wrong.
-    let Some(gpu) = device("reducer-copy-length") else {
+fn a_reducer_reads_the_end_of_the_pair_its_last_pass_wrote() {
+    // The chain ping-pongs across two buffers, so which one holds the answer depends on whether the
+    // pass count is odd or even. Reading the wrong one returns the second-to-last fold — a
+    // plausible number, roughly twice the right one, and green on any length that happens to have
+    // the parity the code assumed.
+    //
+    // So this sweeps lengths. `dispatches_for` is 8 at 8 192 elements and 15 at 2^20, so both
+    // parities are here whatever the device's subgroup width does to the fold count.
+    let Some(gpu) = device("reducer-parity") else {
         return;
     };
     if !gpu.limits().subgroup_arithmetic {
-        eprintln!("SKIPPED reducer-copy-length: no subgroup arithmetic reported");
+        eprintln!("SKIPPED reducer-parity: no subgroup arithmetic reported");
         return;
     }
+
+    let mut odd = 0;
+    let mut even = 0;
 
     for power in 8..=16 {
         let count = 1_usize << power;
         if count < 2 * WORKGROUP_SIZE as usize {
             continue;
+        }
+        if dispatches_for(count).is_multiple_of(2) {
+            even += 1;
+        } else {
+            odd += 1;
         }
 
         let mut reducer = match gpu.reducer(count) {
@@ -195,8 +204,9 @@ fn a_shortened_copy_still_hands_the_next_pass_everything_it_reads() {
             Err(error) => panic!("{count} elements: {error}"),
         };
 
-        // Large first, then small. The small call cannot pass by reading stale data, because the
-        // stale data would make it larger rather than smaller.
+        // Two different inputs through one reducer, large first. A stale buffer would make the
+        // second answer too large rather than too small, and the wrong end of the pair would make
+        // either about double.
         let heavy = payload(count, 4.0);
         let light = payload(count, 1.0);
 
@@ -204,25 +214,32 @@ fn a_shortened_copy_still_hands_the_next_pass_everything_it_reads() {
         assert_eq!(
             first.total,
             heavy.iter().sum::<f32>(),
-            "{count} elements, first call"
+            "{count} elements, {} passes, first call",
+            dispatches_for(count)
         );
 
         let second = reducer.sum(&light).expect("reduced");
         assert_eq!(
             second.total,
             light.iter().sum::<f32>(),
-            "{count} elements, second call — a copy shorter than the next pass reads would leave \
-             the first call's data in the tail"
+            "{count} elements, {} passes, second call",
+            dispatches_for(count)
         );
     }
+
+    assert!(
+        odd > 0 && even > 0,
+        "only one parity was covered: {odd} odd, {even} even"
+    );
 }
 
 #[test]
-fn a_chain_whose_passes_do_not_say_what_they_write_still_copies_everything() {
-    // `Pass::new` makes no claim about how much its pass writes, so the whole buffer is handed on.
-    // That is the behaviour every caller had before `Pass::writing` existed, and a chain of
-    // scaling kernels — which write every element — is where shortening it would be wrong.
-    let Some(gpu) = device("chain-whole-copy") else {
+fn a_chain_of_either_parity_returns_the_buffer_its_last_pass_wrote() {
+    // The same claim one level down, where the pass count is chosen rather than derived. One
+    // doubling, two, three and four: the odd ones leave the answer in the destination buffer and
+    // the even ones in the source, and every count has a different expected value so no two can be
+    // confused.
+    let Some(gpu) = device("chain-parity") else {
         return;
     };
     let width = gpu.limits().subgroup_size;
@@ -231,15 +248,17 @@ fn a_chain_whose_passes_do_not_say_what_they_write_still_copies_everything() {
     let count = 4 * WORKGROUP_SIZE as usize;
     let input: Vec<u32> = (0..count).map(|index| (index as f32).to_bits()).collect();
 
-    let passes: Vec<runner::Pass<'_>> = (0..3)
-        .map(|_| runner::Pass::new(&doubling, count as u32 / WORKGROUP_SIZE))
-        .collect();
+    for passes in 1..=4_u32 {
+        let chain: Vec<runner::Pass<'_>> = (0..passes)
+            .map(|_| runner::Pass::new(&doubling, count as u32 / WORKGROUP_SIZE))
+            .collect();
 
-    let output = gpu.run_chain(&passes, &input).expect("dispatched");
+        let output = gpu.run_chain(&chain, &input).expect("dispatched");
 
-    // Three doublings, over every element rather than a prefix.
-    let expected: Vec<u32> = (0..count)
-        .map(|index| (index as f32 * 8.0).to_bits())
-        .collect();
-    assert_eq!(output, expected);
+        let factor = 2.0_f32.powi(passes as i32);
+        let expected: Vec<u32> = (0..count)
+            .map(|index| (index as f32 * factor).to_bits())
+            .collect();
+        assert_eq!(output, expected, "{passes} passes, factor {factor}");
+    }
 }

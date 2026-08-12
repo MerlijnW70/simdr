@@ -135,7 +135,7 @@ did not.
 
 | Layer | What it is | What it caught |
 | --- | --- | --- |
-| **Unit tests** | 320 in the emitter, decoding what was emitted; 586 across the workspace | Everything cheap |
+| **Unit tests** | 320 in the emitter, decoding what was emitted; 585 across the workspace | Everything cheap |
 | **`spirv-val`** | Khronos' validator, at `--target-env vulkan1.1` | `OpLoopMerge` in the wrong position — a unit test asserted "merge before branch" and passed while the comparison sat between them |
 | **Execution** | Real dispatches on a real GPU, against CPU references | A missing staging write: every computing kernel returned garbage and the empty-kernel test still passed |
 | **Other devices** | The same suite at 64 lanes and at 8, as well as at 32 | Ten tests that had conflated "32 lanes" with "the subgroup", four of which could not build at all because a vote has no clustered form. Then, at 8: a fuzzer generating shuffles that leave the subgroup, and three tests assuming uninitialised device memory is zero |
@@ -351,16 +351,24 @@ Measured rather than argued, each row a difference between two calls that differ
 
 | | per call | share |
 | --- | --- | --- |
-| fourteen between-pass copies, shortened to what each pass reads | 274 µs | 16% |
-| host upload of the input | 338 µs | 19% |
-| host download of the output | 662 µs | 38% |
+| fourteen chained steps — one barrier each, nothing copied | 234 µs | 12% |
+| host upload of the input | 352 µs | 18% |
+| host download of the output | 726 µs | 37% |
 
-**The host round trip is most of it**, and nothing on the device touches that. The copies used to
-be 386 µs and shortening them bought **85 µs**, not the 111 the traffic suggested — a whole-buffer
-step is 27.5 µs of which 19.0 is the two pipeline barriers around the copy and 8.6 is the data. The
-barriers stay whatever the copy carries, which makes them the largest device-side item left.
+**The host round trip is most of it**, and nothing on the device touches that. A caller whose data
+is already on the device pays neither, which is what `notes/NEXT.md` heads with now.
 
-`notes/NEXT.md` had this down as "the copies are probably most of the cost". They were a fifth.
+The chained steps got there through two changes and **both were smaller than predicted, the same
+way**. `notes/NEXT.md` said the between-pass copies were probably most of the cost: they were a
+fifth, and shortening them to what each pass reads bought 85 µs of a predicted 111. Then it said
+the *barriers* around those copies were the real item: replacing the copy with a ping-pong across
+two descriptor sets bought 32 µs of a predicted 250, because one barrier costs nearly what two did.
+
+Each time a component was timed with its barriers included and then costed as though removing the
+component removed the barriers too. The ping-pong is kept for being shorter code — no copies, no
+copy lengths, no class of bug where a short copy returns the previous call's data — and because on
+the **integrated Radeon**, where bandwidth is scarce, it *is* worth 5.5%. On the 4080 and on
+lavapipe it is worth nothing measurable.
 
 ## One instruction where there were eleven
 

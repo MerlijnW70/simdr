@@ -1458,3 +1458,58 @@ so a stale tail makes the answer too large rather than too small.
 
 It was checked by being broken: halving the declared output length fails **five** tests, including
 that one. A guard that has never fired is not known to be a guard.
+
+## The ping-pong is simpler code, and only faster where bandwidth is scarce — 2026-08-12
+
+The chain no longer copies. Two device buffers alternate — pass 0 reads A and writes B, pass 1 reads
+B and writes A — so only the descriptor set a pipeline was built with changes, and the module never
+learns which end it is on. `runner/src/dispatch/step.rs` has the arithmetic.
+
+The prediction, written in `notes/NEXT.md` the same day: the copy step was 27.5 µs of which 19.0 µs
+was its *pair* of pipeline barriers, so removing the copy and one barrier should leave about 9.5 µs
+and save ~250 µs of a 1900 µs reduction.
+
+**It saved about 32.** One barrier costs nearly what two did: a chained step went from 19.0 µs
+(two barriers plus a one-word copy) to 16.7 µs (one barrier). NEXT.md's own refutation clause —
+*"the remaining barrier costing what both did"* — is what happened.
+
+### The A/B, because the machine had drifted
+
+Comparing against numbers taken an hour earlier said the change made things *worse*, which is what
+sent this back for a second look: `Gpu::sum` had moved too, in the same direction, on code that had
+not changed. Something else on the machine was busy.
+
+So both versions were built to separate binaries and run **alternately**, five rounds each,
+2²⁰ elements:
+
+| device | with copies | ping-pong | paired |
+| --- | --- | --- | --- |
+| RTX 4080 | 1929 µs | 1914 µs | no measurable difference, 2 of 5 rounds favour copies |
+| integrated Radeon | 3792 µs | 3631 µs | **5.5%**, all 4 rounds favour ping-pong |
+| lavapipe | 4064 µs | 4038 µs | no measurable difference |
+
+The 4080 has bandwidth to spare and does not notice 4 MB of copying. The integrated part does not
+and does. That is the same split the workgroup-size sweep and the integer dot product both found,
+which is starting to be the most reliable prediction in this file: **anything that trades memory
+traffic for instructions is worth something on the integrated device and nothing on the discrete
+one.**
+
+### Kept anyway, and not for speed
+
+`chain.rs` lost the copy, both barrier-stage constants and the `Stages` type; `Pass` lost `outputs`
+and `writing`; `Step` lost `copy_bytes` and then lost `Step`. A whole class of bug went with them —
+a copy shorter than the next pass reads returns the *previous call's* data, which was real enough
+to need a test at nine lengths.
+
+What replaced it is one arithmetic question, and it is a sharper one: **the answer moves.** An odd
+number of passes leaves it in B and an even number in A. Reading the wrong end returns the
+second-to-last fold — roughly double the right answer, and green on any length whose parity happens
+to match what the code assumed. `runner/tests/reducer.rs` sweeps nine lengths and asserts both
+parities were covered; flipping `answer_in_destination` fails **nine** tests across two levels.
+
+### Two measurements that were the same shape
+
+The copy-shortening before it predicted 111 µs and delivered 85. This predicted 250 and delivered
+32. Both times the error was the same: a component was timed *with its barriers included* and then
+costed as though removing the component removed the barriers too. The barriers were never the thing
+being removed.

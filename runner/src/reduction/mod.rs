@@ -109,25 +109,19 @@ impl Gpu {
 
         // One module per fold, because the offset is a build-time constant. Built up front so a
         // failure happens before anything is submitted.
-        // The third element is how many words each pass writes, which is what the pass after it
-        // has to be handed. A fold of `2h` into `h` writes `h`; without it the chain copies the
-        // whole buffer between every pass, which `notes/FINDINGS.md` measured at a fifth of a
-        // large reduction.
         let mut modules = Vec::new();
         for step in folds(input.len()) {
             let words = kernels::fold_halves(width, step.half).map_err(Error::Emit)?;
-            modules.push((words, step.workgroups, step.half as usize));
+            modules.push((words, step.workgroups));
         }
         // The last pass crosses between the subgroups of the final workgroup, through shared
-        // memory and a barrier, so every one of its invocations holds the whole answer. Nothing
-        // follows it, so what it writes is never copied anywhere — the count is the workgroup it
-        // filled, stated rather than left to a reader to wonder about.
+        // memory and a barrier, so every one of its invocations holds the whole answer.
         let finisher = kernels::workgroup_sum::<F32>(width).map_err(Error::Emit)?;
-        modules.push((finisher, 1, WORKGROUP_SIZE as usize));
+        modules.push((finisher, 1));
 
         let passes: Vec<Pass<'_>> = modules
             .iter()
-            .map(|(words, workgroups, outputs)| Pass::writing(words, *workgroups, *outputs))
+            .map(|(words, workgroups)| Pass::new(words, *workgroups))
             .collect();
 
         let words: Vec<u32> = input.iter().map(|value| value.to_bits()).collect();

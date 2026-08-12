@@ -24,7 +24,7 @@
 
 use super::{BadLength, Fold, Reduction, folds};
 use crate::buffer::Buffer;
-use crate::dispatch::{Pass, Pipeline, Step};
+use crate::dispatch::{Ends, Pipeline, answer_in_destination};
 use crate::kernels::{self, WORKGROUP_SIZE};
 use crate::{Error, Gpu};
 use simdr::lanes::F32;
@@ -43,11 +43,11 @@ pub struct Reducer<'gpu> {
     destination: Option<Buffer>,
     /// One per pass, in order: the folds, then the workgroup reduction that finishes.
     pipelines: Vec<Pipeline>,
-    /// What each pass dispatches, and what the pass before it hands it, in the same order.
+    /// How many workgroups each pass dispatches, in the same order.
     ///
     /// Kept beside the pipelines rather than recomputed, because `folds` is arithmetic on the
     /// element count and recomputing it in two places is how the two come to disagree.
-    steps: Vec<Step>,
+    workgroups: Vec<u32>,
 }
 
 impl Gpu {
@@ -75,30 +75,20 @@ impl Gpu {
             }));
         }
 
-        // Every module first, so a build failure happens before anything is allocated. The third
-        // element is how many words the pass writes, which decides how much the pass after it is
-        // handed — see `Pass::writing`.
+        // Every module first, so a build failure happens before anything is allocated.
         let plan: Vec<Fold> = folds(elements);
-        let mut modules: Vec<(Vec<u32>, u32, usize)> = Vec::with_capacity(plan.len() + 1);
+        let mut modules: Vec<(Vec<u32>, u32)> = Vec::with_capacity(plan.len() + 1);
         for step in &plan {
             let words = kernels::fold_halves(width, step.half).map_err(Error::Emit)?;
-            modules.push((words, step.workgroups, step.half as usize));
+            modules.push((words, step.workgroups));
         }
         modules.push((
             kernels::workgroup_sum::<F32>(width).map_err(Error::Emit)?,
             1,
-            WORKGROUP_SIZE as usize,
         ));
 
         let bytes = (elements.max(1) * size_of::<u32>()) as u64;
-
-        // The copy lengths, from the same list the pipelines are built from, so the two cannot
-        // describe different chains.
-        let passes: Vec<Pass<'_>> = modules
-            .iter()
-            .map(|(words, workgroups, outputs)| Pass::writing(words, *workgroups, *outputs))
-            .collect();
-        let steps = Step::plan(&passes, bytes);
+        let workgroups: Vec<u32> = modules.iter().map(|(_, groups)| *groups).collect();
 
         // SAFETY: everything allocated here is owned by the `Reducer` and destroyed in its `Drop`,
         // which cannot run while a dispatch is in flight — every dispatch waits on a fence before
@@ -122,11 +112,15 @@ impl Gpu {
             };
 
             let mut pipelines = Vec::with_capacity(modules.len());
-            for pass in &passes {
+            for (index, (words, _)) in modules.iter().enumerate() {
+                // The pair alternates: pass 0 reads the source and writes the destination, pass 1
+                // the other way round. It is the descriptor set that decides, so the modules are
+                // untouched — `fold_halves` has no idea which buffer it is reading.
+                let (read, written) = Ends::of(index).order(&source, &destination);
                 match Pipeline::new(
                     self,
-                    pass.spirv,
-                    &[(&source, bytes), (&destination, bytes)],
+                    words,
+                    &[(read, bytes), (written, bytes)],
                     &crate::Specialization::none(),
                 ) {
                     Ok(pipeline) => pipelines.push(pipeline),
@@ -149,7 +143,7 @@ impl Gpu {
                 source: Some(source),
                 destination: Some(destination),
                 pipelines,
-                steps,
+                workgroups,
             })
         }
     }
@@ -203,10 +197,17 @@ impl Reducer<'_> {
             staging.write(self.gpu, &words)?;
             self.gpu.copy(staging, source, bytes)?;
 
-            self.gpu
-                .replay(&self.pipelines, &self.steps, source, destination)?;
+            self.gpu.replay(&self.pipelines, &self.workgroups)?;
 
-            self.gpu.copy(destination, staging, bytes)?;
+            // The buffers alternate, so which one holds the answer depends on how many passes ran.
+            // Reading the wrong one returns the *second to last* fold — a plausible number, and
+            // roughly twice the right one.
+            let answer = if answer_in_destination(self.pipelines.len()) {
+                destination
+            } else {
+                source
+            };
+            self.gpu.copy(answer, staging, bytes)?;
             staging.read(self.gpu, self.elements)?
         };
 

@@ -34,7 +34,7 @@ pub use specialization::Specialization;
 pub use step::Pass;
 
 pub(crate) use pipeline::Pipeline;
-pub(crate) use step::Step;
+pub(crate) use step::{Ends, answer_in_destination};
 
 use crate::buffer::Buffer;
 use crate::{Error, Gpu};

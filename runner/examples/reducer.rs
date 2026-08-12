@@ -88,15 +88,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Where a held reduction's remaining time actually goes.
 ///
-/// `notes/NEXT.md` proposed shortening the between-pass copies on the grounds that they were
-/// probably most of what `Reducer::sum` still costs at 2²⁰, and said to time them first. This is
-/// the timing, and it also measures the two things the copies would have to beat.
+/// `notes/NEXT.md` asked twice about this half of the call — first whether the between-pass copies
+/// dominated it (they did not; they were a fifth) and then whether the barriers around those copies
+/// did (they were two thirds of the fifth). The copies are gone now, replaced by a ping-pong across
+/// two descriptor sets, and one barrier per pass is what is left.
 ///
 /// Each row is a *difference between two calls that differ in one thing*, rather than a subtraction
 /// from an estimate:
 ///
-/// - **between-pass copies** — a chain of empty kernels at [`LONG`] passes against the same chain
-///   at one. Both do nothing else; the difference is the copies and nothing but.
+/// - **chained step** — a chain of empty kernels at [`LONG`] passes against the same chain at one.
+///   Both do nothing else, so the difference is one dispatch and the barrier before it.
 /// - **host upload / download** — `Session::write` and `Session::read` on a session that is already
 ///   built, so no allocation and no pipeline creation is in the number.
 ///
@@ -105,9 +106,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ///
 /// # Why the long chain
 ///
-/// The copy row is a difference between two ~2 ms numbers. At 15 passes that difference is about
-/// a tenth of either, and the repeats are about a tenth apart — so the signal and the noise were
-/// the same size, and two runs of this file reported 188 µs and 337 µs for the same thing.
+/// The step row is a difference between two ~2 ms numbers. At 15 passes that difference is about a
+/// tenth of either, and the repeats are about a tenth apart — so signal and noise were the same
+/// size, and two runs of this file once reported 188 us and 337 us for the same quantity.
 ///
 /// [`LONG`] makes the difference roughly half of the measurement instead of a tenth, which is the
 /// whole fix: the repeats are no steadier, they just no longer swamp what is being measured. Both
@@ -115,7 +116,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn breakdown(gpu: &Gpu, whole: Duration) -> Result<(), Box<dyn std::error::Error>> {
     const ELEMENTS: usize = 1 << 20;
     const REPEATS: usize = 20;
-    /// Passes in the long chain, and therefore `LONG - 1` copies.
+    /// Passes in the long chain, and therefore `LONG - 1` barriers.
     const LONG: usize = 61;
 
     let megabytes = (ELEMENTS * size_of::<u32>()) as f64 / 1e6;
@@ -124,21 +125,10 @@ fn breakdown(gpu: &Gpu, whole: Duration) -> Result<(), Box<dyn std::error::Error
 
     println!("\nwhere a held reduction over {megabytes:.0} MB spends its time:");
 
-    // Three chains, differing in one thing each:
-    //   one pass          — no copies, no barriers
-    //   LONG, whole buffer — LONG-1 copies of 4 MB, each between two pipeline barriers
-    //   LONG, one word     — the same LONG-1 barrier pairs, carrying almost nothing
-    //
-    // The last is what separates the copy from the barriers around it, and it is the reason the
-    // end-to-end saving from shortening the copies is smaller than the copies measure.
-    let mut chained = Vec::with_capacity(3);
-    for (passes, outputs) in [(1_usize, None), (LONG, None), (LONG, Some(1_usize))] {
-        let chain: Vec<runner::Pass<'_>> = (0..passes)
-            .map(|_| match outputs {
-                None => runner::Pass::new(&empty, 1),
-                Some(words) => runner::Pass::writing(&empty, 1, words),
-            })
-            .collect();
+    let mut chained = Vec::with_capacity(2);
+    for passes in [1_usize, LONG] {
+        let chain: Vec<runner::Pass<'_>> =
+            (0..passes).map(|_| runner::Pass::new(&empty, 1)).collect();
         gpu.run_chain(&chain, &input)?;
 
         let mut samples = Vec::with_capacity(REPEATS);
@@ -150,41 +140,28 @@ fn breakdown(gpu: &Gpu, whole: Duration) -> Result<(), Box<dyn std::error::Error
         chained.push(Timing::of(&samples).ok_or("no samples")?);
     }
 
-    let (short, long, thin) = (
+    let (short, long) = (
         chained.first().ok_or("no short chain")?,
         chained.get(1).ok_or("no long chain")?,
-        chained.get(2).ok_or("no thin chain")?,
     );
-    let steps = LONG as u32 - 1;
-    let each = long.median.saturating_sub(short.median) / steps;
-    let barrier_each = thin.median.saturating_sub(short.median) / steps;
-    let payload_each = each.saturating_sub(barrier_each);
-    // Fourteen full-buffer copies is what a 15-fold reduction over this buffer used to record.
-    let copies = each * 14;
-    // And what it records now: fourteen barrier pairs that stay whatever the copies carry, plus
-    // one buffer's worth of payload between them — the copy before each pass is as long as that
-    // pass reads, and those halve to 2^19 + 2^18 + … + 64 words in total.
-    let shortened = barrier_each * 14 + payload_each;
+    let each = long.median.saturating_sub(short.median) / (LONG as u32 - 1);
+    let fourteen = each * 14;
 
     println!(
-        "  one whole-buffer step costs about {} — medians of {} at {LONG} passes against {} at\n\
-         one, over {REPEATS} repeats each. Of that, about {} is the two pipeline barriers around\n\
-         the copy and about {} is the {megabytes:.0} MB itself.",
+        "  one chained step — a dispatch and the barrier before it — costs about {}, from\n\
+         medians of {} at {LONG} passes against {} at one, over {REPEATS} repeats each.",
         micros(each),
         micros(long.median),
         micros(short.median),
-        micros(barrier_each),
-        micros(payload_each),
     );
     println!(
-        "  worst repeat over best: {:.2}×, {:.2}×, {:.2}× — {}",
+        "  worst repeat over best: {:.2}x and {:.2}x — {}",
         long.spread(),
         short.spread(),
-        thin.spread(),
-        if long.is_steady() && short.is_steady() && thin.is_steady() {
-            "steady, so the differences above are worth quoting"
+        if long.is_steady() && short.is_steady() {
+            "steady, so the difference above is worth quoting"
         } else {
-            "NOT steady; the differences above are noise as much as measurement"
+            "NOT steady; the difference above is noise as much as measurement"
         }
     );
     println!();
@@ -207,35 +184,34 @@ fn breakdown(gpu: &Gpu, whole: Duration) -> Result<(), Box<dyn std::error::Error
     let download = started.elapsed() / REPEATS as u32;
 
     println!(
-        "{:>34} {:>12} {:>10}   (of {})",
+        "{:>36} {:>12} {:>10}   (of {})",
         "",
         "per call",
         "share",
         micros(whole)
     );
     for (name, taken) in [
-        ("fourteen FULL-buffer copies (was)", copies),
-        ("the shortened copies (is)", shortened),
+        ("fourteen chained steps", fourteen),
         ("host upload of the input", upload),
         ("host download of the output", download),
     ] {
         let share = taken.as_secs_f64() / whole.as_secs_f64() * 100.0;
-        println!("{name:>34} {:>12} {share:>9.0}%", micros(taken));
+        println!("{name:>36} {:>12} {share:>9.0}%", micros(taken));
     }
 
     println!(
-        "\n  The first row is what the chain did before `Pass::writing`. The second is what it\n\
-         does now, and the difference between them is the *payload* only — the fourteen barrier\n\
-         pairs are in both, because a pass still has to wait for the one before it whatever it is\n\
-         handed. That is why the end-to-end number moved by far less than the first row suggests,\n\
-         and it is what a ping-pong across two descriptor sets would remove instead.\n\n\
+        "\n  A chained step used to be a copy between two pipeline barriers — 27.5 us on an RTX\n\
+         4080, of which 19.0 us was the barriers. It is one barrier and no copy now, at 16.7 us,\n\
+         and removing the second barrier turned out to save about 2 us rather than half of 19.\n\
+         Paired against the old build on the same machine: no measurable difference on the 4080\n\
+         or on lavapipe, and 5.5%% on the integrated Radeon, where bandwidth is scarce enough for\n\
+         4 MB of copying to show. notes/FINDINGS.md has the runs.\n\n\
        \x20 Shares are against the `Reducer::sum` time in the table above, same run, same device.\n\
-         `notes/NEXT.md` expected the copies to dominate. The two host transfers do."
+         The two host transfers are most of the call, and no kernel change touches them."
     );
 
     Ok(())
 }
-
 /// Microseconds, which is the scale these land on.
 fn micros(duration: Duration) -> String {
     format!("{:.1} us", duration.as_secs_f64() * 1e6)

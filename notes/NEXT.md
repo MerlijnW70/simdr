@@ -269,6 +269,27 @@ chain that separated them.
 Worth doing at 85 µs? Marginally, and it was worth *measuring* regardless — it is the only reason
 the two items below are known to be the real ones.
 
+### 14. The ping-pong — **built, and it is not the speed-up it was scheduled as**
+
+Two buffers alternating instead of a copy between passes. The prediction was ~250 µs of a 1900 µs
+reduction, on the grounds that a chained step was 27.5 µs of which 19.0 was its *pair* of barriers.
+
+One barrier costs nearly what two did — a step went 19.0 → 16.7 µs — so it saved about 32. The
+refutation clause this item was written with is exactly what happened.
+
+Paired against the old build on the same machine, alternating runs:
+
+| device | with copies | ping-pong | |
+| --- | --- | --- | --- |
+| RTX 4080 | 1929 µs | 1914 µs | nothing |
+| integrated Radeon | 3792 µs | 3631 µs | **5.5%**, every round |
+| lavapipe | 4064 µs | 4038 µs | nothing |
+
+**Kept for being shorter, not faster.** `chain.rs` lost the copy and both barrier constants, `Pass`
+lost `outputs` and `writing`, `Step` stopped existing — and with them a copy-length bug that
+returned the previous call's data. What arrived instead is one sharp question, which is that the
+answer now moves between the two buffers by parity.
+
 ## 1. The host round trip is 57% of a large reduction
 
 Upload 338 µs, download 662 µs, against a 1762 µs call. No kernel change touches either, and no
@@ -281,18 +302,6 @@ not need it on the host. `Reducer::sum` takes `&[f32]` and returns `f32`, so it 
 What this needs is a shape, not an optimisation: something like `Reducer::sum_binding`, taking and
 leaving a device buffer, with `sum` as the convenience wrapper that copies. `Session` already
 proves the pieces exist. The measurement to beat is `runner/examples/reducer.rs`.
-
-## 2. The barriers are now the largest device-side item
-
-266 µs of the remaining 274 µs is fourteen pairs of pipeline barriers, at ~19 µs a pair. They are
-there because every pass reads the buffer the pass before it wrote, through a copy.
-
-A ping-pong across two descriptor sets — pass `n` reads A writes B, pass `n+1` reads B writes A —
-removes the copy entirely and one of the two barriers with it. `chain.rs` has said so in a comment
-since it was written; what is new is that the comment now has a number against it.
-
-**What would refute it:** the remaining barrier costing what both did, in which case the ping-pong
-buys the 8 µs of payload and nothing else. Time one barrier before removing the other.
 
 ---
 

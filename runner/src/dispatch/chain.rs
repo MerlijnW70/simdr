@@ -8,26 +8,24 @@
 //!
 //! # Feeding each pass its predecessor's output
 //!
-//! Every kernel this crate emits binds buffer 0 read and buffer 1 written, and those bindings are
-//! baked into the module. Rather than build a second descriptor set and alternate, each pass is
-//! followed by a device-to-device copy back into the source.
+//! Two device buffers, alternating: pass 0 reads A and writes B, pass 1 reads B and writes A. Only
+//! the descriptor set changes — every kernel this crate emits binds buffer 0 read and buffer 1
+//! written, and the module never learns which is which. [`super::step`] has the arithmetic and the
+//! consequence, which is that the answer ends up in a different buffer depending on how many
+//! passes ran.
 //!
-//! **The copy is as long as the next pass will read, and no longer.** It used to be the whole
-//! buffer every time, which for a shrinking reduction is mostly copying elements nobody will look
-//! at again: fourteen copies of 4 MB where the fourteen passes between them read 4 MB in total.
-//! `runner/examples/reducer.rs` measured that at ~20% of a held reduction over 2²⁰ elements — not
-//! the majority `notes/NEXT.md` predicted, and not nothing either.
+//! This file is the recording: barriers, dispatches, and the submission around them. It replaced a
+//! device-to-device copy of B back into A after every pass — 22% of a held reduction over 2^20
+//! elements, two thirds of which was the pair of pipeline barriers the copy needed rather than the
+//! copy itself. What is left between passes is one barrier, because a pass still has to wait for
+//! the one before it, and that one barrier turned out to cost nearly what the pair did.
 //!
-//! [`Pass::new`] still copies everything, because a caller who has not said how much its pass
-//! writes has not given anyone the right to guess. [`Pass::writing`] is where the saving is, and it
-//! is what [`crate::Reducer`] and [`crate::Gpu::sum`] use — they know, because the fold sizes are
-//! what they were built from.
-//!
-//! A ping-pong across two descriptor sets would remove the copy entirely and is still the right
-//! shape for a chain built to be fast. This one is built to be correct.
+//! So this is shorter code rather than faster code, except on a device short of bandwidth — 5.5%
+//! on the integrated Radeon and nothing measurable on the other two. `super::step` has the
+//! numbers.
 
 use super::pipeline::Pipeline;
-use super::step::{Pass, Step};
+use super::step::{Ends, Pass, answer_in_destination};
 use crate::buffer::Buffer;
 use crate::{Error, Gpu};
 use ash::vk;
@@ -85,14 +83,18 @@ impl Gpu {
         count: usize,
     ) -> Result<Vec<u32>, Error> {
         let mut pipelines = Vec::with_capacity(passes.len());
-        for pass in passes {
+        for (index, pass) in passes.iter().enumerate() {
             // Built before recording rather than inside it: a failure here must not leave a
             // half-recorded command buffer, and every pipeline has to outlive the submission.
+            //
+            // The buffer pair alternates, which is the whole ping-pong: this pipeline's descriptor
+            // set is what decides which end the pass reads.
+            let (read, written) = Ends::of(index).order(source, destination);
             match unsafe {
                 Pipeline::new(
                     self,
                     pass.spirv,
-                    &[(source, bytes), (destination, bytes)],
+                    &[(read, bytes), (written, bytes)],
                     &super::Specialization::none(),
                 )
             } {
@@ -108,11 +110,16 @@ impl Gpu {
 
         unsafe { self.copy(staging, source, bytes) }?;
 
-        let steps = Step::plan(passes, bytes);
-        let recorded = unsafe { self.replay(&pipelines, &steps, source, destination) };
+        let groups: Vec<u32> = passes.iter().map(|pass| pass.workgroups).collect();
+        let recorded = unsafe { self.replay(&pipelines, &groups) };
 
         let output = recorded.and_then(|()| {
-            unsafe { self.copy(destination, staging, bytes) }?;
+            let answer = if answer_in_destination(passes.len()) {
+                destination
+            } else {
+                source
+            };
+            unsafe { self.copy(answer, staging, bytes) }?;
             unsafe { staging.read(self, count) }
         });
 
@@ -124,41 +131,37 @@ impl Gpu {
 }
 
 impl Gpu {
-    /// Record every pipeline in order, copying `destination` back into `source` between them, and
-    /// wait for the whole thing.
+    /// Record every pipeline in order with a barrier between them, and wait for the whole thing.
     ///
     /// The half of a chain that does not care where the pipelines came from. [`Gpu::run_chain`]
     /// builds them and throws them away; [`crate::Reducer`] keeps them. Both record the same
     /// sequence, and it lives here so there is one of it.
     ///
-    /// `steps` is one entry per pipeline, in the same order, each saying how many workgroups to
-    /// dispatch and how many bytes to hand it from the pass before.
+    /// `workgroups` is one entry per pipeline, in the same order. Nothing here knows which buffers
+    /// a pipeline is bound to — that was decided when it was built, and this only has to order the
+    /// dispatches against each other.
     ///
     /// # Safety
     ///
-    /// The pipelines and both buffers must be live, and the pipelines' descriptor sets must name
-    /// these buffers — a set built against different ones would read freed memory. Every
-    /// `copy_bytes` must be within both buffers.
+    /// The pipelines must be live, and their descriptor sets must name buffers that are — a set
+    /// built against freed ones would read freed memory.
     pub(crate) unsafe fn replay(
         &self,
         pipelines: &[Pipeline],
-        steps: &[Step],
-        source: &Buffer,
-        destination: &Buffer,
+        workgroups: &[u32],
     ) -> Result<(), Error> {
         // The duration `record_and_wait` reports is the host's view of the whole submission, which
         // is not what a chain's caller wants — `Gpu::sum` reports dispatch *counts* and leaves
         // timing to the examples. Discarded here rather than threaded out to nobody.
         let recorded = unsafe {
             self.record_and_wait(|device, command| {
-                for (pipeline, step) in pipelines.iter().zip(steps) {
-                    if step.copy_bytes > 0 {
-                        // The previous pass wrote `destination`; this one reads `source`. Both the
-                        // copy and the dispatch after it wait on what came before.
-                        barrier(device, command, TRANSFER_AFTER_SHADER);
-                        let region = [vk::BufferCopy::default().size(step.copy_bytes)];
-                        device.cmd_copy_buffer(command, destination.handle, source.handle, &region);
-                        barrier(device, command, SHADER_AFTER_TRANSFER);
+                for (index, (pipeline, groups)) in pipelines.iter().zip(workgroups).enumerate() {
+                    if index > 0 {
+                        // This pass reads what the one before it wrote, and writes what the one
+                        // before *that* read. The first is a memory dependency and needs the access
+                        // masks; the second is an execution dependency and needs only the barrier
+                        // to exist, which it does.
+                        barrier(device, command);
                     }
 
                     device.cmd_bind_pipeline(
@@ -174,7 +177,7 @@ impl Gpu {
                         &[pipeline.descriptors()],
                         &[],
                     );
-                    device.cmd_dispatch(command, step.workgroups.max(1), 1, 1);
+                    device.cmd_dispatch(command, (*groups).max(1), 1, 1);
                 }
                 Ok(())
             })
@@ -184,44 +187,25 @@ impl Gpu {
     }
 }
 
-/// Which stages a barrier separates, and what access it makes visible.
-type Stages = (
-    vk::PipelineStageFlags,
-    vk::PipelineStageFlags,
-    vk::AccessFlags,
-    vk::AccessFlags,
-);
-
-/// The copy reads what the dispatch wrote.
-const TRANSFER_AFTER_SHADER: Stages = (
-    vk::PipelineStageFlags::COMPUTE_SHADER,
-    vk::PipelineStageFlags::TRANSFER,
-    vk::AccessFlags::SHADER_WRITE,
-    vk::AccessFlags::TRANSFER_READ,
-);
-
-/// The next dispatch reads what the copy wrote.
-const SHADER_AFTER_TRANSFER: Stages = (
-    vk::PipelineStageFlags::TRANSFER,
-    vk::PipelineStageFlags::COMPUTE_SHADER,
-    vk::AccessFlags::TRANSFER_WRITE,
-    vk::AccessFlags::SHADER_READ,
-);
-
-/// Record one memory barrier.
-fn barrier(device: &ash::Device, command: vk::CommandBuffer, stages: Stages) {
-    let (from, to, written, read) = stages;
+/// Record the one barrier a chained pass needs.
+///
+/// `SHADER_WRITE` becoming visible to `SHADER_READ` is the read-after-write: this pass reads the
+/// buffer the last one wrote. `SHADER_WRITE` in the destination mask as well is the
+/// write-after-read: this pass writes the buffer the pass before it *read*, and while an execution
+/// dependency alone is enough for that, naming it is what stops the next reader of this code from
+/// removing it.
+fn barrier(device: &ash::Device, command: vk::CommandBuffer) {
     let memory = [vk::MemoryBarrier::default()
-        .src_access_mask(written)
-        .dst_access_mask(read)];
+        .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+        .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE)];
 
     // SAFETY: the command buffer is recording, and a memory barrier names no resource that could
     // have been destroyed.
     unsafe {
         device.cmd_pipeline_barrier(
             command,
-            from,
-            to,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
             vk::DependencyFlags::empty(),
             &memory,
             &[],
