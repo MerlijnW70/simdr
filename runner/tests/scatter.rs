@@ -24,6 +24,26 @@ fn count() -> usize {
 /// How many bins the histogram tests use.
 const BINS: u32 = 8;
 
+/// Run a counting kernel with its output buffer **zeroed first**, and read the bins back.
+///
+/// A histogram *accumulates*: it adds to whatever the output buffer already holds. `Gpu::run`
+/// allocates that buffer and does not initialise it, and Vulkan says nothing about what is in a
+/// fresh allocation — two drivers here hand back zeros and a third hands back whatever was there.
+///
+/// So the zeroing is the test's job, and it needs a `Session`, which is the only path that can
+/// write a binding the kernel reads *and* writes. Getting this wrong looked like a broken atomic.
+fn counted(gpu: &runner::Gpu, spirv: &[u32], input: &[u32], workgroups: u32) -> Vec<u32> {
+    let mut session = gpu
+        .session(spirv, &[input.len(), input.len()])
+        .expect("opened");
+    session.write(0, input).expect("uploaded");
+    session
+        .write(1, &vec![0_u32; input.len()])
+        .expect("zeroed the counters");
+    session.dispatch(workgroups, 1).expect("dispatched");
+    session.read(1, input.len()).expect("read back")
+}
+
 #[test]
 fn a_histogram_counts_every_input_into_the_bin_it_belongs_in() {
     let Some(gpu) = device("histogram") else {
@@ -38,13 +58,12 @@ fn a_histogram_counts_every_input_into_the_bin_it_belongs_in() {
 
     // Binding 1 starts at zero and is where the counts accumulate. It is the same length as the
     // input because `run_u32` sizes the output to match, and only the first `BINS` are read.
-    let output = gpu
-        .run_u32(
-            &kernels::histogram(limits.subgroup_size, WORKGROUP_SIZE, BINS).expect("built"),
-            &input,
-            1,
-        )
-        .expect("dispatched");
+    let output = counted(
+        &gpu,
+        &kernels::histogram(limits.subgroup_size, WORKGROUP_SIZE, BINS).expect("built"),
+        &input,
+        1,
+    );
 
     let mut expected = vec![0_u32; BINS as usize];
     for value in &input {
@@ -77,21 +96,19 @@ fn counting_by_increment_agrees_with_counting_by_adding_one() {
 
     let input: Vec<u32> = (0..count() as u32).map(|index| index % 5).collect();
 
-    let added = gpu
-        .run_u32(
-            &kernels::histogram(limits.subgroup_size, WORKGROUP_SIZE, BINS).expect("built"),
-            &input,
-            1,
-        )
-        .expect("dispatched");
-    let incremented = gpu
-        .run_u32(
-            &kernels::histogram_incrementing(limits.subgroup_size, WORKGROUP_SIZE, BINS)
-                .expect("built"),
-            &input,
-            1,
-        )
-        .expect("dispatched");
+    let added = counted(
+        &gpu,
+        &kernels::histogram(limits.subgroup_size, WORKGROUP_SIZE, BINS).expect("built"),
+        &input,
+        1,
+    );
+    let incremented = counted(
+        &gpu,
+        &kernels::histogram_incrementing(limits.subgroup_size, WORKGROUP_SIZE, BINS)
+            .expect("built"),
+        &input,
+        1,
+    );
 
     assert_eq!(added.get(..BINS as usize), incremented.get(..BINS as usize));
 }
@@ -107,13 +124,12 @@ fn an_out_of_range_value_is_clamped_into_the_last_bin_rather_than_out_of_the_buf
 
     let input: Vec<u32> = (0..count() as u32).map(|index| index * 1_000).collect();
 
-    let output = gpu
-        .run_u32(
-            &kernels::histogram(limits.subgroup_size, WORKGROUP_SIZE, BINS).expect("built"),
-            &input,
-            1,
-        )
-        .expect("dispatched");
+    let output = counted(
+        &gpu,
+        &kernels::histogram(limits.subgroup_size, WORKGROUP_SIZE, BINS).expect("built"),
+        &input,
+        1,
+    );
 
     // Only element 0 is below the ceiling; everything else clamps to bin 7.
     let expected: Vec<u32> = {
@@ -146,13 +162,12 @@ fn every_invocation_claims_a_different_slot_and_together_they_claim_all_of_them(
     // Slot 0 is the counter and starts at zero; the claims land from slot 1.
     let input = vec![0_u32; count() + 1];
 
-    let output = gpu
-        .run_u32(
-            &kernels::claim_slots(limits.subgroup_size).expect("built"),
-            &input,
-            1,
-        )
-        .expect("dispatched");
+    let output = counted(
+        &gpu,
+        &kernels::claim_slots(limits.subgroup_size).expect("built"),
+        &input,
+        1,
+    );
 
     assert_eq!(
         output.first().copied(),
@@ -190,13 +205,12 @@ fn a_histogram_over_several_workgroups_still_counts_everything() {
     let elements = count() * workgroups as usize;
     let input: Vec<u32> = (0..elements as u32).map(|index| index % 5).collect();
 
-    let output = gpu
-        .run_u32(
-            &kernels::histogram(limits.subgroup_size, WORKGROUP_SIZE, BINS).expect("built"),
-            &input,
-            workgroups,
-        )
-        .expect("dispatched");
+    let output = counted(
+        &gpu,
+        &kernels::histogram(limits.subgroup_size, WORKGROUP_SIZE, BINS).expect("built"),
+        &input,
+        workgroups,
+    );
 
     let mut expected = vec![0_u32; BINS as usize];
     for value in &input {

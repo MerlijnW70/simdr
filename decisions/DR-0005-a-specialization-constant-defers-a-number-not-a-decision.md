@@ -49,15 +49,37 @@ The corrected sentence, then: **the cluster size can be deferred, and the mappin
 lane API's front door takes a width because it picks a shape, not because the number is needed
 early.
 
-## What is deferred today
+## What is deferred today, and why the obvious caller did not happen
 
-Nothing, in the kernels this repository ships. The mechanism exists, is tested end to end, and has
-no caller in `runner/src/kernels` beyond the ones written to test it.
+Nothing, in the kernels this repository ships. The mechanism exists, is tested end to end, and the
+one place it was expected to pay off turned out not to.
 
-That is deliberate rather than unfinished: `Gpu::sum` building ten modules for ten fold sizes is a
-real cost, and the fix is a change to `reduction.rs` that is worth making on its own terms rather
-than as a demonstration. The measurement that would justify it — pipeline creation against module
-emission — is in `runner/examples/overhead.rs` and has not been re-run since.
+`notes/NEXT.md` argued that `Gpu::sum` building fourteen modules for fourteen fold sizes is
+expensive in *pipeline creation*. `runner/examples/specialize.rs` measured it — RTX 4080, a
+reduction over 2²⁰ elements:
+
+| | all fourteen folds | per fold |
+| --- | --- | --- |
+| emitting the modules | 71.5 µs | 5.1 µs |
+| a pipeline each, from fourteen modules | 6796.8 µs | 485.5 µs |
+| a pipeline each, from **one** specialized module | 6726.0 µs | 480.4 µs |
+
+**Specializing saves 1.0%.** Emission is 1.1% of what building the pipelines costs, and that is
+exactly what a specialization constant can remove — because it is fixed *at* pipeline creation, so
+fourteen values still need fourteen pipelines and fourteen shader compilations.
+
+The premise was wrong in a way worth stating plainly: one module per parameter value is **cheap**.
+One *pipeline* per parameter value is expensive, and no specialization constant makes it less so.
+
+What the measurement does say is that a pipeline costs 485 µs against a dispatch's 0.8 µs. The
+reduction chain's real saving is to **hold its pipelines** across calls, the way `Session` already
+holds one — not to defer its constants. That is a different change and it is now on `notes/NEXT.md`
+with this number behind it.
+
+`kernels::fold_halves_open` and `Kernel::load_offset_by` are kept rather than deleted: they are
+what made the comparison possible, they cost one `OpIAdd` per strip against the baked-in form, and
+`runner/tests/specialized.rs` checks that an offset arriving at pipeline time reads the same
+elements as one baked in.
 
 ## Consequences
 

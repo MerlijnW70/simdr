@@ -71,7 +71,7 @@ pub(super) const EVERYTHING: &[Kind] = &[
 /// Loop trip counts and constants stay small: a rolled loop of four is the same shape as one of
 /// four hundred — four blocks and two phis — and the short one leaves every sum well inside the
 /// float domain's exactly-representable range, which is what lets the comparison be exact at all.
-pub(super) fn fill(rng: &mut Rng, domain: Domain, kind: Kind) -> Op {
+pub(super) fn fill(rng: &mut Rng, domain: Domain, subgroup: u32, kind: Kind) -> Op {
     match kind {
         Kind::AddConstant => Op::AddConstant(rng.below(16) as u32),
         Kind::MulConstant => Op::MulConstant(1 + rng.below(3) as u32),
@@ -102,7 +102,16 @@ pub(super) fn fill(rng: &mut Rng, domain: Domain, kind: Kind) -> Op {
         Kind::RolledCounterAdd => Op::RolledCounterAdd {
             times: rng.below(6) as u32,
         },
-        Kind::ButterflyAdd => Op::ButterflyAdd(1 << rng.below(4)),
+        // **The distance must stay inside the subgroup.** `OpGroupNonUniformShuffleXor` with a
+        // mask that takes a lane past the subgroup's last one is undefined, and the CPU reference
+        // cannot predict undefined — it computed `lane ^ mask` and cheerfully read the *next
+        // subgroup's* invocation, which is a well-defined answer to a different question.
+        //
+        // This was `1 << rng.below(4)` — distances 1, 2, 4 and 8 — and every one of those is
+        // inside a 32- or 64-wide subgroup, so it was right on both pieces of real hardware here
+        // and wrong on an 8-wide one. Found by lavapipe on seed 3, as a disagreement the fuzzer
+        // reported against itself.
+        Kind::ButterflyAdd => Op::ButterflyAdd(1 << rng.below(distances(subgroup))),
         Kind::AddIfAnyAbove => Op::AddIfAnyAbove {
             // Thresholds straddling the input's range, so some rounds take the branch and some do
             // not. A threshold nothing ever meets would test one arm forever.
@@ -113,5 +122,70 @@ pub(super) fn fill(rng: &mut Rng, domain: Domain, kind: Kind) -> Op {
         // SPIR-V leaves those undefined. A reference cannot predict undefined, so this stays the
         // identity and exists to prove the instruction is emitted and harmless.
         Kind::ShiftUp => Op::ShiftUp(0),
+    }
+}
+
+/// How many butterfly distances fit inside a subgroup of `subgroup` lanes.
+///
+/// The distances are `1, 2, 4, …`, and the largest usable one is half the width — a lane XOR'd
+/// with the width itself lands in the next subgroup. So a 32-wide subgroup has 1, 2, 4, 8 (capped
+/// at four for the sake of short programs) and an 8-wide one has 1, 2, 4.
+///
+/// Never zero: a subgroup of one has no partner to exchange with, and `below(0)` would divide by
+/// zero. No device reports a subgroup of one, and a generator that divides by zero on a device
+/// nobody has is still a generator that divides by zero.
+fn distances(subgroup: u32) -> u64 {
+    // A clamp rather than three branches. The `if usable < 4 { usable } else { 4 }` this replaces
+    // returns 4 at `usable == 4` either way, so flipping the comparison changed nothing and the
+    // mutation gate reported it as a survivor no test could kill. Deleting the branch was the fix,
+    // as it has been every other time an equivalent mutant turned up here.
+    u64::from(subgroup.trailing_zeros()).clamp(1, 4)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::distances;
+
+    #[test]
+    fn a_subgroup_of_one_still_leaves_something_to_draw_from() {
+        // The lower half of the clamp, and why it is not zero: `distances` feeds `Rng::below`,
+        // which is a modulus — so returning zero is a division by zero rather than a smaller
+        // choice. A subgroup of one has no partner to exchange with and no device reports one,
+        // but "no device reports it" is not a reason for a generator to divide by zero if one
+        // ever does.
+        assert_eq!(distances(1), 1);
+        assert_ne!(distances(1), 0, "a modulus of zero is a panic");
+    }
+
+    #[test]
+    fn the_distances_stay_inside_the_subgroup() {
+        // The largest distance drawn is `1 << (distances(w) - 1)`, and it has to be below `w`:
+        // `lane ^ mask` with a mask at or past the width names a lane in the next subgroup, which
+        // SPIR-V leaves undefined. This is the property the whole function exists for.
+        for width in [1_u32, 2, 4, 8, 16, 32, 64] {
+            let count = distances(width);
+            assert!(count > 0, "a subgroup of {width} left nothing to draw");
+
+            let largest = 1_u32 << (count - 1);
+            if width > 1 {
+                assert!(
+                    largest < width,
+                    "a subgroup of {width} would draw a distance of {largest}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_wide_subgroup_is_capped_rather_than_growing_with_it() {
+        // Four distances is a policy about program length, not about the hardware: a 64-wide
+        // subgroup could take 1 through 32 and the generator stops at 8 so the programs stay
+        // short. Worth pinning, because raising it is a deliberate change rather than a fix.
+        assert_eq!(distances(32), 4);
+        assert_eq!(distances(64), 4);
+        assert_eq!(distances(16), 4);
+        assert_eq!(distances(8), 3, "1, 2 and 4");
+        assert_eq!(distances(4), 2, "1 and 2");
+        assert_eq!(distances(2), 1, "1 alone");
     }
 }

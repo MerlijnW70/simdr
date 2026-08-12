@@ -347,23 +347,21 @@ fn the_lane_api_refuses_the_lane_counts_that_have_no_mapping() {
         kernels::lane_sum::<F32, 12>(width).is_err(),
         "12 lanes neither divide a subgroup of {width} nor are a multiple of it"
     );
-    // `MAX_STRIPS` is 8, so the count that overruns it depends on the width: 512 lanes is sixteen
-    // strips on a 32-wide subgroup and only eight on a 64-wide one, where it is accepted. 1024 is
-    // past the limit on both, which is what makes this a statement about the mapping rather than
-    // about one device.
-    assert!(
-        kernels::lane_sum::<F32, 1024>(width).is_err(),
-        "1024 lanes need more elements per lane than a vector holds inline, at either width"
+    // `MAX_STRIPS` is 8, so the count that overruns it depends on the width: 512 lanes is eight
+    // strips on a 64-wide subgroup and sixty-four on an 8-wide one. Stated as the relationship
+    // rather than as a number, because there are three widths to run on now and a fourth would
+    // break any of them written out.
+    let strips = 512 / width.max(1);
+    assert_eq!(
+        kernels::lane_sum::<F32, 512>(width).is_ok(),
+        strips as usize <= simdr::lanes::MAX_STRIPS,
+        "512 lanes is {strips} strips on a {width}-wide subgroup, and MAX_STRIPS is {}",
+        simdr::lanes::MAX_STRIPS
     );
-    if width == 32 {
-        assert!(
-            kernels::lane_sum::<F32, 512>(width).is_err(),
-            "512 lanes is sixteen strips on a 32-wide subgroup, which is past MAX_STRIPS"
-        );
-    } else {
-        assert!(
-            kernels::lane_sum::<F32, 512>(width).is_ok(),
-            "512 lanes is eight strips on a {width}-wide subgroup, which is exactly the limit"
-        );
-    }
+
+    // And a count past the limit at every width this can run on: 64 strips on the widest.
+    assert!(
+        kernels::lane_sum::<F32, 4096>(width).is_err(),
+        "4096 lanes need more elements per lane than a vector holds inline, at any width"
+    );
 }

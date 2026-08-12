@@ -10,7 +10,7 @@ mod emit;
 use self::emit::apply;
 use super::domain::Domain;
 use simdr::kernel::{Kernel, Shape};
-use simdr::lanes::{Element, F32, I32, LaneError, U32};
+use simdr::lanes::{Element, F32, I8, I16, I32, LaneError, U8, U16, U32};
 
 /// One step of a generated program.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,6 +172,10 @@ impl Program {
             Domain::Unsigned => self.build_in::<U32>(),
             Domain::Signed => self.build_in::<I32>(),
             Domain::Float => self.build_in::<F32>(),
+            Domain::UnsignedByte => self.build_in::<U8>(),
+            Domain::Byte => self.build_in::<I8>(),
+            Domain::UnsignedShort => self.build_in::<U16>(),
+            Domain::Short => self.build_in::<I16>(),
         }
     }
 

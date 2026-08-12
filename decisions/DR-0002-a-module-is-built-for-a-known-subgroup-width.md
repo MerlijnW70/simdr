@@ -7,7 +7,7 @@ status: prose-only
 ## The tension
 
 A `Simd<T, N>` fixes `N` when the code is written. A subgroup's width is fixed by the hardware and
-is only knowable at runtime — 32 on NVIDIA, 32 or 64 on AMD, and `VkPhysicalDeviceSubgroupProperties`
+is only knowable at runtime — 32, 64 and 8 have all been measured here, and `VkPhysicalDeviceSubgroupProperties`
 is what says which. The lowering has to decide between `Reduce` and `ClusteredReduce` and, if it
 clusters, name a `ClusterSize`.
 

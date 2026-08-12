@@ -1,6 +1,6 @@
 //! `simdr probe` — ask a device what has to be known before a module can be built.
 //!
-//! # Why this exists, and why it is one subcommand
+//! # Why this exists, and why it stays small
 //!
 //! `decisions/DR-0002` is the reason. A module is specialised to a subgroup width, the width is
 //! fixed by the hardware, and `Lanes::new` takes it as an argument so that no caller can forget
@@ -9,16 +9,22 @@
 //!
 //! So the design forces a question and there was no way to ask it. That is what this answers.
 //!
-//! It deliberately does not grow. A `simdr validate` would be three lines around `spirv-val` and
-//! is better as a line in the README; a `simdr emit` would need a kernel description language,
-//! which is a second and worse API beside the one that already exists — the whole value of the
-//! library is that kernels are Rust with types. Benchmarks are `cargo run --example`.
+//! `simdr list` is the second subcommand and arrived for the same reason: this machine turned out
+//! to have two devices at two different subgroup widths, and there was no way to see the second
+//! one without writing a program either.
+//!
+//! It stops there. A `simdr validate` would be three lines around `spirv-val` and is better as a
+//! line in the README; a `simdr emit` would need a kernel description language, which is a second
+//! and worse API beside the one that already exists — the value of the library is that kernels are
+//! Rust with types. Benchmarks are `cargo run --example`.
 //!
 //! # What it reports, and why each line is there
 //!
 //! - **Subgroup width**, because nothing can be built without it.
 //! - **Which subgroup features**, because a kernel declaring a capability the device lacks fails
 //!   at *pipeline creation* rather than at validation — later and less clearly than it should.
+//! - **Narrow element types**, because they are six separate permissions and one of them —
+//!   `shaderSubgroupExtendedTypes` — leaves no trace in the module at all.
 //! - **Memory types**, because a host-visible type without `HOST_CACHED` is write-combined and
 //!   reading a mapping back out of one runs at a fraction of the bus. That cost 8× on transfers
 //!   here before anybody looked, and looking is now one command.

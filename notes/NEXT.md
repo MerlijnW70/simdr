@@ -1,15 +1,17 @@
 # What is worth doing next
 
-Rewritten 2026-08-12, after the five items the previous version listed were built. Every item here
-has a number behind it or a named thing it blocks. Ordered by value per line of work, not by size.
+Rewritten 2026-08-12, after eight items were worked through in two sittings. Every item here has a
+number behind it or a named thing it blocks. Ordered by value per line of work, not by size.
 
 The point of the file is that the ordering should be arguable. If a later reader disagrees, the
-measurements are here to disagree *with*.
+measurements are here to disagree *with* — and two of the eight were **refuted by their own
+measurement**, which is what the ordering is for.
 
-## The five that are done, and what each one actually turned out to be
+## What is done, and what each one actually turned out to be
 
-Listed with their outcomes rather than crossed off, because three of the five came out differently
-from the argument that put them on the list.
+Listed with their outcomes rather than crossed off, because four of the eight came out differently
+from the argument that put them on the list — two of them differently enough that the work was not
+done at all.
 
 ### 1. Narrow element types — `i8`, `u8`, `i16`, `u16`, `f16` — **built**
 
@@ -87,58 +89,101 @@ The strongest test is the allocator: `OpAtomicIAdd` returns the previous value, 
 out are `0..n` with no repeats — and a lost atomic shows up as a duplicate rather than as a total
 that is one short.
 
+### 6. Make something use a specialization constant — **measured, and not worth doing**
+
+The previous version of this file put this first, on the grounds that fourteen modules for fourteen
+fold sizes is expensive in pipeline creation. `runner/examples/specialize.rs` measured it and the
+argument does not survive:
+
+| | all fourteen folds | per fold |
+| --- | --- | --- |
+| emitting the modules | 71.5 µs | 5.1 µs |
+| a pipeline each, from fourteen modules | 6796.8 µs | 485.5 µs |
+| a pipeline each, from one specialized module | 6726.0 µs | 480.4 µs |
+
+**1.0%.** A specialization constant is fixed *at* pipeline creation, so fourteen values still need
+fourteen pipelines; all it removes is the emission, and emission is 1.1% of the total. One module
+per parameter value is cheap. One *pipeline* per parameter value is not.
+
+What the measurement points at instead is item 1 below.
+
+### 7. A width that is neither 32 nor 64 — **done, at 8**
+
+Lavapipe (Mesa's software Vulkan, `llvmpipe`) reports **subgroup width 8** and runs on the CPU.
+Installed at `H:\tools\mesa\msvc`, selected with `VK_ICD_FILENAMES`, and the whole execution suite
+plus 12 000 fuzz rounds pass on it. That also means the loop runs on a machine with no GPU.
+
+It found one defect in the product's own checking machinery and eight in the tests:
+
+- **The fuzzer generated butterfly distances that leave the subgroup.** `1 << below(4)` gives 8,
+  which is inside a 32- or 64-wide subgroup and is the *width* of an 8-wide one — and
+  `OpGroupNonUniformShuffleXor` past the last lane is undefined. The CPU reference computed
+  `lane ^ mask` and read the next subgroup's invocation, which is a defined answer to a different
+  question. Seed 3 reported it as a disagreement the fuzzer had with itself.
+- **`whole_subgroup!` listed two widths**, so every kernel using it refused to build with
+  `BadWidth` on a device that could have run them. It lists 4, 8, 16, 32 and 64 now.
+- **Three tests assumed uninitialised device memory is zero.** The histogram kernels *accumulate*,
+  and `Gpu::run` does not initialise the output buffer; two drivers hand back zeros and lavapipe
+  does not. They zero it through a `Session` now, which is the only path that can write a binding
+  the kernel also reads.
+- The rest were the same width-blindness the 64-wide device found: a butterfly distance of 8 in a
+  test, a reference summing "everything after the first subgroup" when there are eight of them,
+  and lane counts of 32 where the test meant "the subgroup".
+
+**And one device difference worth knowing.** Lavapipe's `Fma` rounds *twice* — it agrees with
+`x * x + x` rather than with a fused multiply-add, where both hardware devices agree with the
+fused form. `runner/tests/extended.rs` observes which of the two it gets rather than asserting one.
+
+Still unrun: 4 and 16. `whole_subgroup!` can build for them and no implementation here reports
+them.
+
+### 8. Narrow types in the fuzzer — **done for the four integers**
+
+`Domain` has `Byte`, `UnsignedByte`, `Short` and `UnsignedShort` now, and `fuzz::check` packs the
+buffer at the domain's stride — the one place in the harness where "element values, one per `u32`"
+meets "four elements share a word".
+
+`Domain` got *smaller* doing it. Seven domains times eight operations would have been fifty-six
+match arms; it is written in terms of `bits()` instead, so `add` is one wrapping add and a mask.
+
+The sweeps agree at every width: 3 000 rounds per domain on the 4080 and the Radeon, 1 500 on
+lavapipe, no disagreements.
+
+**`f16` is deliberately not fuzzed.** A half represents integers exactly only to 2048, and a sum
+over sixty-four lanes leaves that range immediately — so the exactness argument the float domain
+rests on does not hold, and a tolerance would be checking something other than the emitter.
+`runner/tests/narrow.rs` covers `f16` against expectations reasoned from the format.
+
 ---
 
-## 1. Make something actually use a specialization constant
+## 1. Hold the reduction chain's pipelines
 
-**What it costs today.** `Gpu::sum` builds ten modules for ten fold sizes; `clipped_dot` rebuilds
-for every offset. The mechanism to stop doing that is built and tested and has no caller.
+**What it costs today.** A pipeline costs **485 µs** and a dispatch costs **0.8 µs**, measured in
+`runner/examples/specialize.rs`. `Gpu::sum` builds one per fold on every call — fourteen for a
+buffer of 2²⁰ elements, 6.8 ms — and throws them all away. That is the same waste `Session` was
+built to remove for a single pipeline, and it is three orders of magnitude more than the
+specialization constant this replaces would have saved.
 
-**Why it is first.** It is the only item here whose groundwork is already done, and the measurement
-that would justify it — pipeline creation against module emission — is in
-`runner/examples/overhead.rs` and has not been re-run since specialization existed. Doing this is
-mostly deleting the loop that rebuilds.
+**What it needs.** `Pass` borrows words and a workgroup count; it would have to carry a built
+pipeline instead, and something has to own those across calls the way `Session` does. The awkward
+part is that the fold count depends on the input length, so the cache is keyed by length rather
+than being one object.
 
-**What to watch.** A specialization constant is a constant at pipeline time, so a fold size that
-becomes one still can't change the *mapping*. `reduction.rs` picks its lane count per pass; that
-part stays as it is.
+**What to watch.** Pipelines hold descriptor sets pointing at particular buffers, so a cache that
+outlives a buffer is a use-after-free waiting to be written in safe-looking code. `Session` gets
+this right by owning both together; a chain cache has more moving parts.
 
-## 2. Run at a width that is neither 32 nor 64
+## 2. Integer dot product — `OpSDot` and friends
 
-Both real hardware widths are covered now. What is not covered is 4, 8 or 16 — which is what a
-software implementation of Vulkan reports, and what an Intel part can be asked for through
-`VK_EXT_subgroup_size_control`.
-
-**Why it is worth anything.** `whole_subgroup!` lists exactly two widths, and the mapping code has
-never seen a subgroup narrower than the workgroup by more than a factor of two. A width of 8 makes
-`WORKGROUP_SIZE / width` eight subgroups per workgroup, which no test has ever produced.
-
-**What it needs.** Lavapipe (Mesa's software Vulkan) reports 4 or 8, runs on CPU, and would put the
-whole loop in CI on a machine with no GPU. That is the cheap half and it is still not done.
-
-## 3. Narrow types in the fuzzer
-
-The differential fuzzer covers `u32`, `i32` and `f32`. The five narrow types have direct device
-tests and **no fuzzing at all**, which makes them the least-checked surface in the tree by the
-project's own standard.
-
-**What it needs.** `Domain` gains variants that wrap at 8 and 16 bits, and the harness has to
-upload and read back at the right stride — `run_bytes` and `run_halves` exist, but `fuzz::mod`
-assumes one element per word throughout: `input_len`, the reference, and the comparison.
-
-**Why it is not first.** It is the largest change to the checking machinery, and
-`notes/FINDINGS.md` is emphatic that the checking machinery is where the bugs were.
-
-## 4. Integer dot product — `OpSDot` and friends
-
-**What it blocks.** The packed `i8` mapping `decisions/DR-0004` declines to build. `VK_KHR_shader_integer_dot_product` gives a four-element dot product in one
-instruction, which is the thing that would make packing worth the fourth mapping.
+**What it blocks.** The packed `i8` mapping `decisions/DR-0004` declines to build.
+`VK_KHR_shader_integer_dot_product` gives a four-element dot product in one instruction, which is
+the thing that would make packing worth the fourth mapping.
 
 **Why it is not urgent.** DR-0004's measurement says strip mining already recovers the bandwidth,
 so this is about *arithmetic* throughput on a kernel that is not arithmetic-bound. It would need a
 kernel that is.
 
-## 5. Multi-dimensional dispatch
+## 3. Multi-dimensional dispatch
 
 `cmd_dispatch(x, 1, 1)` and a one-dimensional address. Everything with a natural 2-D shape — an
 image, a matrix tile — has to linearise itself before it reaches a kernel.

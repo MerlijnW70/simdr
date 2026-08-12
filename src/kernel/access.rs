@@ -109,6 +109,47 @@ impl<T: Element> Kernel<T> {
         Ok(())
     }
 
+    /// Read a vector of `LANES` from buffer `index`, offset by a value rather than a constant.
+    ///
+    /// What a specialization constant needs. [`Kernel::load_offset`] takes a `u32` and folds it
+    /// into the address at build time, which costs nothing and means a different module per
+    /// offset. This takes an [`Id`] — a specialization constant, or anything else uniform — and
+    /// pays one `OpIAdd` per strip for it.
+    ///
+    /// The caller vouches that `offset` names a `u32`. Nothing here can check that, and a
+    /// mismatch is a validation failure rather than a wrong number.
+    ///
+    /// # Errors
+    ///
+    /// As [`Kernel::load`].
+    pub fn load_offset_by<const LANES: u32>(
+        &mut self,
+        index: u32,
+        offset: Id,
+    ) -> Result<Vector<T, LANES>, LaneError> {
+        let buffer = self.buffer(index)?;
+        let strips = self.strips::<LANES>()?;
+
+        let element = self.element();
+        let uint = self.uint();
+        let mut loaded = Vec::with_capacity(strips);
+        for strip in 0..strips {
+            // The constant part of the address first, then the value on top of it — so a strip's
+            // own stride still folds at build time and only the open offset costs an instruction.
+            let at = self.address(strip, strips, 0)?;
+            let shifted = self.module().i_add(uint, at, offset)?;
+
+            let element_pointer = self.element_pointer();
+            let zero = self.zero();
+            let pointer = self
+                .module()
+                .access_chain(element_pointer, buffer, &[zero, shifted])?;
+            loaded.push(self.module().load(element, pointer)?);
+        }
+
+        self.lanes()?.from_strips(&loaded)
+    }
+
     /// A pointer to this invocation's element on `strip` of an access that has `strips` of them.
     fn element_pointer_at(
         &mut self,
@@ -289,6 +330,68 @@ mod tests {
 
         assert!(declared.contains(&100), "strip zero");
         assert!(declared.contains(&164), "strip one keeps its stride");
+    }
+
+    #[test]
+    fn an_offset_that_is_a_value_costs_one_addition_per_strip() {
+        // The whole difference between `load_offset` and `load_offset_by`: a constant folds into
+        // the address arithmetic and a value cannot.
+        //
+        // The comparison is against a load with **no** offset, not against one with a constant
+        // offset — because a constant offset of zero is free on strip zero and a non-zero one is
+        // not, so `load_offset` already costs a variable amount. Two strips, two extra adds.
+        let mut plain = Kernel::<F32>::new(Shape::new(32, 64, 2)).expect("built");
+        plain.load::<64>(0).expect("loaded");
+        let without = count(&plain.finish().expect("finished"), op::I_ADD);
+
+        let mut open = Kernel::<F32>::new(Shape::new(32, 64, 2)).expect("built");
+        let offset = open.module().constant_u32(128).expect("128");
+        open.load_offset_by::<64>(0, offset).expect("loaded");
+        let paid = count(&open.finish().expect("finished"), op::I_ADD);
+
+        assert_eq!(paid, without + 2, "one addition per strip, and no more");
+    }
+
+    #[test]
+    fn an_offset_by_value_reads_as_many_places_as_the_constant_one() {
+        let mut kernel = Kernel::<F32>::new(Shape::new(32, 64, 2)).expect("built");
+        let offset = kernel.module().constant_u32(64).expect("64");
+        let value = kernel.load_offset_by::<128>(0, offset).expect("loaded");
+
+        assert_eq!(value.strip_count(), 4);
+        // Chains rather than loads: the interface itself reads the two built-in vectors, so an
+        // `OpLoad` count answers a question about `Kernel::new` as well as about this.
+        assert_eq!(
+            count(&kernel.finish().expect("finished"), op::ACCESS_CHAIN),
+            4
+        );
+    }
+
+    #[test]
+    fn the_open_offset_is_added_to_the_address_and_not_used_as_one() {
+        // The mistake that would still validate: using the offset *as* the index rather than
+        // adding it to the address gives every invocation the same element, which looks like a
+        // broadcast and is a wrong answer in the shape of a plausible one.
+        use crate::decode;
+
+        let mut kernel = Kernel::<F32>::new(Shape::new(32, 64, 2)).expect("built");
+        let offset = kernel.module().constant_u32(64).expect("64");
+        kernel.load_offset_by::<32>(0, offset).expect("loaded");
+
+        let words = kernel.finish().expect("finished");
+        let index = decode::body(&words)
+            .find(|instruction| instruction.opcode() == op::ACCESS_CHAIN)
+            .expect("emitted")
+            .operands()
+            .last()
+            .copied()
+            .expect("an index");
+
+        assert_ne!(
+            index,
+            offset.word(),
+            "the chain indexes by the offset itself rather than by the address plus it"
+        );
     }
 
     #[test]

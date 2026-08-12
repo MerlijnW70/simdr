@@ -985,3 +985,81 @@ round (`runner/tests/extended.rs` observes both orders), so the two agree here.
 Agreeing on one device is not the same claim as being defined, and `notes/NEXT.md` had already
 measured this fold as buying no time. A defined behaviour traded for an undefined one, for an
 instruction that does not show up in a timing, is the wrong side of the trade.
+
+
+## Specialization constants save 1% — 2026-08-12
+
+`notes/NEXT.md` ranked "make `Gpu::sum` use a specialization constant" first, on the grounds that
+fourteen modules for fourteen fold sizes is expensive in pipeline creation.
+`runner/examples/specialize.rs` measured it. RTX 4080, a reduction over 2²⁰ elements:
+
+| | all fourteen folds | per fold |
+| --- | --- | --- |
+| emitting the modules | 71.5 µs | 5.1 µs |
+| a pipeline each, from fourteen modules | 6796.8 µs | 485.5 µs |
+| a pipeline each, from one specialized module | 6726.0 µs | 480.4 µs |
+
+Emission is 1.1% of the total, and emission is all a specialization constant can remove — it is
+fixed *at* pipeline creation, so fourteen values still need fourteen pipelines and fourteen shader
+compilations.
+
+**One module per parameter value is cheap. One pipeline per parameter value is not.** The refactor
+was not done, and the reason is in `decisions/DR-0005` with the table.
+
+What the measurement does point at: 485 µs per pipeline against 0.8 µs per dispatch, and `Gpu::sum`
+builds all fourteen on every call and throws them away.
+
+## Lavapipe, at a subgroup width of 8 — 2026-08-12
+
+Mesa's software Vulkan reports **subgroup width 8** and runs on the CPU. Installed at
+`H:\tools\mesa\msvc` from the pal1000/mesa-dist-win **msvc** release; the mingw build's
+`vulkan_lvp.dll` would not load here (`error 126`, a missing dependency) and the msvc one loads
+with no extra files at all.
+
+It found one defect in the checking machinery and eight in the tests.
+
+**The fuzzer generated shuffles that leave the subgroup.** `1 << below(4)` gives distances 1, 2, 4
+and 8. All four are inside a 32- or 64-wide subgroup; 8 is the *width* of an 8-wide one, and
+`OpGroupNonUniformShuffleXor` past the last lane is undefined. The CPU reference computed
+`lane ^ mask` and read the next subgroup's invocation — a defined answer to a different question —
+so the fuzzer reported a disagreement it had caused itself. Seed 3, in every domain at once.
+
+The generator now draws from `log2(width)` distances. That the bug needed a *narrow* subgroup to
+appear is the point: two devices agreed for two months about something neither could disprove.
+
+**Three tests assumed uninitialised device memory is zero.** The histogram kernels accumulate into
+their output buffer, and `Gpu::run` allocates that buffer without initialising it. Vulkan says
+nothing about what is in a fresh allocation. Two drivers hand back zeros; lavapipe does not. The
+tests zero it through a `Session` now — the only path that can write a binding the kernel also
+reads — and the empty-kernel test no longer asserts anything about the untouched buffer.
+
+**And `whole_subgroup!` listed two widths**, so every kernel using it refused to build with
+`BadWidth` on a device that could have run them. A list of the widths that exist is a list that
+needs revisiting every time a new device appears; it holds 4, 8, 16, 32 and 64 now.
+
+### Lavapipe's `Fma` rounds twice
+
+`OpExtInst Fma` on both hardware devices agrees with the host's `f32::mul_add` to the bit. On
+lavapipe it agrees with `x * x + x` instead — two roundings rather than one. SPIR-V says `Fma`
+computes `a * b + c` as a single operation.
+
+`runner/tests/extended.rs` observes which of the two it gets and asserts only that it is one of
+them. Pinning either would turn one implementation's behaviour into this suite's regression, and
+the difference is real and worth knowing about rather than worth failing over.
+
+## The narrow types are fuzzed now — 2026-08-12
+
+`i8`, `u8`, `i16` and `u16` are domains in the differential fuzzer. Their arithmetic wraps at 8 or
+16 bits, wrapping is defined, and the reference wraps identically — so the exactness the fuzzer
+needs comes for free and what is checked is instruction selection: `OpSConvert` against
+`OpUConvert`, `SMax` against `UMax`, and a buffer whose stride is one byte.
+
+3 000 rounds per domain on each GPU and 1 500 on lavapipe, no disagreements.
+
+`Domain` got **smaller**. Seven domains times eight operations is fifty-six match arms if each is
+written out; writing them in terms of `bits()` makes `add` one wrapping add and a mask, and the
+file went from 249 lines to 230 with four more domains in it.
+
+**`f16` is not fuzzed and that is a decision.** A half is exact for integers only to 2048, and a
+sum over sixty-four lanes leaves that range at once — the argument the float domain rests on does
+not hold, and a tolerance would be checking something other than the emitter.

@@ -42,8 +42,20 @@ fn a_butterfly_shuffle_pairs_each_lane_with_the_one_the_mask_names() {
     let count = WORKGROUP_SIZE as usize;
     let input = ramp(count);
 
-    // Three distances, because a butterfly that ignored its mask would pass at one of them.
-    for mask in [1_usize, 2, 8] {
+    // Three distances, because a butterfly that ignored its mask would pass at one of them — and
+    // all of them below the width, because `lane ^ mask` with a mask at or past the width names a
+    // lane in the *next* subgroup, which SPIR-V leaves undefined. On a 32-wide subgroup that ruled
+    // nothing out; on an 8-wide one it rules out the 8.
+    let distances: Vec<usize> = [1_usize, 2, 8]
+        .into_iter()
+        .filter(|mask| *mask < width as usize)
+        .collect();
+    assert!(
+        !distances.is_empty(),
+        "a subgroup of {width} has no partner"
+    );
+
+    for mask in distances {
         let spirv = kernels::butterfly_pair_sum(width, mask as u32).expect("built");
         let output = gpu.run(&spirv, &input, 1).expect("dispatched");
 
@@ -109,8 +121,14 @@ fn a_vote_answers_for_the_whole_subgroup_and_every_lane_agrees() {
 }
 
 #[test]
-fn an_empty_kernel_runs_and_leaves_the_output_alone() {
+fn an_empty_kernel_runs_and_returns_a_buffer_of_the_right_length() {
     // The floor: if this fails, the harness is broken rather than any kernel.
+    //
+    // It used to assert the output was all zeros, on the grounds that an empty kernel writes
+    // nothing so the buffer should be "as allocated". That is an assumption about *uninitialised*
+    // memory, which Vulkan does not define — two drivers happened to hand back zeros and a third
+    // did not. What is left is what the call actually promises: it runs, and it gives back as many
+    // elements as it was given.
     let Some(gpu) = device("empty") else { return };
 
     let width = gpu.limits().subgroup_size;
@@ -120,10 +138,6 @@ fn an_empty_kernel_runs_and_leaves_the_output_alone() {
     let output = gpu.run(&spirv, &input, 1).expect("dispatched");
 
     assert_eq!(output.len(), input.len());
-    assert!(
-        output.iter().all(|value| *value == 0.0),
-        "the output buffer was never written, so it should still be as allocated"
-    );
 }
 
 #[test]

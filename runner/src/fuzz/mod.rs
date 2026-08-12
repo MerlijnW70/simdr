@@ -8,11 +8,14 @@
 //! # Why this can be exact
 //!
 //! Floating-point addition is not associative, and a subgroup reduction combines lanes in an
-//! order the specification does not fix — so comparing `f32` sums exactly would be comparing
-//! against one arbitrary order. Every program here is therefore over **`u32`**, where addition
-//! and multiplication are associative and commutative modulo 2³² and the answer does not depend
-//! on the order at all. That is what makes an exact comparison legitimate rather than lucky, and
-//! it is why a float mode would need a tolerance and a much more careful argument.
+//! order the specification does not fix — so comparing arbitrary `f32` sums exactly would be
+//! comparing against one arbitrary order.
+//!
+//! The integer domains have no such problem: addition and multiplication are associative and
+//! commutative modulo their width, and wrapping is defined. The float domain earns the same
+//! property by generating only small integers, which are exact in an `f32` and stay exact through
+//! sums that remain below 2²⁴ — see [`Domain::ceiling`]. `f16` is not fuzzed, because a half is
+//! exact only to 2048 and a sum over sixty-four lanes leaves that range at once.
 //!
 //! # What is generated
 //!
@@ -28,6 +31,11 @@
 //!
 //! Until that day this module's vocabulary predated three passes of emitter work, and "30 000
 //! programs, zero disagreements" was a true statement about the wrong surface.
+//!
+//! **And the narrow integers, since 2026-08-12.** `i8`, `u8`, `i16` and `u16` reach different
+//! conversion and extreme instructions from the same source, and had direct device tests and no
+//! fuzzing. The buffer is where they differ from everything else here — four 8-bit elements share
+//! a word — and [`check`] is the one place that packs and unpacks.
 
 mod domain;
 mod generate;
@@ -101,10 +109,39 @@ pub fn check(gpu: &Gpu, program: &Program, input: &[u32]) -> Result<Outcome, Fuz
         Err(refused) => return Ok(Outcome::Refused(refused)),
     };
 
-    let actual = gpu.run_u32(&spirv, input, program.workgroups())?;
+    let actual = dispatch(gpu, program, &spirv, input)?;
     let expected = reference(program, input);
 
     Ok(verdict(program, expected, actual))
+}
+
+/// Run `spirv` over `input`, packing the buffer the way this domain's stride requires.
+///
+/// Everything above this line works in **element values held one per `u32`**, which is the shape
+/// the interpreter and the comparison want. The buffer does not: a domain of 8-bit elements has a
+/// stride of one byte, so four elements share a word. This is the only place the two meet, and it
+/// is a boundary rather than a special case scattered through the harness.
+fn dispatch(
+    gpu: &Gpu,
+    program: &Program,
+    spirv: &[u32],
+    input: &[u32],
+) -> Result<Vec<u32>, FuzzError> {
+    let workgroups = program.workgroups();
+
+    match program.domain.bits() {
+        8 => {
+            let bytes: Vec<u8> = input.iter().map(|value| *value as u8).collect();
+            let out = gpu.run_bytes(spirv, &bytes, workgroups)?;
+            Ok(out.into_iter().map(u32::from).collect())
+        }
+        16 => {
+            let halves: Vec<u16> = input.iter().map(|value| *value as u16).collect();
+            let out = gpu.run_halves(spirv, &halves, workgroups)?;
+            Ok(out.into_iter().map(u32::from).collect())
+        }
+        _ => Ok(gpu.run_u32(spirv, input, workgroups)?),
+    }
 }
 
 /// Whether two answers agree, and where they first stop agreeing.

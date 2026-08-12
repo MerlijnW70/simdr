@@ -7,11 +7,13 @@
 //!
 //! # The width has to be known
 //!
-//! `N` is fixed when the kernel is written and the subgroup width is fixed by the hardware, and
-//! the two only meet at build time — `ClusterSize` is an instruction operand, so the choice
-//! between a plain reduce and a clustered one cannot be deferred to the device. [`Lanes::new`]
-//! therefore takes the width, and the caller reads it off the device it is targeting. See
-//! `decisions/DR-0002`.
+//! `N` is fixed when the kernel is written and the subgroup width is fixed by the implementation,
+//! and the two only meet at build time: the three rows below are three different *instruction
+//! sequences*, and no value arriving later can add instructions that were never emitted.
+//! [`Lanes::new`] therefore takes the width, and the caller reads it off the device it is
+//! targeting. See `decisions/DR-0002`, and `decisions/DR-0005` for the part of its reasoning that
+//! turned out to be too strong — a `ClusterSize` *can* be deferred to pipeline creation; a choice
+//! of mapping cannot.
 //!
 //! # Three ways a vector sits on a subgroup
 //!
@@ -248,10 +250,18 @@ mod tests {
     }
 
     #[test]
-    fn both_real_subgroup_widths_are_accepted() {
-        for width in [32, 64] {
+    fn every_width_an_implementation_reports_is_accepted() {
+        // 32 on an NVIDIA part, 64 on an AMD one, 8 on Mesa's lavapipe — all measured here. 4 and
+        // 16 are in the list because they are powers of two an implementation may report and this
+        // layer has no reason to single them out; nothing here has run at either.
+        for width in [4, 8, 16, 32, 64] {
             let mut module = module();
-            assert_eq!(Lanes::new(&mut module, width).expect("real").width(), width);
+            assert_eq!(
+                Lanes::new(&mut module, width)
+                    .expect("a power of two")
+                    .width(),
+                width
+            );
         }
     }
 

@@ -19,10 +19,10 @@ kernel.store_scalar(1, total)?;
 let spirv: Vec<u32> = kernel.finish()?;   // hand these words to vkCreateShaderModule
 ```
 
-Those lines name no opcode, no reduction shape and no cluster size. Change the `32` to `8`
-and the same source emits a *clustered* reduce running four vectors at once; change it to `128` and
-it strip-mines four elements per lane and folds them before the subgroup step. That choice is the
-library.
+Those lines name no opcode, no reduction shape and no cluster size. Change the `32` to `8` and the
+same source emits a clustered reduce running four vectors at once; change it to `128` and it
+strip-mines four elements per lane and folds them before the subgroup step. Picking between those
+three is what the library does.
 
 ---
 
@@ -128,18 +128,21 @@ let answer = lanes.choose_uniform(
 ## How this is known to work
 
 Validity is not correctness. A kernel can satisfy the validator down to the last rule and still
-compute the wrong number, so there are five layers and each catches things the one below it cannot.
+compute the wrong number, so there are six layers and each has caught something the ones above it
+did not.
 
 | Layer | What it is | What it caught |
 | --- | --- | --- |
-| **Unit tests** | 283 in the emitter, decoding what was emitted; 490 across the workspace | Everything cheap |
+| **Unit tests** | 286 in the emitter, decoding what was emitted; 506 across the workspace | Everything cheap |
 | **`spirv-val`** | Khronos' validator, at `--target-env vulkan1.1` | `OpLoopMerge` in the wrong position — a unit test asserted "merge before branch" and passed while the comparison sat between them |
 | **Execution** | Real dispatches on a real GPU, against CPU references | A missing staging write: every computing kernel returned garbage and the empty-kernel test still passed |
-| **A second device** | The same suite against a 64-wide subgroup as well as a 32-wide one | Ten tests that had conflated "32 lanes" with "the subgroup" — including four that could not build at all, because a vote has no clustered form |
-| **Differential fuzzing** | Generated programs across `u32`, `i32` and `f32`, each interpreted on the CPU and compared exactly. 30 000 rounds on each of the two devices, zero disagreements | `reduce_min` folding strips with a *maximum* — right for every mapping but the strip-mined one, so hand tests never saw it |
+| **Other devices** | The same suite at 64 lanes and at 8, as well as at 32 | Ten tests that had conflated "32 lanes" with "the subgroup", four of which could not build at all because a vote has no clustered form. Then, at 8: a fuzzer generating shuffles that leave the subgroup, and three tests assuming uninitialised device memory is zero |
+| **Differential fuzzing** | Generated programs across seven element types, each interpreted on the CPU and compared exactly | `reduce_min` folding strips with a *maximum* — right for every mapping but the strip-mined one, so hand tests never saw it |
 | **Mutation coverage** | `noha prober` over the emitter and the runner's pure half | Eight real gaps in one night, five of them in the *fuzzer* — including a generated program that dispatched nothing and therefore agreed with everything. Later, fifteen more in the half-float rounding path, which an *exhaustive* round-trip test could not reach because it only ever fed `from_f32` values that came from a half — and those never round |
 
-Every one of those rows exists because the row above it said green while something was wrong.
+Each row was added because the ones above it were green while something was wrong. What that does
+*not* mean is that the list is finished — the last two rows were added on 2026-08-12 and both found
+something on the day they arrived.
 
 ### `--target-env` is not optional
 
@@ -249,6 +252,7 @@ cargo run --release --example resident -p runner  # where three simultaneous buf
 cargo run --release --example nnue     -p runner  # a chess engine's NNUE layer, at its real size
 cargo run --release --example sweep    -p runner  # working-set sweep, with spreads
 cargo run --release --example narrow   -p runner  # i8 and i16 against i32, at the same element count
+cargo run --release --example specialize -p runner # emitting a module against building a pipeline
 ```
 
 To run any of it against a different device:
@@ -258,6 +262,18 @@ simdr list                      # NVIDIA GeForce RTX 4080 / AMD Radeon(TM) Graph
 $env:SIMDR_DEVICE = "radeon"    # substring, case-insensitive
 cargo test --workspace          # the whole suite, now on a 64-wide subgroup
 ```
+
+And against a CPU implementation, which needs no GPU at all. Mesa's lavapipe reports a subgroup
+width of 8:
+
+```powershell
+$env:VK_ICD_FILENAMES = "H:\tools\mesa\msvc\lvp_icd.x86_64.json"
+cargo test --workspace
+```
+
+The build is [pal1000/mesa-dist-win](https://github.com/pal1000/mesa-dist-win) — take the **msvc**
+release and copy `vulkan_lvp.dll` and `lvp_icd.x86_64.json` out of `x64`. The mingw build's DLL
+would not load here.
 
 ---
 
@@ -291,10 +307,9 @@ costume of a property of sessions.
   `Kernel` and `Lanes`, in Rust, and get SPIR-V words out. If you want to compile arbitrary Rust to
   the GPU, that is [rust-gpu](https://github.com/Rust-GPU/rust-gpu) and it is a much larger thing.
 - **Not portable across subgroup widths.** A module is built for one width, deliberately and
-  visibly. That is what the hardware is. Two widths have now been run — 32 on an RTX 4080 and 64 on
-  an integrated Radeon in the same machine — with the whole execution suite and 30 000 fuzz rounds
-  green on each. Nothing has run at 4, 8 or 16, which is what a software implementation would
-  report and what an Intel part can be asked for.
+  visibly. That is what the hardware is. Three widths have been run: 32 on an RTX 4080, 64 on an
+  integrated Radeon in the same machine, and 8 on lavapipe, which runs on the CPU. The execution
+  suite and the fuzzer pass on all three. Nothing has run at 4 or 16.
 - **Not fast, as a claim.** Some measurements exist and are in `notes/FINDINGS.md` with their
   spreads. There is **no performance claim about large working sets**: a cliff shows up past about
   50 MB and *three* explanations have now been tested and refuted — L2 capacity, eviction of a
@@ -303,9 +318,11 @@ costume of a property of sessions.
   both devices; matrix types are not, and neither is the integer dot-product extension a packed
   `i8` mapping would want.
 - **No multi-dimensional dispatch.** `cmd_dispatch(x, 1, 1)`.
-- **Nothing here defers a value yet.** Specialization constants work end to end and no kernel in
-  `runner/src/kernels` uses one outside the tests written for them, so `Gpu::sum` still builds ten
-  modules for ten fold sizes. `decisions/DR-0005` says why that is a separate change.
+- **Nothing here defers a value.** Specialization constants work end to end and no kernel uses one
+  outside the tests and the measurement written for them. That is a conclusion rather than a gap:
+  `runner/examples/specialize.rs` timed one module specialized fourteen ways against fourteen
+  modules and the difference was **1.0%**, because a specialization constant is fixed *at* pipeline
+  creation and fourteen values still need fourteen pipelines. `decisions/DR-0005` has the table.
 
 ## Reading the tree
 

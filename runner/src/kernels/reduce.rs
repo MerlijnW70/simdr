@@ -85,6 +85,37 @@ fn fold_halves_at<const LANES: u32>(subgroup: u32, half: u32) -> Result<Vec<u32>
     kernel.finish()
 }
 
+/// The same fold, with the offset left open until the pipeline is created.
+///
+/// One module for every step of a reduction instead of one per step. Whether that is worth
+/// anything is a measurement rather than an argument — `runner/examples/specialize.rs` makes it,
+/// and `decisions/DR-0005` records what it said.
+///
+/// The cost inside the kernel is one `OpIAdd` per strip: a constant offset folds into the address
+/// arithmetic for free and a value cannot.
+///
+/// # Errors
+///
+/// [`LaneError`] if the module cannot be built.
+pub fn fold_halves_open(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    use simdr::lanes::F32;
+
+    let mut kernel = Kernel::<F32>::new(shape(subgroup))?;
+    let element = kernel.module().type_int(32, false)?;
+    let half = kernel
+        .module()
+        .spec_constant(element, 0, FOLD_HALF_SPEC_ID)?;
+
+    let near = kernel.load::<32>(0)?;
+    let far = kernel.load_offset_by::<32>(0, half)?;
+    let folded = kernel.lanes()?.add(near, far)?;
+    kernel.store(1, folded)?;
+    kernel.finish()
+}
+
+/// The `SpecId` [`fold_halves_open`] leaves its offset under.
+pub const FOLD_HALF_SPEC_ID: u32 = 0;
+
 /// `out[i] = Σ in[j] × in[j + offset]` over the `LANES` this invocation's subgroup covers.
 ///
 /// A dot product, which is the inner loop of every dense neural-network layer and of a great deal
@@ -220,6 +251,19 @@ pub fn lane_max_whole<T: Element>(subgroup: u32) -> Result<Vec<u32>, LaneError> 
     whole_subgroup_of!(T, subgroup, lane_max)
 }
 
+/// [`dot_product`] over a vector as wide as this device's subgroup.
+///
+/// The `offset` is the join between the two operands in binding 0, and is a property of the
+/// caller's buffer rather than of the mapping — so it stays a parameter while the lane count
+/// follows the device.
+///
+/// # Errors
+///
+/// As [`lane_sum_whole`].
+pub fn dot_product_whole<T: Element>(subgroup: u32, offset: u32) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup_of!(T, subgroup, dot_product, offset)
+}
+
 /// `butterfly_pair_sum_at` over a vector as wide as this device's subgroup.
 ///
 /// # Errors
@@ -300,7 +344,10 @@ mod tests {
         // What the wrapper adds. The lane count has to be instantiated at build time, so only the
         // widths listed in `whole_subgroup!` can be built at all — and a caller passing 24 gets
         // told that rather than getting a kernel for some other width.
-        for width in [0_u32, 24, 16, 128] {
+        // Not 16: that was here until lavapipe reported 8 and the dispatcher had to learn every
+        // power of two a Vulkan implementation is known to report. What is left is the widths no
+        // implementation reports at all.
+        for width in [0_u32, 24, 48, 128] {
             assert!(
                 matches!(workgroup_sum::<F32>(width), Err(LaneError::BadWidth { .. })),
                 "a subgroup of {width} was accepted"

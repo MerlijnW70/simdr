@@ -52,7 +52,7 @@ fn a_sum_containing_an_infinity_is_infinite_and_does_not_corrupt_the_other_subgr
 
     let output = gpu
         .run(
-            &kernels::lane_sum::<F32, 32>(limits.subgroup_size).expect("built"),
+            &kernels::lane_sum_whole::<F32>(limits.subgroup_size).expect("built"),
             &input,
             1,
         )
@@ -64,7 +64,11 @@ fn a_sum_containing_an_infinity_is_infinite_and_does_not_corrupt_the_other_subgr
 
     // And the *other* subgroup is untouched, which is the part a broken mapping would break.
     if count > width {
-        let second: f32 = (width..count).map(|value| value as f32).sum();
+        // The subgroup *after* the first, not everything after it. With two subgroups those are
+        // the same sum; with eight they are not, and the second reading was the one written down.
+        let second: f32 = (width..(width * 2).min(count))
+            .map(|value| value as f32)
+            .sum();
         assert_eq!(output.get(width).copied(), Some(second));
     }
 }
@@ -85,7 +89,7 @@ fn a_sum_containing_a_nan_is_nan_in_that_subgroup_only() {
 
     let output = gpu
         .run(
-            &kernels::lane_sum::<F32, 32>(limits.subgroup_size).expect("built"),
+            &kernels::lane_sum_whole::<F32>(limits.subgroup_size).expect("built"),
             &input,
             1,
         )
@@ -98,7 +102,11 @@ fn a_sum_containing_a_nan_is_nan_in_that_subgroup_only() {
     );
 
     if count > width {
-        let second: f32 = (width..count).map(|value| value as f32).sum();
+        // The subgroup *after* the first, not everything after it. With two subgroups those are
+        // the same sum; with eight they are not, and the second reading was the one written down.
+        let second: f32 = (width..(width * 2).min(count))
+            .map(|value| value as f32)
+            .sum();
         assert_eq!(
             output.get(width).copied(),
             Some(second),
@@ -185,7 +193,7 @@ fn negative_zero_and_positive_zero_sum_to_positive_zero() {
 
     let output = gpu
         .run(
-            &kernels::lane_sum::<F32, 32>(limits.subgroup_size).expect("built"),
+            &kernels::lane_sum_whole::<F32>(limits.subgroup_size).expect("built"),
             &input,
             1,
         )
@@ -221,7 +229,7 @@ fn a_very_large_value_does_not_disturb_the_lanes_around_it() {
 
     let output = gpu
         .run(
-            &kernels::lane_sum::<F32, 32>(limits.subgroup_size).expect("built"),
+            &kernels::lane_sum_whole::<F32>(limits.subgroup_size).expect("built"),
             &input,
             1,
         )
@@ -234,7 +242,11 @@ fn a_very_large_value_does_not_disturb_the_lanes_around_it() {
     );
 
     if count > width {
-        let second: f32 = (width..count).map(|value| value as f32).sum();
+        // The subgroup *after* the first, not everything after it. With two subgroups those are
+        // the same sum; with eight they are not, and the second reading was the one written down.
+        let second: f32 = (width..(width * 2).min(count))
+            .map(|value| value as f32)
+            .sum();
         assert_eq!(output.get(width).copied(), Some(second));
     }
 }

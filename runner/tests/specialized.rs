@@ -261,6 +261,103 @@ fn a_clustered_reduction_takes_its_cluster_size_from_the_pipeline() {
     assert_eq!(defaulted, whole);
 }
 
+/// The open-offset fold computes what the baked-in one computes.
+///
+/// `fold_halves_open` exists because a measurement needed it — `runner/examples/specialize.rs`
+/// compares one module specialized N ways against N modules, and the answer was that it saves 1%.
+/// The kernel is kept anyway, and a kernel that is kept has to be right: this is the comparison
+/// that says the address arithmetic behind an offset-by-value lands in the same place as the
+/// address arithmetic behind an offset-by-constant.
+#[test]
+fn an_offset_supplied_at_pipeline_time_reads_the_same_elements_as_a_baked_in_one() {
+    let Some(gpu) = device("fold-open") else {
+        return;
+    };
+    let limits = gpu.limits().clone();
+
+    // Two workgroups of input, folded at 64: out[i] = in[i] + in[i + 64].
+    let half = WORKGROUP_SIZE;
+    let input: Vec<f32> = (0..count() * 2).map(|index| index as f32).collect();
+
+    let baked = gpu
+        .run(
+            &kernels::fold_halves(limits.subgroup_size, half).expect("built"),
+            &input,
+            1,
+        )
+        .expect("dispatched");
+
+    let open = gpu
+        .run_specialized(
+            &kernels::fold_halves_open(limits.subgroup_size).expect("built"),
+            &input
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<u32>>(),
+            1,
+            &Specialization::none().set(kernels::FOLD_HALF_SPEC_ID, half),
+        )
+        .expect("dispatched");
+    let open: Vec<f32> = open.into_iter().map(f32::from_bits).collect();
+
+    let expected: Vec<f32> = (0..count())
+        .map(|index| index as f32 + (index + half as usize) as f32)
+        .collect();
+
+    assert_eq!(baked.get(..count()), Some(expected.as_slice()));
+    assert_eq!(
+        open.get(..count()),
+        Some(expected.as_slice()),
+        "the offset arrived at pipeline creation and landed somewhere else"
+    );
+}
+
+#[test]
+fn an_open_offset_of_a_different_value_reads_different_elements() {
+    // The other half: one module, two offsets, two answers. Without this the test above would
+    // pass against a kernel that ignored the specialization and folded at whatever its default
+    // said — which is zero, and would give `in[i] + in[i]`.
+    let Some(gpu) = device("fold-open-two") else {
+        return;
+    };
+    let limits = gpu.limits().clone();
+
+    let spirv = kernels::fold_halves_open(limits.subgroup_size).expect("built");
+
+    // Floats, and *converted* rather than reinterpreted. Passing the integers 0..128 as raw words
+    // into an `f32` kernel makes every one of them a denormal — and this device flushes denormals
+    // to zero, so the first version of this test compared two buffers of zeros and reported that
+    // the specialization had been ignored.
+    let input: Vec<f32> = (0..count() * 2).map(|index| index as f32).collect();
+    let words: Vec<u32> = input.iter().map(|value| value.to_bits()).collect();
+
+    let fold_at = |half: u32| -> Vec<f32> {
+        gpu.run_specialized(
+            &spirv,
+            &words,
+            1,
+            &Specialization::none().set(kernels::FOLD_HALF_SPEC_ID, half),
+        )
+        .expect("dispatched")
+        .into_iter()
+        .map(f32::from_bits)
+        .collect()
+    };
+
+    let at_64 = fold_at(64);
+    let at_32 = fold_at(32);
+
+    let sum_at = |offset: usize| -> Vec<f32> {
+        (0..count())
+            .map(|index| index as f32 + (index + offset) as f32)
+            .collect()
+    };
+
+    assert_ne!(at_64, at_32, "the specialization was ignored");
+    assert_eq!(at_64.get(..count()), Some(sum_at(64).as_slice()));
+    assert_eq!(at_32.get(..count()), Some(sum_at(32).as_slice()));
+}
+
 #[test]
 fn a_specialization_naming_an_id_the_module_does_not_have_is_ignored() {
     // Vulkan says an entry whose `constant_id` matches nothing is ignored. Worth pinning because

@@ -11,7 +11,7 @@
 //! is held inside the buffer with `Lanes::min` before it is used. That costs one instruction per
 //! element and is the price of letting the data choose an address.
 
-use super::shape;
+use super::{shape, whole_subgroup};
 use simdr::kernel::{Kernel, Shape};
 use simdr::lanes::{LaneError, U32};
 
@@ -27,15 +27,19 @@ use simdr::lanes::{LaneError, U32};
 /// # Errors
 ///
 /// [`LaneError`] if the module cannot be built.
-pub fn histogram(subgroup: u32, workgroup: u32, bins: u32) -> Result<Vec<u32>, LaneError> {
+fn histogram_at<const LANES: u32>(
+    subgroup: u32,
+    workgroup: u32,
+    bins: u32,
+) -> Result<Vec<u32>, LaneError> {
     let mut kernel = Kernel::<U32>::new(Shape::new(subgroup, workgroup, 2))?;
-    let value = kernel.load::<32>(0)?;
+    let value = kernel.load::<LANES>(0)?;
 
     let bin = {
         let mut lanes = kernel.lanes()?;
         // `min(value, bins - 1)` rather than a modulus: it is one instruction, and it makes the
         // index in-range by construction rather than by an argument about the input.
-        let ceiling = lanes.splat_bits::<U32, 32>(bins.saturating_sub(1))?;
+        let ceiling = lanes.splat_bits::<U32, LANES>(bins.saturating_sub(1))?;
         lanes.min(value, ceiling)?
     };
 
@@ -52,22 +56,48 @@ pub fn histogram(subgroup: u32, workgroup: u32, bins: u32) -> Result<Vec<u32>, L
 /// # Errors
 ///
 /// As [`histogram`].
-pub fn histogram_incrementing(
+fn histogram_incrementing_at<const LANES: u32>(
     subgroup: u32,
     workgroup: u32,
     bins: u32,
 ) -> Result<Vec<u32>, LaneError> {
     let mut kernel = Kernel::<U32>::new(Shape::new(subgroup, workgroup, 2))?;
-    let value = kernel.load::<32>(0)?;
+    let value = kernel.load::<LANES>(0)?;
 
     let bin = {
         let mut lanes = kernel.lanes()?;
-        let ceiling = lanes.splat_bits::<U32, 32>(bins.saturating_sub(1))?;
+        let ceiling = lanes.splat_bits::<U32, LANES>(bins.saturating_sub(1))?;
         lanes.min(value, ceiling)?
     };
 
     kernel.atomic_increment_at(1, bin.id())?;
     kernel.finish()
+}
+
+/// `histogram_at` with one element per invocation, whatever the subgroup width is.
+///
+/// The lane count has to match the width. A histogram is elementwise and could in principle use
+/// any mapping, but the scatter takes `bin.id()` — the *first* strip — so a strip-mined vector
+/// would count a quarter of its elements and report a plausible total.
+///
+/// # Errors
+///
+/// [`LaneError`] if the module cannot be built, or the width is not one the dispatcher lists.
+pub fn histogram(subgroup: u32, workgroup: u32, bins: u32) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup!(subgroup, histogram_at, workgroup, bins)
+}
+
+/// `histogram_incrementing_at`, the same way.
+///
+/// # Errors
+///
+/// As [`histogram`].
+pub fn histogram_incrementing(
+    subgroup: u32,
+    workgroup: u32,
+    bins: u32,
+) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup!(subgroup, histogram_incrementing_at, workgroup, bins)
 }
 
 /// Every invocation claims a consecutive slot from one counter, and writes its own index there.

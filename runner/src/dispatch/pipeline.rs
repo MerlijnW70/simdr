@@ -149,6 +149,56 @@ impl Pipeline {
     }
 }
 
+impl Gpu {
+    /// Build a pipeline for `spirv` and destroy it, so a caller can time what that costs.
+    ///
+    /// The same shape as [`Gpu::probe_resident`], and it exists for the same reason: a claim about
+    /// where the setup cost goes needs the parts measured apart. `notes/NEXT.md` argued for
+    /// specialization constants on the grounds that "one module per parameter value" is expensive
+    /// in *pipeline creation* — and pipeline creation had never been timed on its own.
+    ///
+    /// The two buffers are allocated here and freed here, so what is timed is
+    /// `vkCreateShaderModule`, the descriptor plumbing and `vkCreateComputePipeline`, plus two
+    /// small allocations that are the same in every call.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Vulkan`] if any call fails, [`Error::NoPipeline`] if the driver returns none.
+    pub fn probe_pipeline(
+        &self,
+        spirv: &[u32],
+        specialization: &Specialization,
+    ) -> Result<(), Error> {
+        let bytes = 256;
+
+        // SAFETY: both buffers and the pipeline are created here and destroyed before returning,
+        // nothing is submitted, and nothing else ever sees them.
+        unsafe {
+            let source = Buffer::device_local(self, bytes)?;
+            let destination = Buffer::device_local(self, bytes)?;
+
+            let built = Pipeline::new(
+                self,
+                spirv,
+                &[(&source, bytes), (&destination, bytes)],
+                specialization,
+            );
+
+            let outcome = match built {
+                Ok(pipeline) => {
+                    pipeline.destroy(self);
+                    Ok(())
+                }
+                Err(error) => Err(error),
+            };
+
+            source.destroy(self);
+            destination.destroy(self);
+            outcome
+        }
+    }
+}
+
 /// One storage-buffer binding, visible to compute.
 fn storage_binding(binding: u32) -> vk::DescriptorSetLayoutBinding<'static> {
     vk::DescriptorSetLayoutBinding::default()

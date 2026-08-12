@@ -150,6 +150,54 @@ fn generated_signed_programs_agree_with_the_cpu_reference() {
     assert!(checked > rounds / 2);
 }
 
+/// The four narrow integer domains, which need three device features the wide ones do not.
+///
+/// `i8`, `u8`, `i16` and `u16` had direct device tests and no fuzzing at all — the least-checked
+/// surface in the tree by this project's own standard, and the one where the two conversions
+/// (`OpSConvert` against `OpUConvert`) and the two extremes (`SMax` against `UMax`) are reached by
+/// the same source line.
+///
+/// The buffer is where they differ from everything else here: a stride of one byte means four
+/// elements share a word, and `fuzz::check` packs and unpacks at that boundary.
+#[test]
+fn generated_narrow_programs_agree_with_the_cpu_reference() {
+    let Some(gpu) = device("fuzz-narrow") else {
+        return;
+    };
+    let limits = gpu.limits().clone();
+
+    if !limits.subgroup_arithmetic || !limits.subgroup_clustered || !limits.subgroup_shuffle {
+        eprintln!("SKIPPED fuzz-narrow: the device lacks part of the subgroup surface");
+        return;
+    }
+    // The one that leaves no trace in the module: without it a device accepts every one of these
+    // programs at validation and refuses the pipeline.
+    if !limits.narrow.subgroup_extended_types {
+        eprintln!("SKIPPED fuzz-narrow: no shaderSubgroupExtendedTypes");
+        return;
+    }
+
+    let rounds = rounds();
+    for (domain, needed) in [
+        (Domain::UnsignedByte, limits.narrow.byte_kernel()),
+        (Domain::Byte, limits.narrow.byte_kernel()),
+        (Domain::UnsignedShort, limits.narrow.short_kernel()),
+        (Domain::Short, limits.narrow.short_kernel()),
+    ] {
+        if !needed {
+            eprintln!("SKIPPED fuzz-narrow {domain:?}: the device cannot hold it in a buffer");
+            continue;
+        }
+
+        let (checked, refused) = sweep(&gpu, domain, limits.subgroup_size, rounds);
+        eprintln!("fuzz {domain:?}: {checked} agreed, {refused} refused, over {rounds} seeds");
+        assert!(
+            checked > rounds / 2,
+            "most {domain:?} rounds were refused rather than checked, so this proved little"
+        );
+    }
+}
+
 /// The strip-mined end, which randomness alone reaches rarely.
 #[test]
 fn strip_mined_programs_agree_in_every_domain() {

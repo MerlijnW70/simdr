@@ -17,6 +17,19 @@
 //! no way to say what the right answer *is* near a rounding boundary. What this does cover is the
 //! half that could be silently wrong: instruction selection, the mapping, and the fact that
 //! `OpFAdd` and `OpIAdd` are different instructions reached by the same source.
+//!
+//! # The narrow integers
+//!
+//! `i8`, `u8`, `i16` and `u16` are here and are the same argument with a different modulus: their
+//! arithmetic wraps at 8 or 16 bits, wrapping is *defined*, and the reference wraps identically.
+//! So the exactness comes for free and what is being checked is instruction selection again —
+//! `OpSConvert` against `OpUConvert`, `SMax` against `UMax`, and a buffer whose stride is one byte
+//! rather than four.
+//!
+//! **`f16` is deliberately absent.** A half represents integers exactly only up to 2048, and a sum
+//! over sixty-four lanes leaves that range at once — so the argument the float domain rests on
+//! does not hold, and a tolerance would be checking something else. `runner/tests/narrow.rs` tests
+//! `f16` against expectations reasoned from the format instead.
 
 /// The element type a program computes in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,73 +45,139 @@ pub enum Domain {
     Signed,
     /// 32-bit floats holding small integers, where arithmetic is exact.
     Float,
+    /// 8-bit unsigned integers, wrapping at 256.
+    UnsignedByte,
+    /// 8-bit signed integers, wrapping at 128.
+    Byte,
+    /// 16-bit unsigned integers.
+    UnsignedShort,
+    /// 16-bit signed integers.
+    Short,
 }
 
 /// Every domain, for a caller that wants to sweep them.
-pub const ALL_DOMAINS: [Domain; 3] = [Domain::Unsigned, Domain::Signed, Domain::Float];
+pub const ALL_DOMAINS: [Domain; 7] = [
+    Domain::Unsigned,
+    Domain::Signed,
+    Domain::Float,
+    Domain::UnsignedByte,
+    Domain::Byte,
+    Domain::UnsignedShort,
+    Domain::Short,
+];
 
 impl Domain {
+    /// How many bits an element occupies.
+    ///
+    /// The number every operation below is written in terms of, rather than one match arm per
+    /// domain per operation. Seven domains and eight operations would be fifty-six arms; this is
+    /// eight functions and one table.
+    #[must_use]
+    pub const fn bits(self) -> u32 {
+        match self {
+            Self::Unsigned | Self::Signed | Self::Float => 32,
+            Self::UnsignedShort | Self::Short => 16,
+            Self::UnsignedByte | Self::Byte => 8,
+        }
+    }
+
+    /// Whether this is the float domain, where arithmetic is not modular.
+    #[must_use]
+    pub const fn is_float(self) -> bool {
+        matches!(self, Self::Float)
+    }
+
+    /// The mask that keeps a value inside this domain's width.
+    const fn mask(self) -> u32 {
+        match self.bits() {
+            32 => u32::MAX,
+            bits => (1 << bits) - 1,
+        }
+    }
+
+    /// `value` cut down to this domain's width.
+    const fn truncate(self, value: u32) -> u32 {
+        value & self.mask()
+    }
+
+    /// `value` read as a signed number of this domain's width, widened to `i32`.
+    ///
+    /// §2.2.1's rule, applied on the host: an `i8` of `0xff` is −1 and not 255, and a comparison
+    /// that skipped this would order the narrow domains the way the wide ones do.
+    const fn signed_value(self, value: u32) -> i32 {
+        let spare = 32 - self.bits();
+        ((value << spare) as i32) >> spare
+    }
+
     /// The largest value the generator may produce in this domain.
     ///
-    /// Floats stop well below 2²⁴ so that a sum over a few hundred of them stays exact; integers
-    /// are allowed to be larger because wrapping is defined and the reference wraps too.
+    /// Floats stop well below 2²⁴ so that a sum over a few hundred of them stays exact. The
+    /// integers are allowed to be larger because wrapping is defined and the reference wraps too —
+    /// but a narrow domain still keeps its constants inside its own width, or every generated
+    /// constant would be the same truncated value.
     #[must_use]
     pub const fn ceiling(self) -> u32 {
         match self {
             Self::Unsigned | Self::Signed => 4_096,
             Self::Float => 256,
+            Self::UnsignedShort | Self::Short => 1_024,
+            Self::UnsignedByte | Self::Byte => 32,
         }
     }
 
     /// Whether values in this domain may be negative.
     ///
-    /// The generator uses it to reach below zero, which is the half of the signed domain that
-    /// differs from the unsigned one at all.
+    /// The generator uses it to reach below zero, which is the half of the signed domains that
+    /// differs from the unsigned ones at all.
     #[must_use]
     pub const fn is_signed(self) -> bool {
-        matches!(self, Self::Signed | Self::Float)
+        matches!(self, Self::Signed | Self::Float | Self::Byte | Self::Short)
     }
 
     /// Encode a small integer as this domain's bit pattern.
     #[must_use]
     pub fn encode(self, value: u32) -> u32 {
-        match self {
-            // Both integer domains hold the value as-is; the generator keeps them below `ceiling`,
-            // so the top bit is clear and the two encodings coincide.
-            Self::Unsigned | Self::Signed => value,
-            Self::Float => (value as f32).to_bits(),
+        if self.is_float() {
+            (value as f32).to_bits()
+        } else {
+            self.truncate(value)
         }
     }
 
     /// Encode a possibly-negative integer, for the domains that have one.
     ///
-    /// Unsigned takes the magnitude — a negative value there is not a smaller number, it is a
-    /// number near `u32::MAX`, and generating one would make every sum wrap for reasons that say
-    /// nothing about the emitter.
+    /// An unsigned domain takes the magnitude — a negative value there is not a smaller number, it
+    /// is a number near its maximum, and generating one would make every sum wrap for reasons that
+    /// say nothing about the emitter.
     #[must_use]
     pub fn encode_signed(self, value: i32) -> u32 {
-        match self {
-            Self::Unsigned => value.unsigned_abs(),
-            Self::Signed => u32::from_ne_bytes(value.to_ne_bytes()),
-            Self::Float => (value as f32).to_bits(),
+        if self.is_float() {
+            return (value as f32).to_bits();
+        }
+        if self.is_signed() {
+            self.truncate(u32::from_ne_bytes(value.to_ne_bytes()))
+        } else {
+            self.truncate(value.unsigned_abs())
         }
     }
 
     /// Add, in this domain.
     #[must_use]
     pub fn add(self, left: u32, right: u32) -> u32 {
-        match self {
-            Self::Unsigned | Self::Signed => left.wrapping_add(right),
-            Self::Float => (f32::from_bits(left) + f32::from_bits(right)).to_bits(),
+        if self.is_float() {
+            (f32::from_bits(left) + f32::from_bits(right)).to_bits()
+        } else {
+            self.truncate(left.wrapping_add(right))
         }
     }
 
     /// Multiply, in this domain.
     #[must_use]
     pub fn mul(self, left: u32, right: u32) -> u32 {
-        match self {
-            Self::Unsigned | Self::Signed => left.wrapping_mul(right),
-            Self::Float => (f32::from_bits(left) * f32::from_bits(right)).to_bits(),
+        if self.is_float() {
+            (f32::from_bits(left) * f32::from_bits(right)).to_bits()
+        } else {
+            self.truncate(left.wrapping_mul(right))
         }
     }
 
@@ -106,13 +185,16 @@ impl Domain {
     ///
     /// Ordered for floats, which is what `OpFOrdGreaterThan` gives and what the lane API emits.
     /// Signed and unsigned genuinely disagree here whenever the top bit is set, which is the point
-    /// of having both.
+    /// of having both at every width.
     #[must_use]
     pub fn greater(self, left: u32, right: u32) -> bool {
-        match self {
-            Self::Unsigned => left > right,
-            Self::Signed => (left as i32) > (right as i32),
-            Self::Float => f32::from_bits(left) > f32::from_bits(right),
+        if self.is_float() {
+            return f32::from_bits(left) > f32::from_bits(right);
+        }
+        if self.is_signed() {
+            self.signed_value(left) > self.signed_value(right)
+        } else {
+            self.truncate(left) > self.truncate(right)
         }
     }
 
@@ -126,29 +208,6 @@ impl Domain {
         }
     }
 
-    /// The value a `min` reduction starts from: larger than anything the generator produces.
-    ///
-    /// Not `zero`. A minimum folded from zero would return zero whenever every element is
-    /// positive, which is most of the time and looks entirely plausible.
-    #[must_use]
-    pub fn largest(self) -> u32 {
-        match self {
-            Self::Unsigned => u32::MAX,
-            Self::Signed => u32::from_ne_bytes(i32::MAX.to_ne_bytes()),
-            Self::Float => f32::INFINITY.to_bits(),
-        }
-    }
-
-    /// The value a `max` reduction starts from: smaller than anything the generator produces.
-    #[must_use]
-    pub fn smallest(self) -> u32 {
-        match self {
-            Self::Unsigned => 0,
-            Self::Signed => u32::from_ne_bytes(i32::MIN.to_ne_bytes()),
-            Self::Float => f32::NEG_INFINITY.to_bits(),
-        }
-    }
-
     /// The larger of two values.
     #[must_use]
     pub fn max(self, left: u32, right: u32) -> u32 {
@@ -156,6 +215,35 @@ impl Domain {
             left
         } else {
             right
+        }
+    }
+
+    /// The value a `min` reduction starts from: larger than anything the generator produces.
+    ///
+    /// Not `zero`. A minimum folded from zero would return zero whenever every element is
+    /// positive, which is most of the time and looks entirely plausible.
+    #[must_use]
+    pub fn largest(self) -> u32 {
+        if self.is_float() {
+            return f32::INFINITY.to_bits();
+        }
+        if self.is_signed() {
+            self.mask() >> 1
+        } else {
+            self.mask()
+        }
+    }
+
+    /// The value a `max` reduction starts from: smaller than anything the generator produces.
+    #[must_use]
+    pub fn smallest(self) -> u32 {
+        if self.is_float() {
+            return f32::NEG_INFINITY.to_bits();
+        }
+        if self.is_signed() {
+            self.truncate(1 << (self.bits() - 1))
+        } else {
+            0
         }
     }
 
@@ -167,116 +255,4 @@ impl Domain {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn integer_arithmetic_wraps_and_float_arithmetic_does_not() {
-        assert_eq!(Domain::Unsigned.add(u32::MAX, 1), 0);
-
-        let big = Domain::Float.encode(1_000_000);
-        let sum = Domain::Float.add(big, Domain::Float.encode(1));
-        assert_eq!(f32::from_bits(sum), 1_000_001.0);
-    }
-
-    #[test]
-    fn a_float_sum_within_the_ceiling_is_exact_whatever_the_order() {
-        // The claim the whole float mode rests on: at these magnitudes addition is associative,
-        // because every partial sum is an integer below 2^24 and therefore exact.
-        let values: Vec<u32> = (0..=Domain::Float.ceiling())
-            .map(|value| Domain::Float.encode(value))
-            .collect();
-
-        let forwards = values.iter().fold(Domain::Float.zero(), |total, &value| {
-            Domain::Float.add(total, value)
-        });
-        let backwards = values
-            .iter()
-            .rev()
-            .fold(Domain::Float.zero(), |total, &value| {
-                Domain::Float.add(total, value)
-            });
-
-        assert_eq!(forwards, backwards);
-
-        let expected = Domain::Float.ceiling() * (Domain::Float.ceiling() + 1) / 2;
-        assert_eq!(f32::from_bits(forwards), expected as f32);
-    }
-
-    #[test]
-    fn a_float_sum_past_the_ceiling_is_not_exact_which_is_why_there_is_one() {
-        // The counter-example that justifies `ceiling`. Far above 2^24 an addition of one is lost
-        // entirely, so order would start to matter and the comparison would be meaningless.
-        let huge = Domain::Float.encode(1);
-        let past = (2.0_f32.powi(25)).to_bits();
-
-        assert_eq!(Domain::Float.add(past, huge), past, "the one vanished");
-    }
-
-    #[test]
-    fn comparison_is_ordered_for_floats() {
-        let one = Domain::Float.encode(1);
-        let two = Domain::Float.encode(2);
-
-        assert!(Domain::Float.greater(two, one));
-        assert!(!Domain::Float.greater(one, two));
-        assert_eq!(Domain::Float.max(one, two), two);
-    }
-
-    #[test]
-    fn zero_is_the_additive_identity_in_every_domain() {
-        for domain in ALL_DOMAINS {
-            let value = domain.encode(7);
-            assert_eq!(domain.add(value, domain.zero()), value);
-        }
-    }
-
-    #[test]
-    fn signed_and_unsigned_order_the_same_bits_the_opposite_way() {
-        // The reason `Signed` is a domain and not a duplicate. `-1` is `0xFFFF_FFFF`, which is the
-        // largest unsigned value and the second-smallest signed one, and the two reach different
-        // SPIR-V instructions for exactly this.
-        let minus_one = Domain::Signed.encode_signed(-1);
-        let one = Domain::Signed.encode(1);
-
-        assert!(Domain::Signed.greater(one, minus_one), "1 > -1");
-        assert!(
-            Domain::Unsigned.greater(minus_one, one),
-            "the same bits, read unsigned, are the larger"
-        );
-    }
-
-    #[test]
-    fn the_unsigned_domain_refuses_to_hold_a_negative() {
-        // A negative there is not a small number, it is a huge one, and generating it would make
-        // every sum wrap for a reason that says nothing about the emitter.
-        assert_eq!(Domain::Unsigned.encode_signed(-7), 7);
-        assert_eq!(Domain::Signed.encode_signed(-7) as i32, -7);
-        assert_eq!(f32::from_bits(Domain::Float.encode_signed(-7)), -7.0);
-    }
-
-    #[test]
-    fn the_extremes_bracket_everything_the_generator_can_produce() {
-        for domain in ALL_DOMAINS {
-            let top = domain.encode(domain.ceiling());
-            let bottom = domain.encode_signed(-(domain.ceiling() as i32));
-
-            assert!(domain.greater(domain.largest(), top), "{domain:?} largest");
-            assert!(
-                domain.greater(bottom, domain.smallest()) || bottom == domain.smallest(),
-                "{domain:?} smallest"
-            );
-        }
-    }
-
-    #[test]
-    fn min_and_max_are_each_others_opposite() {
-        for domain in ALL_DOMAINS {
-            let low = domain.encode(3);
-            let high = domain.encode(9);
-
-            assert_eq!(domain.max(low, high), high);
-            assert_eq!(domain.min(low, high), low);
-        }
-    }
-}
+mod tests;

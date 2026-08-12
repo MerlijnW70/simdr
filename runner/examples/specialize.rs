@@ -1,0 +1,144 @@
+//! What "one module per parameter value" actually costs, and what deferring the value saves.
+//!
+//! `notes/NEXT.md` put specialization constants on the list on the grounds that `Gpu::sum` builds
+//! ten modules for ten fold sizes, and that modules are cheap in bytes but not in *pipeline
+//! creation*. That is an argument. This is the measurement, and it separates the three costs a
+//! reduction pays before it dispatches anything:
+//!
+//! - **Emitting** a module — pure computation, no device involved.
+//! - **Creating a pipeline** from it — `vkCreateShaderModule` plus `vkCreateComputePipeline`,
+//!   which is where the driver compiles the shader.
+//! - The same, from **one** module specialized ten different ways.
+//!
+//! The third is the one the argument rests on. A specialization constant is fixed when the
+//! pipeline is created, so ten values still need ten pipelines — what it removes is ten *modules*,
+//! not ten compilations. Whether that is most of the cost or a rounding error is the question.
+
+use runner::kernels::{self, FOLD_HALF_SPEC_ID};
+use runner::{Gpu, Specialization};
+use std::time::{Duration, Instant};
+
+/// A buffer of a million elements folds fifteen times, which is the shape `Gpu::sum` runs.
+const ELEMENTS: usize = 1 << 20;
+
+/// How many times to repeat each measurement.
+const REPEATS: u32 = 20;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(gpu) = Gpu::open()? else {
+        println!("no Vulkan device");
+        return Ok(());
+    };
+
+    let width = gpu.limits().subgroup_size;
+    println!("{} — subgroup {width}\n", gpu.limits().name);
+
+    let folds = runner::reduction::folds(ELEMENTS);
+    println!(
+        "a reduction over {ELEMENTS} elements is {} folds, so {} modules today",
+        folds.len(),
+        folds.len()
+    );
+
+    // 1. Emitting the modules. No device, no driver — this is the emitter alone.
+    let emitting = repeat(|| {
+        for fold in &folds {
+            kernels::fold_halves(width, fold.half).expect("built");
+        }
+    });
+
+    // 2. One pipeline per module, which is what the chain does now.
+    let modules: Vec<Vec<u32>> = folds
+        .iter()
+        .map(|fold| kernels::fold_halves(width, fold.half).expect("built"))
+        .collect();
+    // Warm, so the first compile of each does not land in the average.
+    for words in &modules {
+        gpu.probe_pipeline(words, &Specialization::none())?;
+    }
+    let per_module = repeat_result(&gpu, || {
+        for words in &modules {
+            gpu.probe_pipeline(words, &Specialization::none())?;
+        }
+        Ok(())
+    })?;
+
+    // 3. One module, ten specializations. The same number of pipelines, one tenth of the modules.
+    let open = kernels::fold_halves_open(width)?;
+    for fold in &folds {
+        gpu.probe_pipeline(
+            &open,
+            &Specialization::none().set(FOLD_HALF_SPEC_ID, fold.half),
+        )?;
+    }
+    let specialized = repeat_result(&gpu, || {
+        for fold in &folds {
+            gpu.probe_pipeline(
+                &open,
+                &Specialization::none().set(FOLD_HALF_SPEC_ID, fold.half),
+            )?;
+        }
+        Ok(())
+    })?;
+
+    println!("\n{:>34} {:>12} {:>12}", "", "all folds", "per fold");
+    row("emitting the modules", emitting, folds.len());
+    row("pipelines, one module each", per_module, folds.len());
+    row(
+        "pipelines, one module specialized",
+        specialized,
+        folds.len(),
+    );
+
+    println!(
+        "\nEmission is {:.1}% of what building the pipelines costs.",
+        emitting.as_secs_f64() / per_module.as_secs_f64() * 100.0
+    );
+    let saved = per_module.as_secs_f64() - specialized.as_secs_f64();
+    println!(
+        "Specializing changes the total by {:.1}% — {} across the whole chain.",
+        saved / per_module.as_secs_f64() * 100.0,
+        micros(Duration::from_secs_f64(saved.abs()))
+    );
+    println!(
+        "\nA specialization constant is fixed at pipeline creation, so ten values still need ten\n\
+         pipelines. What it removes is the emission, and the numbers above say how much that is."
+    );
+
+    Ok(())
+}
+
+/// Time `body` `REPEATS` times and return the mean.
+fn repeat(mut body: impl FnMut()) -> Duration {
+    let started = Instant::now();
+    for _ in 0..REPEATS {
+        body();
+    }
+    started.elapsed() / REPEATS
+}
+
+/// The same, for a body that can fail.
+fn repeat_result(
+    _gpu: &Gpu,
+    mut body: impl FnMut() -> Result<(), runner::Error>,
+) -> Result<Duration, runner::Error> {
+    let started = Instant::now();
+    for _ in 0..REPEATS {
+        body()?;
+    }
+    Ok(started.elapsed() / REPEATS)
+}
+
+/// One line of the table.
+fn row(label: &str, total: Duration, count: usize) {
+    println!(
+        "{label:>34} {:>12} {:>12}",
+        micros(total),
+        micros(total / count as u32)
+    );
+}
+
+/// Microseconds, which is the scale these land on.
+fn micros(duration: Duration) -> String {
+    format!("{:.1} us", duration.as_secs_f64() * 1e6)
+}

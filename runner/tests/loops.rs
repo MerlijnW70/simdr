@@ -141,10 +141,16 @@ fn a_value_computed_in_one_arm_arrives_at_the_merge() {
     // cannot be exercised in a single dispatch. Reported rather than asserted away: the case is
     // covered on a 32-wide device and is genuinely not covered here.
     if count > width {
+        // Computed from the width rather than written out: the first subgroup is `0..width` and
+        // the last is the `width` elements before `count`, and on an 8-wide device there are eight
+        // subgroups between them rather than one.
         let low = output.first().copied().unwrap_or_default();
         let high = output.last().copied().unwrap_or_default();
-        assert_eq!(low, 31.0, "the first subgroup took the max arm");
-        assert_eq!(high, (32..64).sum::<u32>() as f32, "the second summed");
+        let first_max = (width - 1) as f32;
+        let last_sum: f32 = ((count - width)..count).map(|value| value as f32).sum();
+
+        assert_eq!(low, first_max, "the first subgroup took the max arm");
+        assert_eq!(high, last_sum, "the last summed");
     } else {
         eprintln!(
             "sum-or-max: one subgroup of {width} in a workgroup of {count}, so only the arm it \

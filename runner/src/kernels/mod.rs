@@ -25,11 +25,12 @@ pub use control::{
     scale_if_any_above, sum_or_max,
 };
 pub use extended::{clamped, fused_square, larger, magnitude, root, smaller};
-pub use narrow::{narrow_add, narrow_clamp, narrow_sum};
+pub use narrow::{narrow_add, narrow_clamp, narrow_sum, narrow_sum_whole};
 pub use network::{Layer, clipped_dot, clipped_dot_split, unclipped_dot};
 pub use reduce::{
-    butterfly_pair_sum, butterfly_tree_sum, dot_product, fold_halves, lane_max, lane_max_whole,
-    lane_sum, lane_sum_whole, workgroup_sum,
+    FOLD_HALF_SPEC_ID, butterfly_pair_sum, butterfly_tree_sum, dot_product, dot_product_whole,
+    fold_halves, fold_halves_open, lane_max, lane_max_whole, lane_sum, lane_sum_whole,
+    workgroup_sum,
 };
 pub use scatter::{claim_slots, histogram, histogram_incrementing};
 pub use specialized::{
@@ -57,9 +58,17 @@ pub const WORKGROUP_SIZE: u32 = 64;
 /// **This is what a second device found.** Every one of these kernels was written against a 32-wide
 /// subgroup and read as though it adapted, because the width was passed in — and only the lane
 /// count was wrong.
+///
+/// **And a third device made the list itself the limit.** It held 32 and 64, which is every width
+/// real hardware here reports — and lavapipe reports **8**, so every kernel below refused to build
+/// with `BadWidth` on a device that was perfectly capable of running them. The list now covers 4,
+/// 8, 16, 32 and 64: every power of two a Vulkan implementation is known to report.
 macro_rules! whole_subgroup {
     ($subgroup:expr, $build:ident $(, $argument:expr)* $(,)?) => {
         match $subgroup {
+            4 => $build::<4>($subgroup $(, $argument)*),
+            8 => $build::<8>($subgroup $(, $argument)*),
+            16 => $build::<16>($subgroup $(, $argument)*),
             32 => $build::<32>($subgroup $(, $argument)*),
             64 => $build::<64>($subgroup $(, $argument)*),
             width => Err(simdr::lanes::LaneError::BadWidth { width }),
@@ -71,6 +80,9 @@ macro_rules! whole_subgroup {
 macro_rules! whole_subgroup_of {
     ($element:ty, $subgroup:expr, $build:ident $(, $argument:expr)* $(,)?) => {
         match $subgroup {
+            4 => $build::<$element, 4>($subgroup $(, $argument)*),
+            8 => $build::<$element, 8>($subgroup $(, $argument)*),
+            16 => $build::<$element, 16>($subgroup $(, $argument)*),
             32 => $build::<$element, 32>($subgroup $(, $argument)*),
             64 => $build::<$element, 64>($subgroup $(, $argument)*),
             width => Err(simdr::lanes::LaneError::BadWidth { width }),

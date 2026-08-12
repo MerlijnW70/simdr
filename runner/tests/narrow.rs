@@ -239,16 +239,17 @@ fn a_narrow_reduction_runs_when_the_device_has_extended_types() {
         return;
     }
 
-    // 32 lanes is the whole subgroup on one device here and a cluster on the other, and the
-    // reduction covers whichever it is.
-    let width = 32.min(limits.subgroup_size) as usize;
+    // The whole subgroup, whatever the subgroup is. A fixed 32 would be one vector on one device,
+    // a cluster on another and four strips on a third, and the reduction covers a different number
+    // of lanes in each.
+    let width = limits.subgroup_size as usize;
     // Small values, so the total of a subgroup stays inside an i8 and the answer is a sum rather
     // than a statement about wrapping.
     let input: Vec<u8> = (0..count()).map(|index| (index % 4) as u8).collect();
 
     let output = gpu
         .run_bytes(
-            &kernels::narrow_sum::<I8, 32>(limits.subgroup_size).expect("built"),
+            &kernels::narrow_sum_whole::<I8>(limits.subgroup_size).expect("built"),
             &input,
             1,
         )

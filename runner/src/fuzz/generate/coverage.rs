@@ -189,6 +189,40 @@ fn the_generator_reaches_every_butterfly_distance() {
     );
 }
 
+/// And never a distance that leaves the subgroup.
+///
+/// The bug a third device found. `1 << below(4)` gives 8, which is inside a 32-wide subgroup and
+/// is the *width* of an 8-wide one — and a shuffle across the boundary is undefined, so the
+/// fuzzer reported a disagreement that was its own.
+///
+/// Checked at every width the dispatcher can build for, because the rule is about the relationship
+/// and not about any one of them.
+#[test]
+fn no_generated_butterfly_reaches_outside_its_subgroup() {
+    for width in [4_u32, 8, 16, 32, 64] {
+        let mut reached = 0;
+        for seed in 0..256_u64 {
+            let program = generate(&mut Rng::new(seed), Domain::Unsigned, width, 64);
+            for step in &program.steps {
+                if let Op::ButterflyAdd(mask) = *step {
+                    assert!(
+                        mask < width,
+                        "a subgroup of {width} was given a butterfly of {mask}, \
+                         which pairs a lane with one in the next subgroup"
+                    );
+                    reached += 1;
+                }
+            }
+        }
+
+        assert!(
+            reached > 0,
+            "no butterfly at all was generated for a subgroup of {width}, \
+             so this checked nothing there"
+        );
+    }
+}
+
 /// The same for how a program ends.
 #[test]
 fn the_generator_reaches_every_finish() {

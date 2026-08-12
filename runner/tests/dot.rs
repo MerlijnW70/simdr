@@ -27,11 +27,10 @@ fn a_subgroup_dot_product_matches_the_reference_exactly() {
         return;
     }
 
-    // The vector is 32 lanes wide whatever the device is, so on a 64-wide subgroup this is a
-    // *cluster* and the reduction covers 32 lanes rather than the subgroup. That is the clustered
-    // mapping doing its job, and until there was a 64-wide device to run on, `LANES` and the
-    // subgroup width were the same number and nothing distinguished them.
-    let width = 32.min(limits.subgroup_size) as usize;
+    // One element per lane, whatever the width is. A fixed 32 is the whole subgroup on one device
+    // here, a cluster on another and four strips on a third — three different answers to "how many
+    // lanes does this reduce", and only the first was ever what the reference computed.
+    let width = limits.subgroup_size as usize;
     let count = WORKGROUP_SIZE as usize;
 
     // Two concatenated vectors in one buffer: weights then activations, which is how a caller
@@ -42,7 +41,8 @@ fn a_subgroup_dot_product_matches_the_reference_exactly() {
 
     let output = gpu
         .run_u32(
-            &kernels::dot_product::<I32, 32>(limits.subgroup_size, WORKGROUP_SIZE).expect("built"),
+            &kernels::dot_product_whole::<I32>(limits.subgroup_size, WORKGROUP_SIZE)
+                .expect("built"),
             &input,
             1,
         )

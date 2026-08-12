@@ -9,7 +9,7 @@
 //! `storageBuffer8BitAccess`; a reduction needs `shaderSubgroupExtendedTypes` on top, and that one
 //! leaves no trace in the module at all.
 
-use super::shape;
+use super::{shape, whole_subgroup_of};
 use simdr::kernel::{Kernel, Shape};
 use simdr::lanes::{Element, LaneError};
 
@@ -48,6 +48,19 @@ pub fn narrow_sum<T: Element, const LANES: u32>(subgroup: u32) -> Result<Vec<u32
     let total = kernel.lanes()?.reduce_sum(value)?;
     kernel.store_scalar(1, total)?;
     kernel.finish()
+}
+
+/// [`narrow_sum`] over a vector as wide as this device's subgroup.
+///
+/// The distinction three widths made necessary: `narrow_sum::<T, 32>` is the whole subgroup on one
+/// device, a cluster on another and four strips on a third, and it reduces a different number of
+/// lanes in each. A test that means "the subgroup total" wants this.
+///
+/// # Errors
+///
+/// [`LaneError`] if the module cannot be built, or the width is not one the dispatcher lists.
+pub fn narrow_sum_whole<T: Element>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup_of!(T, subgroup, narrow_sum)
 }
 
 /// `out[i] = clamp(in[i], low, high)`, over a narrow type and a chosen workgroup size.
