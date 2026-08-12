@@ -133,7 +133,7 @@ did not.
 
 | Layer | What it is | What it caught |
 | --- | --- | --- |
-| **Unit tests** | 286 in the emitter, decoding what was emitted; 506 across the workspace | Everything cheap |
+| **Unit tests** | 286 in the emitter, decoding what was emitted; 514 across the workspace | Everything cheap |
 | **`spirv-val`** | Khronos' validator, at `--target-env vulkan1.1` | `OpLoopMerge` in the wrong position — a unit test asserted "merge before branch" and passed while the comparison sat between them |
 | **Execution** | Real dispatches on a real GPU, against CPU references | A missing staging write: every computing kernel returned garbage and the empty-kernel test still passed |
 | **Other devices** | The same suite at 64 lanes and at 8, as well as at 32 | Ten tests that had conflated "32 lanes" with "the subgroup", four of which could not build at all because a vote has no clustered form. Then, at 8: a fuzzer generating shuffles that leave the subgroup, and three tests assuming uninitialised device memory is zero |
@@ -253,6 +253,7 @@ cargo run --release --example nnue     -p runner  # a chess engine's NNUE layer,
 cargo run --release --example sweep    -p runner  # working-set sweep, with spreads
 cargo run --release --example narrow   -p runner  # i8 and i16 against i32, at the same element count
 cargo run --release --example specialize -p runner # emitting a module against building a pipeline
+cargo run --release --example reducer   -p runner  # a reduction that keeps its pipelines
 ```
 
 To run any of it against a different device:
@@ -297,6 +298,15 @@ Measured at **52× faster per dispatch** than rebuilding everything on the RTX 4
 the integrated Radeon in the same machine. It does not make the kernel faster and it does not
 remove the host copies — it removes the setup the measurement said was there to remove.
 
+A full-buffer reduction is a chain of a dozen pipelines rather than one, and `Gpu::reducer` is the
+same idea applied to all of them: **5.0×** over 8 192 elements, 1.6× over 2²⁰ where the arithmetic
+starts to dominate.
+
+```rust
+let mut reducer = gpu.reducer(8_192)?;   // every pipeline built once
+let total = reducer.sum(&input)?.total;  // and again, and again
+```
+
 The two numbers are why the test that guards this asserts a factor of three. Ten passed comfortably
 for as long as there was one device to run it on, and was a property of that device wearing the
 costume of a property of sessions.
@@ -321,8 +331,10 @@ costume of a property of sessions.
 - **Nothing here defers a value.** Specialization constants work end to end and no kernel uses one
   outside the tests and the measurement written for them. That is a conclusion rather than a gap:
   `runner/examples/specialize.rs` timed one module specialized fourteen ways against fourteen
-  modules and the difference was **1.0%**, because a specialization constant is fixed *at* pipeline
-  creation and fourteen values still need fourteen pipelines. `decisions/DR-0005` has the table.
+  modules and the difference was **9.7% of the setup**, because a specialization constant is fixed
+  *at* pipeline creation and fourteen values still need fourteen pipelines. Keeping the pipelines
+  instead is worth 5×, and that is what `Gpu::reducer` does. `decisions/DR-0005` has both tables,
+  including the retraction of a first measurement that was wrong by a factor of eight.
 
 ## Reading the tree
 

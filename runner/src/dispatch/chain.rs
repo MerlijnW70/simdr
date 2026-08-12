@@ -115,9 +115,49 @@ impl Gpu {
 
         unsafe { self.copy(staging, source, bytes) }?;
 
+        let groups: Vec<u32> = passes.iter().map(|pass| pass.workgroups).collect();
+        let recorded = unsafe { self.replay(&pipelines, &groups, source, destination, bytes) };
+
+        let output = recorded.and_then(|()| {
+            unsafe { self.copy(destination, staging, bytes) }?;
+            unsafe { staging.read(self, count) }
+        });
+
+        for pipeline in pipelines {
+            unsafe { pipeline.destroy(self) };
+        }
+        output
+    }
+}
+
+impl Gpu {
+    /// Record every pipeline in order, copying `destination` back into `source` between them, and
+    /// wait for the whole thing.
+    ///
+    /// The half of a chain that does not care where the pipelines came from. [`Gpu::run_chain`]
+    /// builds them and throws them away; [`crate::Reducer`] keeps them. Both record the same
+    /// sequence, and it lives here so there is one of it.
+    ///
+    /// `workgroups` is one entry per pipeline, in the same order.
+    ///
+    /// # Safety
+    ///
+    /// The pipelines and both buffers must be live, and the pipelines' descriptor sets must name
+    /// these buffers — a set built against different ones would read freed memory.
+    pub(crate) unsafe fn replay(
+        &self,
+        pipelines: &[Pipeline],
+        workgroups: &[u32],
+        source: &Buffer,
+        destination: &Buffer,
+        bytes: u64,
+    ) -> Result<(), Error> {
+        // The duration `record_and_wait` reports is the host's view of the whole submission, which
+        // is not what a chain's caller wants — `Gpu::sum` reports dispatch *counts* and leaves
+        // timing to the examples. Discarded here rather than threaded out to nobody.
         let recorded = unsafe {
             self.record_and_wait(|device, command| {
-                for (index, (pass, pipeline)) in passes.iter().zip(&pipelines).enumerate() {
+                for (index, (pipeline, groups)) in pipelines.iter().zip(workgroups).enumerate() {
                     if index > 0 {
                         // The previous pass wrote `destination`; this one reads `source`. Both the
                         // copy and the dispatch after it wait on what came before.
@@ -140,21 +180,13 @@ impl Gpu {
                         &[pipeline.descriptors()],
                         &[],
                     );
-                    device.cmd_dispatch(command, pass.workgroups.max(1), 1, 1);
+                    device.cmd_dispatch(command, (*groups).max(1), 1, 1);
                 }
                 Ok(())
             })
         };
 
-        let output = recorded.and_then(|_| {
-            unsafe { self.copy(destination, staging, bytes) }?;
-            unsafe { staging.read(self, count) }
-        });
-
-        for pipeline in pipelines {
-            unsafe { pipeline.destroy(self) };
-        }
-        output
+        recorded.map(|_| ())
     }
 }
 

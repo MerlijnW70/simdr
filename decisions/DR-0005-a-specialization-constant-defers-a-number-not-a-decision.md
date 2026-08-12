@@ -56,25 +56,35 @@ one place it was expected to pay off turned out not to.
 
 `notes/NEXT.md` argued that `Gpu::sum` building fourteen modules for fourteen fold sizes is
 expensive in *pipeline creation*. `runner/examples/specialize.rs` measured it — RTX 4080, a
-reduction over 2²⁰ elements:
+reduction over 2²⁰ elements, buffers allocated once so that what is timed is pipelines:
 
 | | all fourteen folds | per fold |
 | --- | --- | --- |
-| emitting the modules | 71.5 µs | 5.1 µs |
-| a pipeline each, from fourteen modules | 6796.8 µs | 485.5 µs |
-| a pipeline each, from **one** specialized module | 6726.0 µs | 480.4 µs |
+| emitting the modules | 74.2 µs | 5.3 µs |
+| a pipeline each, from fourteen modules | 809.6 µs | 57.8 µs |
+| a pipeline each, from **one** specialized module | 793.0 µs | 56.6 µs |
 
-**Specializing saves 1.0%.** Emission is 1.1% of what building the pipelines costs, and that is
-exactly what a specialization constant can remove — because it is fixed *at* pipeline creation, so
-fourteen values still need fourteen pipelines and fourteen shader compilations.
+Setting the two *strategies* against each other — fourteen modules and fourteen pipelines, against
+one module and fourteen pipelines — specializing removes **9.7%** of the setup, 85.6 µs of 883.9.
+Emission is 9.2% of what building the pipelines costs and that is what a specialization constant
+can remove, because it is fixed *at* pipeline creation and fourteen values still need fourteen
+pipelines.
 
 The premise was wrong in a way worth stating plainly: one module per parameter value is **cheap**.
-One *pipeline* per parameter value is expensive, and no specialization constant makes it less so.
+One *pipeline* per parameter value is not, and no specialization constant makes it less so.
 
-What the measurement does say is that a pipeline costs 485 µs against a dispatch's 0.8 µs. The
-reduction chain's real saving is to **hold its pipelines** across calls, the way `Session` already
-holds one — not to defer its constants. That is a different change and it is now on `notes/NEXT.md`
-with this number behind it.
+> **Corrected 2026-08-12, later the same day.** This table first read 485.5 µs per pipeline and
+> "saves 1.0%". Both numbers were wrong. The probe took one module and allocated two buffers *per
+> call*, so what it reported was pipeline creation plus two allocations — and allocation is the
+> larger half. The error surfaced when `runner/examples/reducer.rs` timed a whole fourteen-fold
+> reduction at 3.1 ms, which is less than fourteen pipelines at 485 µs would have cost on their
+> own. [`Gpu::probe_pipelines`] takes a batch now and allocates once. The conclusion did not
+> change; the size of it did, from 1.0% to 9.7%.
+
+What the measurement does say is that setup is ~884 µs against a dispatch's 0.8 µs, and that the
+reduction chain's real saving is to **hold its pipelines** across calls rather than defer its
+constants. That is `Reducer`, and it is built: `runner/examples/reducer.rs` measures **5.0×** on a
+reduction over 8 192 elements and 1.6× over 2²⁰, where the arithmetic starts to dominate.
 
 `kernels::fold_halves_open` and `Kernel::load_offset_by` are kept rather than deleted: they are
 what made the comparison possible, they cost one `OpIAdd` per strip against the baked-in form, and

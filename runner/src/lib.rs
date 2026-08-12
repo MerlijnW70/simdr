@@ -43,7 +43,7 @@ use std::fmt;
 
 pub use device::{Limits, Narrow};
 pub use dispatch::{MemoryType, Pass, Placement, Session, Specialization};
-pub use reduction::{BadLength, Reduction};
+pub use reduction::{BadLength, Reducer, Reduction};
 pub use timing::Timing;
 
 /// Something that stopped a kernel running.

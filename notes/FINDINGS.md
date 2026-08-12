@@ -1063,3 +1063,56 @@ file went from 249 lines to 230 with four more domains in it.
 **`f16` is not fuzzed and that is a decision.** A half is exact for integers only to 2048, and a
 sum over sixty-four lanes leaves that range at once — the argument the float domain rests on does
 not hold, and a tolerance would be checking something other than the emitter.
+
+
+## A probe that measured the wrong thing — 2026-08-12
+
+`Gpu::probe_pipeline` was written to time pipeline creation on its own, and it allocated two
+device-local buffers on every call because a descriptor set needs something to point at. So what it
+reported was **pipeline creation plus two allocations**, and allocation is the larger half:
+
+| | reported | actual |
+| --- | --- | --- |
+| a pipeline, per fold | 485.5 µs | 57.8 µs |
+| fourteen of them | 6796.8 µs | 809.6 µs |
+
+That wrong number reached `decisions/DR-0005`, `notes/NEXT.md`, this file and a commit message,
+where it read as "specializing saves 1.0%". The corrected figure is 9.7%.
+
+**What caught it was a second measurement that did not add up.** `runner/examples/reducer.rs` timed
+a whole fourteen-fold reduction — three buffer allocations, fourteen pipelines, the host copies,
+fifteen dispatches and a readback — at **3.1 ms**. Fourteen pipelines at 485 µs would have been
+6.8 ms on their own. A part cannot cost more than the whole that contains it.
+
+Two things worth keeping from that:
+
+- **A probe has to be told what it is excluding.** `probe_resident` isolates allocation and says so
+  in its name; `probe_pipeline` claimed to isolate pipelines and quietly included two of what
+  `probe_resident` measures. It takes a batch now and allocates once, so the per-pipeline number is
+  a per-pipeline number.
+- **The arithmetic between two measurements is a test.** Nothing in the suite could have caught
+  this — both numbers were produced by code that ran correctly. What caught it was one number being
+  larger than another number it is a part of, and noticing that requires writing both down.
+
+The conclusion did not move: a specialization constant removes the emission and not the pipeline,
+so it is worth single digits where holding the pipelines is worth 5×. Only the size of the claim
+was wrong, and it was wrong by a factor of eight.
+
+## Holding a reduction's pipelines is worth 5× — 2026-08-12
+
+`Gpu::sum` builds a pipeline per fold on every call and destroys them all. `Gpu::reducer(elements)`
+builds them once and keeps them, along with the three buffers they are bound to.
+
+| elements | folds | `Gpu::sum` | `Reducer::sum` | faster |
+| --- | --- | --- | --- | --- |
+| 8 192 | 8 | 967.0 µs | 191.7 µs | 5.0× |
+| 1 048 576 | 15 | 3069.6 µs | 1941.2 µs | 1.6× |
+
+The absolute saving is roughly constant — 775 µs and 1128 µs — which is what a *per-call* cost
+looks like, and it is why the ratio falls as the arithmetic grows. Both columns run identical
+dispatches over identical data.
+
+The ownership is the part that needed care rather than the caching. A pipeline holds a descriptor
+set and a descriptor set points at particular buffers, so pipelines and buffers have to be owned by
+the same object and released in that order. `Session` had already established the shape; this is
+the same trade for a chain of pipelines rather than one.

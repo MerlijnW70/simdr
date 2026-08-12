@@ -48,38 +48,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // 2. One pipeline per module, which is what the chain does now.
+    //
+    // Batched, so the two buffers a descriptor set needs are allocated once rather than per
+    // pipeline. An earlier version of this allocated a pair per call and reported 485 µs where
+    // the pipeline itself is nearer 180 — allocation was the larger half of its own measurement.
     let modules: Vec<Vec<u32>> = folds
         .iter()
         .map(|fold| kernels::fold_halves(width, fold.half).expect("built"))
         .collect();
-    // Warm, so the first compile of each does not land in the average.
-    for words in &modules {
-        gpu.probe_pipeline(words, &Specialization::none())?;
-    }
-    let per_module = repeat_result(&gpu, || {
-        for words in &modules {
-            gpu.probe_pipeline(words, &Specialization::none())?;
-        }
-        Ok(())
-    })?;
+    let none = Specialization::none();
+    let per_module_builds: Vec<(&[u32], &Specialization)> = modules
+        .iter()
+        .map(|words| (words.as_slice(), &none))
+        .collect();
 
-    // 3. One module, ten specializations. The same number of pipelines, one tenth of the modules.
+    // Warm, so the first compile of each does not land in the average.
+    gpu.probe_pipelines(&per_module_builds)?;
+    let per_module = repeat_result(|| gpu.probe_pipelines(&per_module_builds))?;
+
+    // 3. One module, fourteen specializations. The same number of pipelines, one module.
     let open = kernels::fold_halves_open(width)?;
-    for fold in &folds {
-        gpu.probe_pipeline(
-            &open,
-            &Specialization::none().set(FOLD_HALF_SPEC_ID, fold.half),
-        )?;
-    }
-    let specialized = repeat_result(&gpu, || {
-        for fold in &folds {
-            gpu.probe_pipeline(
-                &open,
-                &Specialization::none().set(FOLD_HALF_SPEC_ID, fold.half),
-            )?;
-        }
-        Ok(())
-    })?;
+    let specializations: Vec<Specialization> = folds
+        .iter()
+        .map(|fold| Specialization::none().set(FOLD_HALF_SPEC_ID, fold.half))
+        .collect();
+    let specialized_builds: Vec<(&[u32], &Specialization)> = specializations
+        .iter()
+        .map(|specialization| (open.as_slice(), specialization))
+        .collect();
+
+    gpu.probe_pipelines(&specialized_builds)?;
+    let specialized = repeat_result(|| gpu.probe_pipelines(&specialized_builds))?;
 
     println!("\n{:>34} {:>12} {:>12}", "", "all folds", "per fold");
     row("emitting the modules", emitting, folds.len());
@@ -90,19 +89,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         folds.len(),
     );
 
+    // The comparison that means something is between the two *strategies*, each paying for what it
+    // actually does: fourteen modules and fourteen pipelines, against one module and fourteen
+    // pipelines. Comparing the pipeline columns alone would leave out the thing specialization
+    // removes.
+    let one_emission = emitting / folds.len() as u32;
+    let today = emitting + per_module;
+    let deferred = one_emission + specialized;
+    let saved = today.as_secs_f64() - deferred.as_secs_f64();
+
+    println!("\n{:>34} {:>12}", "", "setup per call");
     println!(
-        "\nEmission is {:.1}% of what building the pipelines costs.",
+        "{:>34} {:>12}",
+        "fourteen modules, fourteen pipelines",
+        micros(today)
+    );
+    println!(
+        "{:>34} {:>12}",
+        "one module, fourteen pipelines",
+        micros(deferred)
+    );
+    println!(
+        "\nSpecializing removes {:.1}% of the setup — {}. Emission is {:.1}% of what building the\n\
+         pipelines costs, and a specialization constant is fixed *at* pipeline creation, so\n\
+         fourteen values still need fourteen pipelines however few modules they came from.",
+        saved / today.as_secs_f64() * 100.0,
+        micros(Duration::from_secs_f64(saved.abs())),
         emitting.as_secs_f64() / per_module.as_secs_f64() * 100.0
     );
-    let saved = per_module.as_secs_f64() - specialized.as_secs_f64();
     println!(
-        "Specializing changes the total by {:.1}% — {} across the whole chain.",
-        saved / per_module.as_secs_f64() * 100.0,
-        micros(Duration::from_secs_f64(saved.abs()))
-    );
-    println!(
-        "\nA specialization constant is fixed at pipeline creation, so ten values still need ten\n\
-         pipelines. What it removes is the emission, and the numbers above say how much that is."
+        "\nCompare `cargo run --release --example reducer -p runner`, which removes the setup\n\
+         entirely by keeping the pipelines. That is the larger number by a long way."
     );
 
     Ok(())
@@ -119,7 +136,6 @@ fn repeat(mut body: impl FnMut()) -> Duration {
 
 /// The same, for a body that can fail.
 fn repeat_result(
-    _gpu: &Gpu,
     mut body: impl FnMut() -> Result<(), runner::Error>,
 ) -> Result<Duration, runner::Error> {
     let started = Instant::now();

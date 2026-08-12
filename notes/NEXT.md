@@ -97,15 +97,19 @@ argument does not survive:
 
 | | all fourteen folds | per fold |
 | --- | --- | --- |
-| emitting the modules | 71.5 µs | 5.1 µs |
-| a pipeline each, from fourteen modules | 6796.8 µs | 485.5 µs |
-| a pipeline each, from one specialized module | 6726.0 µs | 480.4 µs |
+| emitting the modules | 74.2 µs | 5.3 µs |
+| a pipeline each, from fourteen modules | 809.6 µs | 57.8 µs |
+| a pipeline each, from one specialized module | 793.0 µs | 56.6 µs |
 
-**1.0%.** A specialization constant is fixed *at* pipeline creation, so fourteen values still need
-fourteen pipelines; all it removes is the emission, and emission is 1.1% of the total. One module
-per parameter value is cheap. One *pipeline* per parameter value is not.
+**9.7%** of the setup, comparing the two strategies whole: 85.6 µs of 883.9. A specialization
+constant is fixed *at* pipeline creation, so fourteen values still need fourteen pipelines; all it
+removes is thirteen module emissions. One module per parameter value is cheap. One *pipeline* per
+parameter value is not.
 
-What the measurement points at instead is item 1 below.
+> This table first said 485 µs per pipeline and 1.0%, and both were wrong — the probe allocated two
+> buffers per call and was reporting allocation as pipeline creation. See `notes/FINDINGS.md`.
+
+What the measurement points at instead is item 1 below, which is built and measured at **5.0×**.
 
 ### 7. A width that is neither 32 nor 64 — **done, at 8**
 
@@ -156,22 +160,26 @@ rests on does not hold, and a tolerance would be checking something other than t
 
 ---
 
-## 1. Hold the reduction chain's pipelines
+### 9. Hold the reduction chain's pipelines — **built, and measured at 5.0×**
 
-**What it costs today.** A pipeline costs **485 µs** and a dispatch costs **0.8 µs**, measured in
-`runner/examples/specialize.rs`. `Gpu::sum` builds one per fold on every call — fourteen for a
-buffer of 2²⁰ elements, 6.8 ms — and throws them all away. That is the same waste `Session` was
-built to remove for a single pipeline, and it is three orders of magnitude more than the
-specialization constant this replaces would have saved.
+`Gpu::reducer(elements)` builds every pipeline a reduction needs and keeps them, with the buffers
+they are bound to, in one object. `runner/examples/reducer.rs`, RTX 4080:
 
-**What it needs.** `Pass` borrows words and a workgroup count; it would have to carry a built
-pipeline instead, and something has to own those across calls the way `Session` does. The awkward
-part is that the fold count depends on the input length, so the cache is keyed by length rather
-than being one object.
+| elements | folds | `Gpu::sum` | `Reducer::sum` | faster |
+| --- | --- | --- | --- | --- |
+| 8 192 | 8 | 967.0 µs | 191.7 µs | **5.0×** |
+| 1 048 576 | 15 | 3069.6 µs | 1941.2 µs | 1.6× |
 
-**What to watch.** Pipelines hold descriptor sets pointing at particular buffers, so a cache that
-outlives a buffer is a use-after-free waiting to be written in safe-looking code. `Session` gets
-this right by owning both together; a chain cache has more moving parts.
+The saving is per *call*, not per element — about 800 µs to 1.1 ms either way — so it is most of a
+small reduction and a smaller share of a large one, which is what a setup cost looks like.
+
+It is built for a length, because how many folds a reduction needs depends on how many elements it
+is reducing. A different length needs a different `Reducer`, and that is in the type rather than
+behind a resize that would rebuild what the object exists to keep.
+
+**The thing to be careful about** was real: a pipeline holds a descriptor set, and a descriptor set
+points at particular buffers. Caching pipelines apart from their buffers would be a use-after-free
+in safe-looking code. One type owns both and drops the pipelines first.
 
 ## 2. Integer dot product — `OpSDot` and friends
 

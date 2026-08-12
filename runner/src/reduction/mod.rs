@@ -28,6 +28,13 @@
 //! It has them now. [`crate::kernels::workgroup_sum`] hands every invocation of the final
 //! workgroup the whole total, and the host reads one number it did not compute any part of.
 //!
+//! # Once, or repeatedly
+//!
+//! [`Gpu::sum`] builds every pipeline it needs and destroys them again, which is right for a
+//! caller that asks once and wrong for one that asks in a loop. [`Reducer`] is the same reduction
+//! with the pipelines and the buffers held between calls — 5.0× over 8 192 elements, measured in
+//! `runner/examples/reducer.rs`.
+//!
 //! # Why the answer is exact
 //!
 //! Floating-point addition is not associative, so a GPU reduction and a CPU one agree only if
@@ -35,6 +42,10 @@
 //! stays inside the 24 bits an `f32` carries, which makes an exact comparison legitimate rather
 //! than lucky. Feed it larger values and the right comparison is a tolerance; that is the caller's
 //! judgement and this module does not make it for them.
+
+mod held;
+
+pub use held::Reducer;
 
 use crate::kernels::{self, WORKGROUP_SIZE};
 use crate::{Error, Gpu, Pass};

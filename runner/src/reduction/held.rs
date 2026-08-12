@@ -1,0 +1,246 @@
+//! A reduction that keeps its pipelines and its buffers between calls.
+//!
+//! [`crate::Gpu::sum`] builds a pipeline per fold on every call and throws them all away. That is
+//! the right shape for a test and the wrong one for anything that reduces more than once:
+//! `runner/examples/reducer.rs` measures the same reduction at **967 µs** rebuilt and **192 µs**
+//! held, over 8 192 elements — 5.0×. Over 2²⁰ it is 1.6×, because by then the arithmetic is most
+//! of the time rather than the setup.
+//!
+//! This is the same trade [`crate::Session`] makes for one pipeline, applied to a chain of them.
+//!
+//! # Why it is built for a length
+//!
+//! How many folds a reduction needs depends on how many elements it is reducing, so the pipelines
+//! and the buffers are both sized when the [`Reducer`] is made. A different length needs a
+//! different one. That is a real limit and it is stated in the type rather than hidden behind a
+//! resize that would quietly rebuild everything the object exists to keep.
+//!
+//! # What owns what, and why together
+//!
+//! A pipeline holds a descriptor set, and a descriptor set points at particular buffers. Caching
+//! pipelines apart from the buffers they were built against would be a use-after-free written in
+//! safe-looking code — the buffers would drop, the descriptors would still name them, and the next
+//! dispatch would read freed memory. So one type owns both, and its `Drop` releases them in order.
+
+use super::{BadLength, Fold, Reduction, folds};
+use crate::buffer::Buffer;
+use crate::dispatch::Pipeline;
+use crate::kernels::{self, WORKGROUP_SIZE};
+use crate::{Error, Gpu};
+use simdr::lanes::F32;
+
+/// A reduction over a fixed number of elements, with its pipelines already built.
+pub struct Reducer<'gpu> {
+    gpu: &'gpu Gpu,
+    /// How many elements this was built for. A different count needs a different `Reducer`.
+    elements: usize,
+    /// The host's way in and out.
+    ///
+    /// `Option` because [`Buffer::destroy`] consumes the buffer and `Drop` has only `&mut self`.
+    /// `Some` for the whole life of the reducer and `None` only while dropping.
+    staging: Option<Buffer>,
+    source: Option<Buffer>,
+    destination: Option<Buffer>,
+    /// One per pass, in order: the folds, then the workgroup reduction that finishes.
+    pipelines: Vec<Pipeline>,
+    /// How many workgroups each pass dispatches, in the same order.
+    ///
+    /// Kept beside the pipelines rather than recomputed, because `folds` is arithmetic on the
+    /// element count and recomputing it in two places is how the two come to disagree.
+    workgroups: Vec<u32>,
+}
+
+impl Gpu {
+    /// Build every pipeline a reduction over `elements` needs, and hold them.
+    ///
+    /// `elements` must be a power of two and at least `2 × WORKGROUP_SIZE`, exactly as
+    /// [`Gpu::sum`] requires — a reducer that accepted a length it could not then reduce would
+    /// move the failure from here to the first call.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::BadLength`] if `elements` is not a shape this can fold, [`Error::Emit`] if a pass
+    /// cannot be built, otherwise as [`Gpu::run`].
+    pub fn reducer<'gpu>(&'gpu self, elements: usize) -> Result<Reducer<'gpu>, Error> {
+        let width = self.limits().subgroup_size;
+        let minimum = 2 * WORKGROUP_SIZE as usize;
+
+        if !elements.is_power_of_two() {
+            return Err(Error::BadLength(BadLength::NotAPowerOfTwo(elements)));
+        }
+        if elements < minimum {
+            return Err(Error::BadLength(BadLength::TooSmall {
+                length: elements,
+                minimum,
+            }));
+        }
+
+        // Every module first, so a build failure happens before anything is allocated.
+        let steps: Vec<Fold> = folds(elements);
+        let mut modules: Vec<(Vec<u32>, u32)> = Vec::with_capacity(steps.len() + 1);
+        for step in &steps {
+            let words = kernels::fold_halves(width, step.half).map_err(Error::Emit)?;
+            modules.push((words, step.workgroups));
+        }
+        modules.push((
+            kernels::workgroup_sum::<F32>(width).map_err(Error::Emit)?,
+            1,
+        ));
+
+        let bytes = (elements.max(1) * size_of::<u32>()) as u64;
+
+        // SAFETY: everything allocated here is owned by the `Reducer` and destroyed in its `Drop`,
+        // which cannot run while a dispatch is in flight — every dispatch waits on a fence before
+        // returning. The early returns below release what was allocated before them.
+        unsafe {
+            let staging = Buffer::staging(self, bytes)?;
+            let source = match Buffer::device_local(self, bytes) {
+                Ok(buffer) => buffer,
+                Err(error) => {
+                    staging.destroy(self);
+                    return Err(error);
+                }
+            };
+            let destination = match Buffer::device_local(self, bytes) {
+                Ok(buffer) => buffer,
+                Err(error) => {
+                    source.destroy(self);
+                    staging.destroy(self);
+                    return Err(error);
+                }
+            };
+
+            let mut pipelines = Vec::with_capacity(modules.len());
+            let mut workgroups = Vec::with_capacity(modules.len());
+            for (words, groups) in &modules {
+                match Pipeline::new(
+                    self,
+                    words,
+                    &[(&source, bytes), (&destination, bytes)],
+                    &crate::Specialization::none(),
+                ) {
+                    Ok(pipeline) => {
+                        pipelines.push(pipeline);
+                        workgroups.push(*groups);
+                    }
+                    Err(error) => {
+                        for pipeline in pipelines {
+                            pipeline.destroy(self);
+                        }
+                        destination.destroy(self);
+                        source.destroy(self);
+                        staging.destroy(self);
+                        return Err(error);
+                    }
+                }
+            }
+
+            Ok(Reducer {
+                gpu: self,
+                elements,
+                staging: Some(staging),
+                source: Some(source),
+                destination: Some(destination),
+                pipelines,
+                workgroups,
+            })
+        }
+    }
+}
+
+impl Reducer<'_> {
+    /// How many elements this was built for.
+    #[must_use]
+    pub const fn elements(&self) -> usize {
+        self.elements
+    }
+
+    /// How many dispatches one call runs.
+    #[must_use]
+    pub fn dispatches(&self) -> usize {
+        self.pipelines.len()
+    }
+
+    /// Sum every element of `input`, reusing the pipelines and the buffers.
+    ///
+    /// `input.len()` must equal [`Reducer::elements`]. A shorter slice would leave the tail of the
+    /// buffer holding whatever the last call put there, and the answer would be that call's data
+    /// added to this one's — which is a wrong number rather than an error, so it is refused.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::TooLarge`] if `input` is not the length this was built for, otherwise as
+    /// [`Gpu::run`].
+    pub fn sum(&mut self, input: &[f32]) -> Result<Reduction, Error> {
+        if input.len() != self.elements {
+            return Err(Error::TooLarge {
+                words: input.len(),
+                capacity: self.elements,
+            });
+        }
+
+        let (Some(staging), Some(source), Some(destination)) = (
+            self.staging.as_ref(),
+            self.source.as_ref(),
+            self.destination.as_ref(),
+        ) else {
+            return Err(Error::NoPipeline);
+        };
+
+        let words: Vec<u32> = input.iter().map(|value| value.to_bits()).collect();
+        let bytes = (self.elements.max(1) * size_of::<u32>()) as u64;
+
+        // SAFETY: every buffer and pipeline here is owned by `self` and outlives the call, and the
+        // submission waits on a fence before returning.
+        let output = unsafe {
+            staging.write(self.gpu, &words)?;
+            self.gpu.copy(staging, source, bytes)?;
+
+            self.gpu.replay(
+                &self.pipelines,
+                &self.workgroups,
+                source,
+                destination,
+                bytes,
+            )?;
+
+            self.gpu.copy(destination, staging, bytes)?;
+            staging.read(self.gpu, self.elements)?
+        };
+
+        let total = output
+            .first()
+            .copied()
+            .map(f32::from_bits)
+            .ok_or(Error::NoPipeline)?;
+
+        Ok(Reduction {
+            total,
+            dispatches: self.pipelines.len(),
+            host_combined: 1,
+        })
+    }
+}
+
+impl Drop for Reducer<'_> {
+    fn drop(&mut self) {
+        // SAFETY: every object here was created by `Gpu::reducer` and nothing else holds it. The
+        // device is idle with respect to them: `sum` waits on a fence before returning, so nothing
+        // can still be in flight. Pipelines go first — a descriptor set naming a destroyed buffer
+        // would be a dangling reference for as long as it existed.
+        unsafe {
+            for pipeline in std::mem::take(&mut self.pipelines) {
+                pipeline.destroy(self.gpu);
+            }
+            if let Some(buffer) = self.destination.take() {
+                buffer.destroy(self.gpu);
+            }
+            if let Some(buffer) = self.source.take() {
+                buffer.destroy(self.gpu);
+            }
+            if let Some(staging) = self.staging.take() {
+                staging.destroy(self.gpu);
+            }
+        }
+    }
+}

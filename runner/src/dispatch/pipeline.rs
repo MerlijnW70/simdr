@@ -9,7 +9,7 @@ use crate::{Error, Gpu};
 use ash::vk;
 
 /// A compute pipeline, its layout, and a descriptor set bound to two storage buffers.
-pub(super) struct Pipeline {
+pub(crate) struct Pipeline {
     handle: vk::Pipeline,
     layout: vk::PipelineLayout,
     set_layout: vk::DescriptorSetLayout,
@@ -27,7 +27,7 @@ impl Pipeline {
     /// `bound` is one entry per binding, in binding order: the buffer and how much of it the
     /// shader may see. Two is the common case and the shape every kernel in `kernels/` emits, but
     /// the emitter's `Shape` has always taken a count and there is no reason this could not.
-    pub(super) unsafe fn new(
+    pub(crate) unsafe fn new(
         gpu: &Gpu,
         spirv: &[u32],
         bound: &[(&Buffer, u64)],
@@ -118,17 +118,17 @@ impl Pipeline {
     }
 
     /// The pipeline to bind.
-    pub(super) const fn handle(&self) -> vk::Pipeline {
+    pub(crate) const fn handle(&self) -> vk::Pipeline {
         self.handle
     }
 
     /// Its layout, which binding descriptors needs.
-    pub(super) const fn layout(&self) -> vk::PipelineLayout {
+    pub(crate) const fn layout(&self) -> vk::PipelineLayout {
         self.layout
     }
 
     /// The descriptor set pointing at the buffers.
-    pub(super) const fn descriptors(&self) -> vk::DescriptorSet {
+    pub(crate) const fn descriptors(&self) -> vk::DescriptorSet {
         self.descriptors
     }
 
@@ -137,7 +137,7 @@ impl Pipeline {
     /// # Safety
     ///
     /// No submission using this may still be in flight.
-    pub(super) unsafe fn destroy(self, gpu: &Gpu) {
+    pub(crate) unsafe fn destroy(self, gpu: &Gpu) {
         let device = gpu.device();
         unsafe {
             device.destroy_pipeline(self.handle, None);
@@ -150,48 +150,49 @@ impl Pipeline {
 }
 
 impl Gpu {
-    /// Build a pipeline for `spirv` and destroy it, so a caller can time what that costs.
+    /// Build a pipeline for each entry of `builds` and destroy them, so a caller can time it.
     ///
     /// The same shape as [`Gpu::probe_resident`], and it exists for the same reason: a claim about
     /// where the setup cost goes needs the parts measured apart. `notes/NEXT.md` argued for
     /// specialization constants on the grounds that "one module per parameter value" is expensive
-    /// in *pipeline creation* — and pipeline creation had never been timed on its own.
+    /// in *pipeline creation*, and pipeline creation had never been timed on its own.
     ///
-    /// The two buffers are allocated here and freed here, so what is timed is
-    /// `vkCreateShaderModule`, the descriptor plumbing and `vkCreateComputePipeline`, plus two
-    /// small allocations that are the same in every call.
+    /// **A batch rather than one at a time, and that is the whole point.** The two buffers a
+    /// descriptor set needs are allocated once here and reused for every pipeline. The first
+    /// version of this took a single module and allocated a pair per call — so the number it
+    /// produced was pipeline creation *plus two allocations*, and allocation is the larger half.
+    /// It reported 485 µs where the pipeline itself is nearer 180, and that wrong number reached
+    /// three documents before `runner/examples/reducer.rs` measured a whole reduction and did not
+    /// add up.
     ///
     /// # Errors
     ///
     /// [`Error::Vulkan`] if any call fails, [`Error::NoPipeline`] if the driver returns none.
-    pub fn probe_pipeline(
-        &self,
-        spirv: &[u32],
-        specialization: &Specialization,
-    ) -> Result<(), Error> {
+    pub fn probe_pipelines(&self, builds: &[(&[u32], &Specialization)]) -> Result<(), Error> {
         let bytes = 256;
 
-        // SAFETY: both buffers and the pipeline are created here and destroyed before returning,
+        // SAFETY: both buffers and every pipeline are created here and destroyed before returning,
         // nothing is submitted, and nothing else ever sees them.
         unsafe {
             let source = Buffer::device_local(self, bytes)?;
             let destination = Buffer::device_local(self, bytes)?;
+            let bound = [(&source, bytes), (&destination, bytes)];
 
-            let built = Pipeline::new(
-                self,
-                spirv,
-                &[(&source, bytes), (&destination, bytes)],
-                specialization,
-            );
-
-            let outcome = match built {
-                Ok(pipeline) => {
-                    pipeline.destroy(self);
-                    Ok(())
+            let mut built = Vec::with_capacity(builds.len());
+            let mut outcome = Ok(());
+            for (spirv, specialization) in builds {
+                match Pipeline::new(self, spirv, &bound, specialization) {
+                    Ok(pipeline) => built.push(pipeline),
+                    Err(error) => {
+                        outcome = Err(error);
+                        break;
+                    }
                 }
-                Err(error) => Err(error),
-            };
+            }
 
+            for pipeline in built {
+                pipeline.destroy(self);
+            }
             source.destroy(self);
             destination.destroy(self);
             outcome

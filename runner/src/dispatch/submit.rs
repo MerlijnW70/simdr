@@ -16,7 +16,7 @@ impl Gpu {
     /// # Safety
     ///
     /// Both buffers must be live and nothing may be using them.
-    pub(super) unsafe fn copy(&self, from: &Buffer, to: &Buffer, bytes: u64) -> Result<(), Error> {
+    pub(crate) unsafe fn copy(&self, from: &Buffer, to: &Buffer, bytes: u64) -> Result<(), Error> {
         unsafe {
             self.record_and_wait(|device, command| {
                 let region = [vk::BufferCopy::default().size(bytes)];

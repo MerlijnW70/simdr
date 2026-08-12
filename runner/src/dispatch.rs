@@ -21,11 +21,12 @@ pub use placement::{MemoryType, Placement};
 pub use session::Session;
 pub use specialization::Specialization;
 
+pub(crate) use pipeline::Pipeline;
+
 use crate::buffer::Buffer;
 use crate::timing::Timing;
 use crate::{Error, Gpu};
 use ash::vk;
-use pipeline::Pipeline;
 use std::time::Duration;
 
 impl Gpu {

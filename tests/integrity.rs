@@ -35,7 +35,7 @@ fn root() -> PathBuf {
 /// The list is here rather than only in `noha.yaml` so that adding an FFI file is a decision
 /// somebody writes down. A new file in `runner/src` that is neither mutated nor listed here fails
 /// the test below.
-const NOT_MUTATED: [(&str, &str); 12] = [
+const NOT_MUTATED: [(&str, &str); 13] = [
     ("runner/src/buffer.rs", "allocates and maps device memory"),
     ("runner/src/device.rs", "opens the instance and the device"),
     (
@@ -63,6 +63,10 @@ const NOT_MUTATED: [(&str, &str); 12] = [
     (
         "runner/src/dispatch/session.rs",
         "owns buffers and a pipeline across calls",
+    ),
+    (
+        "runner/src/reduction/held.rs",
+        "owns buffers and a chain of pipelines across calls",
     ),
     (
         "runner/src/dispatch/submit.rs",
