@@ -140,6 +140,11 @@ fused form. `runner/tests/extended.rs` observes which of the two it gets rather 
 Still unrun: 4 and 16. `whole_subgroup!` can build for them and no implementation here reports
 them.
 
+> Both run now — see item 16. "No implementation here reports them" was true of the *default*
+> lavapipe build and of nothing else: its subgroup width is llvmpipe's vector width over 32, and
+> that is an environment variable. The claim was about a setting, and read as a claim about the
+> hardware.
+
 ### 8. Narrow types in the fuzzer — **done for the four integers**
 
 `Domain` has `Byte`, `UnsignedByte`, `Short` and `UnsignedShort` now, and `fuzz::check` packs the
@@ -309,6 +314,30 @@ reason.
 **Worth carrying:** the breakdown that found this was built two items earlier, to test a guess about
 the copies. It answered, and then three more measurements were taken before anyone acted on its
 largest row. *Act on a breakdown's biggest row before its most interesting one.*
+
+### 16. Widths 4 and 16 — **run, and they found undefined behaviour that was already running**
+
+`notes/NEXT.md` and `README.md` both listed these as unreachable. They are not: llvmpipe's subgroup
+width is its vector width over 32, so `LP_NATIVE_VECTOR_WIDTH` of 128 and 512 give **4** and **16**,
+with `min` equal to `max` at each so the width is pinned.
+
+Five defects, none in the emitter — the same score as 64 and as 8. The one that matters:
+`kernels::scale`, the control kernel, said `load::<32>`, which is one element per invocation at 32
+and 64 lanes and **eight strips** at four. It had been reading and writing past its buffer at width
+8 for a day, returning zeros, in the green column — until four lanes turned it into an access
+violation. Three more kernels carried the same literal, one of them the twin of a kernel that had
+already been fixed.
+
+The rest were the family the other widths keep finding: a NaN placed at a literal index that is in
+the *second* subgroup at four lanes; a "has no mapping" assertion about 12 lanes, which is a
+multiple of 4; a full-width case that skipped every width but 32 and 64. And the patch for those
+introduced the same bug twice more, because at four lanes a four-lane cluster *is* the subgroup —
+so the lane-count test now works from a list of distinct sizes and asserts it has at least two.
+
+**Still open there:** at 128 and 512 bits lavapipe is unstable under `cargo test`'s parallelism —
+~40% of runs disagree at some seed, never twice the same, all reproducing green single-threaded and
+in one process. Ruled out on our side: no shared state, a device per test, and the 256-bit build
+green 8 of 8 under the same parallelism. Documented as a flag rather than chased.
 
 ## 1. The upload is what is left, and it needs a shape rather than an optimisation
 

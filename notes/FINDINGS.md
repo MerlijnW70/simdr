@@ -1569,3 +1569,76 @@ the same row and was four lines of code.
 The upload, at ~294 µs of a 1275 µs call, and it is real: a caller passing `&[f32]` has to have it
 copied to the device. What removes it is not an optimisation but a shape — a reduction that reads a
 buffer already on the device — and that is what `notes/NEXT.md` now heads with.
+
+## Widths 4 and 16, and the undefined behaviour that had been running since the start — 2026-08-12
+
+`README.md` said "Nothing has run at 4 or 16" and treated it as a hardware limit. It is not one.
+Neither GPU here offers a range — the RTX 4080 reports `minSubgroupSize` 32 and `max` 32, the
+Radeon 32 and 64 — but **llvmpipe's subgroup width follows its vector width**, and that is an
+environment variable:
+
+| `LP_NATIVE_VECTOR_WIDTH` | subgroup |
+| --- | --- |
+| 128 | **4** |
+| 256 | 8 (the default, and what this project had been using) |
+| 512 | **16** |
+
+`minSubgroupSize` equals `maxSubgroupSize` at each setting, so the width is pinned rather than a
+default the driver may vary.
+
+The suite now runs at **4, 8, 16, 32 and 64** — every power of two a Vulkan implementation is known
+to report. It found five defects and, as at 64 and at 8, **not one of them was in the emitter**.
+
+### The serious one: a kernel that had been reading past its buffer for months
+
+`kernels::scale` — *the control kernel*, the one whose doc comment says "run it first" — said
+`load::<32>`. Thirty-two lanes is one element per invocation on a 32- or 64-wide subgroup and
+**eight strips** on a four-wide one, so on a narrow device it read and wrote eight times the buffer
+every caller hands it.
+
+At four lanes that is an access violation and the test binary dies with `STATUS_ACCESS_VIOLATION`.
+At **eight** lanes it is four strips, which is the same undefined behaviour returning zeros — and
+lavapipe at width 8 has been in this project's green column for a full day. The first strip is in
+range, every assertion only looks at the first strip, and nothing complains.
+
+Three more kernels had the same literal: `lane_affine::<32>` as every caller spelled it,
+`fold_halves_open`, and `specialized_cluster`. `fold_halves_open` is the specialization twin of
+`fold_halves`, which had *already* been converted to `whole_subgroup!` — a pair that must agree,
+where only one half had been fixed.
+
+**The shape:** `load::<32>` reads as "a vector" and means "one element per invocation" only at two
+of the five widths. Every one of these is now `whole_subgroup!`, which takes the count from the
+device.
+
+### And three more of the family the other widths already found
+
+- **`floats.rs` put its NaN at index 5** and asserted about "the first subgroup". Five is in the
+  *second* subgroup of a four-wide device. One test failed; a sibling with the value at index 7
+  went on passing while measuring nothing, because it *reports* rather than asserts.
+- **`lane_sum::<F32, 12>` was asserted to have no mapping.** Twelve is a multiple of four, so on a
+  four-wide subgroup it is a perfectly good three-strip vector. It is six now, which divides no
+  power of two and is divided by none of them, so it has no mapping at any width.
+- **The full-width case was a `match` on 32 and 64** that skipped every other width with a message
+  — so a narrow device ran neither it nor the discriminator that followed it.
+
+The lane-count test was then rewritten around a *list* of the cluster sizes a given width can hold,
+because the patch for the above introduced the same bug twice more: at four lanes `lane_sum::<_, 4>`
+is the whole subgroup and at eight `lane_sum::<_, 8>` is, so "these two must differ" asserted that a
+module differs from itself. Collecting distinct sizes makes that unrepresentable, and the test now
+asserts it has at least two to compare — so it cannot quietly end up with nothing.
+
+### A caveat on how to run it
+
+At **128 and 512** bits, lavapipe is unstable under `cargo test`'s default parallelism: independent
+devices in separate threads, and roughly 40% of runs report a disagreement at some seed, always at
+the first index, never the same seed twice. The same programs re-run identically in a single
+process — 3 584 checks in a row without one — and `--test-threads=1` is green every time.
+
+What that is *not*: our code has no shared state between `Gpu`s, each test opens its own instance
+and device, and the default 256-bit build is green 8 runs out of 8 under the same parallelism. What
+it is has not been chased further than that, because the fix is a flag:
+
+```powershell
+$env:LP_NATIVE_VECTOR_WIDTH = "128"     # or 512
+cargo test -p runner -- --test-threads=1
+```

@@ -44,7 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let scaled = gpu.run(&kernels::scale(width, 2.0)?, &input, 1)?;
     println!("  scale x2      {:?}", &scaled[..8]);
 
-    let affine = gpu.run(&kernels::lane_affine::<32>(width)?, &input, 1)?;
+    let affine = gpu.run(&kernels::lane_affine_whole(width)?, &input, 1)?;
     println!("  x*2 + 1       {:?}", &affine[..8]);
 
     let largest = gpu.run(&kernels::lane_max::<F32, 8>(width)?, &input, 1)?;

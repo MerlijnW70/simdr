@@ -91,7 +91,22 @@ fn a_workgroup_reduction_is_exact_over_integers() {
     assert_eq!(output, vec![whole; count]);
 }
 
-/// One source, three lane counts, three different answers — each what the mapping predicts.
+/// One source, every cluster size this subgroup can hold, a different answer for each.
+///
+/// # Why the sizes are a list rather than three calls
+///
+/// This test was three calls at 4, 8 and 32 lanes, ending in `assert_ne!` between each pair. Both
+/// halves of that broke on a narrow device, in opposite directions:
+///
+/// - At **four** lanes, `lane_sum::<F32, 8>` is not a cluster at all — eight is a *multiple* of
+///   four, so it strip-mines, reads twice the buffer it was given, and sums whatever was past the
+///   end.
+/// - At **four and eight** lanes, one of the sizes *is* the whole subgroup, so the discriminator
+///   asserted that a module differs from itself.
+///
+/// Collecting the sizes that this width can actually hold fixes both by construction: every entry
+/// is a real cluster, no two entries are the same size, and the count is asserted so the test
+/// cannot quietly end up with nothing to compare.
 #[test]
 fn the_lane_api_reduces_over_exactly_the_lanes_its_width_names() {
     let Some(gpu) = device("lane-sum") else {
@@ -108,41 +123,46 @@ fn the_lane_api_reduces_over_exactly_the_lanes_its_width_names() {
     let count = WORKGROUP_SIZE as usize;
     let input = ramp(count);
 
-    let four = gpu
-        .run(
-            &kernels::lane_sum::<F32, 4>(width).expect("built"),
-            &input,
-            1,
-        )
-        .expect("dispatched");
-    assert_eq!(four, grouped_sums(count, 4));
-
-    let eight = gpu
-        .run(
-            &kernels::lane_sum::<F32, 8>(width).expect("built"),
-            &input,
-            1,
-        )
-        .expect("dispatched");
-    assert_eq!(eight, grouped_sums(count, 8));
-
-    let full = match width {
-        32 => gpu
-            .run(&kernels::lane_sum::<F32, 32>(32).expect("built"), &input, 1)
-            .expect("dispatched"),
-        64 => gpu
-            .run(&kernels::lane_sum::<F32, 64>(64).expect("built"), &input, 1)
-            .expect("dispatched"),
-        other => {
-            eprintln!("SKIPPED lane-sum: no full-width case written for a subgroup of {other}");
-            return;
+    let mut runs: Vec<(u32, Vec<f32>)> = Vec::new();
+    for size in [2_u32, 4, 8, width] {
+        if size > width || runs.iter().any(|(had, _)| *had == size) {
+            continue;
         }
-    };
-    assert_eq!(full, grouped_sums(count, width as usize));
 
-    // The three must genuinely differ, or the lane counts were being ignored.
-    assert_ne!(four.first(), eight.first());
-    assert_ne!(eight.first(), full.first());
+        // `LANES` is a const generic, so the sizes have to be written out. The last arm covers
+        // every width the macro in `kernels` knows, which is where the list belongs.
+        let spirv = match size {
+            2 => kernels::lane_sum::<F32, 2>(width),
+            4 => kernels::lane_sum::<F32, 4>(width),
+            8 => kernels::lane_sum::<F32, 8>(width),
+            _ => kernels::lane_sum_whole::<F32>(width),
+        }
+        .expect("built");
+
+        let output = gpu.run(&spirv, &input, 1).expect("dispatched");
+        assert_eq!(
+            output,
+            grouped_sums(count, size as usize),
+            "clusters of {size} on a subgroup of {width}"
+        );
+        runs.push((size, output));
+    }
+
+    assert!(
+        runs.len() >= 2,
+        "only one cluster size was reachable at width {width}, so nothing below discriminates"
+    );
+
+    // Distinct sizes must give distinct answers, or the lane count was being ignored.
+    for (index, (size, output)) in runs.iter().enumerate() {
+        for (other, theirs) in runs.iter().skip(index + 1) {
+            assert_ne!(
+                output.first(),
+                theirs.first(),
+                "clusters of {size} and of {other} gave the same total"
+            );
+        }
+    }
 }
 
 /// A vector wider than the subgroup: each lane holds several elements, folded before the reduce.
@@ -300,18 +320,33 @@ fn a_maximum_reduction_finds_the_largest_element_in_each_group() {
     let count = WORKGROUP_SIZE as usize;
     let input = ramp(count);
 
-    let output = gpu
+    // Four, which is a divisor of every subgroup width a Vulkan implementation is known to report
+    // — so it is a cluster everywhere and this row runs on every device.
+    let four = gpu
         .run(
-            &kernels::lane_max::<F32, 8>(width).expect("built"),
+            &kernels::lane_max::<F32, 4>(width).expect("built"),
             &input,
             1,
         )
         .expect("dispatched");
+    let expected: Vec<f32> = (0..count).map(|lane| (lane / 4 * 4 + 3) as f32).collect();
+    assert_eq!(four, expected, "clusters of four");
 
-    // A ramp's largest element in each group of eight is the last one.
-    let expected: Vec<f32> = (0..count).map(|lane| (lane / 8 * 8 + 7) as f32).collect();
+    // Eight is a cluster only from eight lanes up; below that the same call strip-mines and reads
+    // a buffer twice this size. See `the_lane_api_reduces_over_exactly_the_lanes_its_width_names`.
+    if width >= 8 {
+        let eight = gpu
+            .run(
+                &kernels::lane_max::<F32, 8>(width).expect("built"),
+                &input,
+                1,
+            )
+            .expect("dispatched");
 
-    assert_eq!(output, expected);
+        // A ramp's largest element in each group of eight is the last one.
+        let expected: Vec<f32> = (0..count).map(|lane| (lane / 8 * 8 + 7) as f32).collect();
+        assert_eq!(eight, expected, "clusters of eight");
+    }
 }
 
 /// Elementwise work only, which should never reach a subgroup instruction.
@@ -325,7 +360,7 @@ fn an_elementwise_kernel_computes_per_element_and_crosses_no_lane() {
 
     let output = gpu
         .run(
-            &kernels::lane_affine::<32>(width).expect("built"),
+            &kernels::lane_affine_whole(width).expect("built"),
             &input,
             1,
         )
@@ -343,9 +378,14 @@ fn the_lane_api_refuses_the_lane_counts_that_have_no_mapping() {
     };
     let width = gpu.limits().subgroup_size;
 
+    // **Six**, and it has to be six rather than twelve. A count with no mapping must neither
+    // divide the width nor be a multiple of it, and twelve is a multiple of *four* — so on a
+    // four-wide subgroup the call this asserts must fail was a perfectly good three-strip vector.
+    // Six is coprime enough with every power of two: it divides none of them and none of them
+    // divides it, so it has no mapping at any width this can run on.
     assert!(
-        kernels::lane_sum::<F32, 12>(width).is_err(),
-        "12 lanes neither divide a subgroup of {width} nor are a multiple of it"
+        kernels::lane_sum::<F32, 6>(width).is_err(),
+        "6 lanes neither divide a subgroup of {width} nor are a multiple of it"
     );
     // `MAX_STRIPS` is 8, so the count that overruns it depends on the width: 512 lanes is eight
     // strips on a 64-wide subgroup and sixty-four on an 8-wide one. Stated as the relationship

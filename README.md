@@ -138,7 +138,7 @@ did not.
 | **Unit tests** | 320 in the emitter, decoding what was emitted; 587 across the workspace | Everything cheap |
 | **`spirv-val`** | Khronos' validator, at `--target-env vulkan1.1` | `OpLoopMerge` in the wrong position — a unit test asserted "merge before branch" and passed while the comparison sat between them |
 | **Execution** | Real dispatches on a real GPU, against CPU references | A missing staging write: every computing kernel returned garbage and the empty-kernel test still passed |
-| **Other devices** | The same suite at 64 lanes and at 8, as well as at 32 | Ten tests that had conflated "32 lanes" with "the subgroup", four of which could not build at all because a vote has no clustered form. Then, at 8: a fuzzer generating shuffles that leave the subgroup, and three tests assuming uninitialised device memory is zero |
+| **Other widths** | The same suite at **4, 8, 16, 32 and 64** lanes, across three devices | Ten tests that had conflated "32 lanes" with "the subgroup", four of which could not build at all because a vote has no clustered form. Then, at 8: a fuzzer generating shuffles that leave the subgroup, and three tests assuming uninitialised device memory is zero. Then, at 4: `kernels::scale` — *the control kernel* — reading and writing eight times its buffer, which had been undefined behaviour returning zeros at width 8 for a day before it became an access violation at 4 |
 | **Differential fuzzing** | Generated programs across seven element types, each interpreted on the CPU and compared exactly | `reduce_min` folding strips with a *maximum* — right for every mapping but the strip-mined one, so hand tests never saw it |
 | **Mutation coverage** | `noha prober` over the emitter and the runner's pure half | Eight real gaps in one night, five of them in the *fuzzer* — including a generated program that dispatched nothing and therefore agreed with everything. Later, fifteen more in the half-float rounding path, which an *exhaustive* round-trip test could not reach because it only ever fed `from_f32` values that came from a half — and those never round |
 
@@ -298,12 +298,26 @@ cargo test --workspace          # the whole suite, now on a 64-wide subgroup
 ```
 
 And against a CPU implementation, which needs no GPU at all. Mesa's lavapipe reports a subgroup
-width of 8:
+width of 8 by default:
 
 ```powershell
 $env:VK_ICD_FILENAMES = "H:\tools\mesa\msvc\lvp_icd.x86_64.json"
 cargo test --workspace
 ```
+
+**And at 4 and 16**, which no hardware here offers — llvmpipe's subgroup width is its vector width
+divided by 32, and that is an environment variable. `minSubgroupSize` equals `maxSubgroupSize` at
+each setting, so the width is pinned rather than a default the driver may vary:
+
+```powershell
+$env:LP_NATIVE_VECTOR_WIDTH = "128"      # subgroup 4;  512 gives 16
+cargo test -p runner -- --test-threads=1
+```
+
+`--test-threads=1` is not optional at 128 or 512: lavapipe is unstable there under concurrent
+devices, and about 40% of parallel runs report a disagreement that does not reproduce. The default
+256-bit build has no such problem. `notes/FINDINGS.md` has the evidence, including what rules our
+own code out.
 
 The build is [pal1000/mesa-dist-win](https://github.com/pal1000/mesa-dist-win) — take the **msvc**
 release and copy `vulkan_lvp.dll` and `lvp_icd.x86_64.json` out of `x64`. The mingw build's DLL
@@ -437,9 +451,9 @@ hand-done addressing is exactly what ten tests got wrong the first time a second
   `Kernel` and `Lanes`, in Rust, and get SPIR-V words out. If you want to compile arbitrary Rust to
   the GPU, that is [rust-gpu](https://github.com/Rust-GPU/rust-gpu) and it is a much larger thing.
 - **Not portable across subgroup widths.** A module is built for one width, deliberately and
-  visibly. That is what the hardware is. Three widths have been run: 32 on an RTX 4080, 64 on an
-  integrated Radeon in the same machine, and 8 on lavapipe, which runs on the CPU. The execution
-  suite and the fuzzer pass on all three. Nothing has run at 4 or 16.
+  visibly. That is what the hardware is. **Five widths have been run** — 32 on an RTX 4080, 64 on an
+  integrated Radeon in the same machine, and 4, 8 and 16 on lavapipe, whose subgroup follows
+  llvmpipe's vector width. The execution suite and the fuzzer pass at every one of them.
 - **Not fast, as a claim.** Some measurements exist and are in `notes/FINDINGS.md` with their
   spreads. There is **no performance claim about large working sets**: a cliff shows up past about
   50 MB and *three* explanations have now been tested and refuted — L2 capacity, eviction of a

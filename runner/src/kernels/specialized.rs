@@ -9,7 +9,7 @@
 //! instructions, and by the time a specialization constant has a value the instructions are long
 //! since chosen.
 
-use super::shape;
+use super::{shape, whole_subgroup};
 use simdr::kernel::Kernel;
 use simdr::lanes::{Element, LaneError, U32};
 use simdr::module::{Reduction, op};
@@ -99,10 +99,23 @@ pub fn specialized_affine<const LANES: u32>(
 ///
 /// # Errors
 ///
+/// The *load* is one element per invocation at whatever the width is. It was a literal 32, which
+/// strip-mines on anything narrower and reads past the end of the buffer — see
+/// [`super::scale`]. The clustered reduction below it is the part under test, and it is unchanged.
+///
+/// # Errors
+///
 /// As [`specialized_add`].
 pub fn specialized_cluster(subgroup: u32, default: u32) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup!(subgroup, specialized_cluster_at, default)
+}
+
+fn specialized_cluster_at<const LANES: u32>(
+    subgroup: u32,
+    default: u32,
+) -> Result<Vec<u32>, LaneError> {
     let mut kernel = Kernel::<U32>::new(shape(subgroup))?;
-    let value = kernel.load::<32>(0)?;
+    let value = kernel.load::<LANES>(0)?;
     let element = kernel.element();
 
     let total = {
@@ -121,7 +134,7 @@ pub fn specialized_cluster(subgroup: u32, default: u32) -> Result<Vec<u32>, Lane
         )?
     };
 
-    let total = kernel.lanes()?.splat_id::<U32, 32>(total)?;
+    let total = kernel.lanes()?.splat_id::<U32, LANES>(total)?;
     kernel.store(1, total)?;
     kernel.finish()
 }

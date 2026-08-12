@@ -118,17 +118,27 @@ pub fn shape(subgroup: u32) -> Shape {
 /// The control: no lane talks to any other, so a wrong answer here is a wrong *harness* rather
 /// than a wrong subgroup mapping. Run it first.
 ///
+/// **The lane count is the device's width, not 32.** It was 32, which is one element per
+/// invocation on a 32- or 64-wide subgroup and *eight* on a four-wide one — so on a narrow device
+/// this kernel silently read and wrote eight times the buffer every caller hands it. On lavapipe at
+/// four lanes that is an access violation; at eight it was undefined behaviour that happened to
+/// return zeros. An elementwise kernel has no reason to strip-mine, so it does not.
+///
 /// # Errors
 ///
 /// [`LaneError`] if the module cannot be built.
 pub fn scale(subgroup: u32, factor: f32) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup!(subgroup, scale_at, factor)
+}
+
+fn scale_at<const LANES: u32>(subgroup: u32, factor: f32) -> Result<Vec<u32>, LaneError> {
     use simdr::lanes::F32;
 
     let mut kernel = Kernel::<F32>::new(shape(subgroup))?;
-    let value = kernel.load::<32>(0)?;
+    let value = kernel.load::<LANES>(0)?;
     let scaled = {
         let mut lanes = kernel.lanes()?;
-        let factor = lanes.splat_bits::<F32, 32>(factor.to_bits())?;
+        let factor = lanes.splat_bits::<F32, LANES>(factor.to_bits())?;
         lanes.mul(value, factor)?
     };
     kernel.store(1, scaled)?;
@@ -139,6 +149,10 @@ pub fn scale(subgroup: u32, factor: f32) -> Result<Vec<u32>, LaneError> {
 ///
 /// Two operations where the reduction kernels have one, to show that elementwise work stays one
 /// instruction per strip and never touches a subgroup capability.
+///
+/// `LANES` is open here because the point is to watch what strip-mining does to an elementwise
+/// kernel. A caller that just wants one element per invocation wants [`lane_affine_whole`] — see
+/// [`scale`] for what a hard-coded 32 does on a four-wide device.
 ///
 /// # Errors
 ///
@@ -157,6 +171,18 @@ pub fn lane_affine<const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneErro
     };
     kernel.store(1, result)?;
     kernel.finish()
+}
+
+/// [`lane_affine`] over a vector as wide as the device's subgroup — one element per invocation.
+///
+/// What every caller of it actually wanted. The generic form was called with a literal 32, which
+/// strip-mines on anything narrower and reads past the end of a buffer sized for one element each.
+///
+/// # Errors
+///
+/// As [`scale`].
+pub fn lane_affine_whole(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup!(subgroup, lane_affine)
 }
 
 /// An empty kernel, for measuring what a dispatch costs before any work is added.

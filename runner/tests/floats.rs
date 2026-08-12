@@ -34,6 +34,20 @@ fn ramp_with(count: usize, at: usize, value: f32) -> Vec<f32> {
     input
 }
 
+/// A lane inside the **first** subgroup, whatever the width is.
+///
+/// Every test below puts one special value in and asks what the first subgroup's reduction did
+/// with it. The indices used to be literals — 3, 5 and 7 — and a literal is only inside the first
+/// subgroup if the subgroup is wide enough to contain it. At **four** lanes, 5 and 7 are in the
+/// *second*, so the NaN the test asserted about never entered the total it was asserting about.
+/// One of the three failed and the other quietly measured nothing.
+///
+/// Half way in rather than lane zero, so the value is not sitting on the boundary a reduction
+/// starts from — a fold that dropped everything but the first lane would still pass with it there.
+fn inside_first_subgroup(width: usize) -> usize {
+    width / 2
+}
+
 #[test]
 fn a_sum_containing_an_infinity_is_infinite_and_does_not_corrupt_the_other_subgroup() {
     let Some(gpu) = device("infinity-sum") else {
@@ -48,7 +62,7 @@ fn a_sum_containing_an_infinity_is_infinite_and_does_not_corrupt_the_other_subgr
 
     let width = limits.subgroup_size as usize;
     let count = WORKGROUP_SIZE as usize;
-    let input = ramp_with(count, 3, f32::INFINITY);
+    let input = ramp_with(count, inside_first_subgroup(width), f32::INFINITY);
 
     let output = gpu
         .run(
@@ -85,7 +99,7 @@ fn a_sum_containing_a_nan_is_nan_in_that_subgroup_only() {
 
     let width = limits.subgroup_size as usize;
     let count = WORKGROUP_SIZE as usize;
-    let input = ramp_with(count, 5, f32::NAN);
+    let input = ramp_with(count, inside_first_subgroup(width), f32::NAN);
 
     let output = gpu
         .run(
@@ -134,8 +148,9 @@ fn a_maximum_containing_a_nan_behaves_the_same_on_both_reduction_paths() {
         return;
     }
 
+    let width = limits.subgroup_size as usize;
     let count = WORKGROUP_SIZE as usize;
-    let direct_input = ramp_with(count, 7, f32::NAN);
+    let direct_input = ramp_with(count, inside_first_subgroup(width), f32::NAN);
     let direct = gpu
         .run(
             &kernels::lane_max::<F32, 32>(32).expect("built"),
@@ -148,7 +163,7 @@ fn a_maximum_containing_a_nan_behaves_the_same_on_both_reduction_paths() {
         .expect("an answer");
 
     // Twice as long, and the NaN placed in the first strip so the compare-and-select fold sees it.
-    let folded_input = ramp_with(count * 2, 7, f32::NAN);
+    let folded_input = ramp_with(count * 2, inside_first_subgroup(width), f32::NAN);
     let folded = gpu
         .run(
             &kernels::lane_max::<F32, 64>(32).expect("built"),
@@ -166,7 +181,8 @@ fn a_maximum_containing_a_nan_behaves_the_same_on_both_reduction_paths() {
     // never the *smallest* input, which is what a mixed-up comparison would give.
     assert!(
         direct.is_nan() || direct == 31.0,
-        "the first subgroup holds 0..31 with a NaN at 7, so the answer is 31 or NaN, not {direct}"
+        "the first subgroup holds 0..31 with a NaN at {}, so the answer is 31 or NaN, not {direct}",
+        inside_first_subgroup(width)
     );
     assert!(
         folded.is_nan() || folded == 95.0,

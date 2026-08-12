@@ -97,7 +97,14 @@ fn fold_halves_at<const LANES: u32>(subgroup: u32, half: u32) -> Result<Vec<u32>
 /// # Errors
 ///
 /// [`LaneError`] if the module cannot be built.
+/// The lane count comes from the width, exactly as [`fold_halves`] does. It was a literal 32 —
+/// one element per invocation at 32 and 64 lanes, and eight strips at four, which reads eight
+/// times the buffer the caller sized. The two are a *pair*, and only one of them had been fixed.
 pub fn fold_halves_open(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup!(subgroup, fold_halves_open_at)
+}
+
+fn fold_halves_open_at<const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
     use simdr::lanes::F32;
 
     let mut kernel = Kernel::<F32>::new(shape(subgroup))?;
@@ -110,8 +117,8 @@ pub fn fold_halves_open(subgroup: u32) -> Result<Vec<u32>, LaneError> {
         .module()
         .spec_constant(element, 0, FOLD_HALF_SPEC_ID)?;
 
-    let near = kernel.load::<32>(0)?;
-    let far = kernel.load_offset_by::<32>(0, half)?;
+    let near = kernel.load::<LANES>(0)?;
+    let far = kernel.load_offset_by::<LANES>(0, half)?;
     let folded = kernel.lanes()?.add(near, far)?;
     kernel.store(1, folded)?;
     kernel.finish()
