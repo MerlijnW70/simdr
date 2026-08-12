@@ -339,6 +339,29 @@ so the lane-count test now works from a list of distinct sizes and asserts it ha
 in one process. Ruled out on our side: no shared state, a device per test, and the 256-bit build
 green 8 of 8 under the same parallelism. Documented as a flag rather than chased.
 
+### 17. A self-audit — **and `OpUDot` had been invalid since the day it shipped**
+
+Every claim the project makes about itself, checked. Zero dependencies, no lint escape outside a
+test, no missing `# Safety` section, `decode` unable to panic or loop, `tests/integrity.rs` doing
+what it says — all held.
+
+What did not: the audit asked *which public operations appear in no test that runs `spirv-val`* and
+found **fifteen**. Writing those tests took twenty minutes and the first run rejected
+`Lanes::dot_unsigned`, which had been emitting `OpUDot` with a **signed** result type. It had no
+caller, no unit test, and no validator coverage — three layers, and it fell between all of them.
+
+**A public method with no caller is not unused, it is unverified.** Every layer reports green about
+it by saying nothing at all.
+
+Also fixed: three doc drifts where the *reasoning* had been refuted by this project's own later
+measurements, and `sign_extend`'s unstated precondition — the same "every caller passes a safe
+value" argument that `Buffer::write` had expire on it once already.
+
+**Reported and not changed:** `clippy::undocumented_unsafe_blocks` fires 78 times in `runner`, but
+almost all are one `ash` call inside an `unsafe fn` whose `# Safety` section already covers it. The
+missing thing is a way to tell those from a block that needs a *new* argument — not 78
+restatements.
+
 ## 1. The upload is what is left, and it needs a shape rather than an optimisation
 
 ~294 µs of a 1275 µs call, and it is real: a caller passing `&[f32]` has to have it copied to the

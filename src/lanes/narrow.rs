@@ -228,8 +228,19 @@ impl Signed for F16 {
 /// §2.2.1's rule for the literal of a constant whose type is a signed integer narrower than a
 /// word. Getting it wrong gives an `i8` constant of `-1` declared as `0x000000ff`, which the
 /// validator rejects — and would otherwise have been a very quiet 255.
-const fn sign_extend(bits: u32, width: u32) -> u32 {
-    let spare = 32 - width;
+///
+/// **`width` is clamped to `1..=32`, and that is not decoration.** A width of 0 shifts by 32 and a
+/// width above 32 underflows the subtraction; both panic in a debug build, in a crate whose first
+/// claim is that no input makes it panic. The only callers pass 8 and 16, which is exactly the
+/// argument `Buffer::write`'s safety comment made before `Session` falsified it — so the function
+/// is made total rather than left resting on who happens to call it.
+/// The clamp is `clamp` rather than a pair of comparisons. Written out, the upper bound had a
+/// boundary nothing could falsify — at exactly 32 both arms of `if width > 32 { 32 }` produce 32,
+/// so `>` and `>=` are the same function and the mutation gate said so. `clamp` has no such seam.
+///
+/// It stopped being `const` to get there, which cost nothing: both callers are ordinary functions.
+fn sign_extend(bits: u32, width: u32) -> u32 {
+    let spare = 32 - width.clamp(1, 32);
     (((bits << spare) as i32) >> spare) as u32
 }
 
@@ -266,6 +277,32 @@ mod tests {
         I8::constant_from_bits(&mut module, 0xff).expect("-1i8");
 
         assert_eq!(constant_literal(&module.finish()), 0xffff_ffff);
+    }
+
+    #[test]
+    fn sign_extending_by_a_width_no_caller_passes_still_returns_rather_than_panicking() {
+        // The two widths that were unrepresentable arithmetic: 0 shifts by 32, and anything above
+        // 32 underflows `32 - width`. Both panic in a debug build. No caller reaches either — the
+        // `Element` impls pass 8 and 16 — and "no caller reaches it" is the argument this project
+        // has already watched expire once, in `Buffer::write`.
+        assert_eq!(sign_extend(0xff, 0), 0xffff_ffff, "one bit, all sign");
+        assert_eq!(sign_extend(0x7f, 0), 0xffff_ffff, "still just the low bit");
+
+        // Past 32 the whole word survives, and the case that says so has to have its **top bit
+        // set**: a clamp one short of 32 leaves a positive number untouched and turns this one
+        // into zero, so a value like 0x1234_5678 cannot tell the two apart.
+        assert_eq!(sign_extend(0x8000_0000, 33), 0x8000_0000, "clamped to 32");
+        assert_eq!(sign_extend(0x1234_5678, 33), 0x1234_5678);
+        assert_eq!(sign_extend(0xffff_ffff, u32::MAX), 0xffff_ffff);
+    }
+
+    #[test]
+    fn the_widths_the_element_impls_actually_pass_are_unchanged_by_the_clamp() {
+        // The clamp must not have moved the cases that matter.
+        assert_eq!(sign_extend(0xff, 8), 0xffff_ffff, "-1i8");
+        assert_eq!(sign_extend(0x7f, 8), 0x0000_007f, "127i8");
+        assert_eq!(sign_extend(0xffff, 16), 0xffff_ffff, "-1i16");
+        assert_eq!(sign_extend(0x7fff, 16), 0x0000_7fff, "32767i16");
     }
 
     #[test]

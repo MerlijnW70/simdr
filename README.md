@@ -45,9 +45,13 @@ lanes/     Simd<T, N> semantics: mappings, reductions, shuffles, votes, loops, b
            min/max/clamp, shifts, and the packed integer dot product
 kernel/    The buffer interface, one axis or two, workgroup shared memory, the barrier,
            and atomic scatter
-half/      f32 ↔ f16, because Rust has no stable f16 and this crate has nothing to borrow one from
-decode/    Reading a module back, which is how the tests inspect what was emitted
+encode.rs  Words out: the little-endian stream, literal strings, instruction headers
+decode.rs  Reading a module back, which is how the tests inspect what was emitted
+half.rs    f32 ↔ f16, because Rust has no stable f16 and this crate has nothing to borrow one from
 ```
+
+The four with a slash are directories and the three without are files — `encode.rs` used to be
+missing from this list entirely, and the other two were drawn as directories they are not.
 
 ### Start here
 
@@ -135,8 +139,8 @@ did not.
 
 | Layer | What it is | What it caught |
 | --- | --- | --- |
-| **Unit tests** | 320 in the emitter, decoding what was emitted; 587 across the workspace | Everything cheap |
-| **`spirv-val`** | Khronos' validator, at `--target-env vulkan1.1` | `OpLoopMerge` in the wrong position — a unit test asserted "merge before branch" and passed while the comparison sat between them |
+| **Unit tests** | 324 in the emitter, decoding what was emitted; 599 across the workspace | Everything cheap |
+| **`spirv-val`** | Khronos' validator, at `--target-env vulkan1.1` | `OpLoopMerge` in the wrong position — a unit test asserted "merge before branch" and passed while the comparison sat between them. And, the first time it was pointed at `Lanes::dot_unsigned`, that `OpUDot` had been emitted with a **signed** result type: invalid SPIR-V in a shipped public method that had no caller, no unit test and no validator coverage |
 | **Execution** | Real dispatches on a real GPU, against CPU references | A missing staging write: every computing kernel returned garbage and the empty-kernel test still passed |
 | **Other widths** | The same suite at **4, 8, 16, 32 and 64** lanes, across three devices | Ten tests that had conflated "32 lanes" with "the subgroup", four of which could not build at all because a vote has no clustered form. Then, at 8: a fuzzer generating shuffles that leave the subgroup, and three tests assuming uninitialised device memory is zero. Then, at 4: `kernels::scale` — *the control kernel* — reading and writing eight times its buffer, which had been undefined behaviour returning zeros at width 8 for a day before it became an access violation at 4 |
 | **Differential fuzzing** | Generated programs across seven element types, each interpreted on the CPU and compared exactly | `reduce_min` folding strips with a *maximum* — right for every mapping but the strip-mined one, so hand tests never saw it |

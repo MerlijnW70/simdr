@@ -148,6 +148,44 @@ mod tests {
     }
 
     #[test]
+    fn arbitrary_words_are_walked_without_panicking_or_looping() {
+        // The header comment says this "reads bytes that may not be ours", and the code defends
+        // that with `checked_sub` and `get` — but nothing had ever handed it bytes that were not
+        // ours. A self-audit asked what tests the claim, and the answer was the two hand-written
+        // cases below this one.
+        //
+        // A cheap linear-congruential stream rather than a dependency: what matters is that the
+        // word counts are adversarial, not that they are random.
+        let mut state = 0x1234_5678_9abc_def0_u64;
+        let mut next = || {
+            state = state
+                .wrapping_mul(0x5851_F42D_4C95_7F2D)
+                .wrapping_add(0x1405_7B7E_F767_814F);
+            (state >> 32) as u32
+        };
+
+        for length in 0..64_usize {
+            let words: Vec<Word> = (0..length).map(|_| next()).collect();
+
+            // Termination is the property with no other witness: an instruction always consumes
+            // at least its own opcode word, so the walk cannot stand still. If it could, this
+            // loop would not return and no assertion would ever run.
+            let mut seen = 0_usize;
+            for instruction in instructions(&words) {
+                seen += instruction.word_count();
+                assert!(
+                    instruction.word_count() >= 1,
+                    "an instruction consumed nothing"
+                );
+            }
+            assert!(seen <= length, "the walk read {seen} of {length} words");
+
+            // And the same stream read as a module, where the header is skipped first.
+            let _ = opcodes(&words);
+        }
+    }
+
+    #[test]
     fn a_zero_word_count_stops_the_walk_instead_of_looping_forever() {
         let words = vec![0, 0, 0];
 

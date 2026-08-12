@@ -54,7 +54,16 @@ impl Lanes<'_> {
         self.from_strips(&ids)
     }
 
-    /// The same over unsigned bytes.
+    /// The same over unsigned bytes, summed into a `u32`.
+    ///
+    /// **Unsigned in and unsigned out.** `OpUDot`'s result type must have a signedness of 0 —
+    /// this returned a `Vector<I32, _>` and produced a module `spirv-val` rejects with *"Result
+    /// must be an unsigned int scalar type"*. Nothing caught it, because nothing had ever built
+    /// one: no caller, no unit test, and the validator suite had never been pointed at it. A
+    /// self-audit that asked which operations reach `spirv-val` is what found it.
+    ///
+    /// It is also the right type on its own terms — four products of unsigned bytes cannot be
+    /// negative. [`Lanes::dot_mixed`] keeps its signed result, because a signed operand can.
     ///
     /// # Errors
     ///
@@ -63,8 +72,8 @@ impl Lanes<'_> {
         &mut self,
         left: Vector<U32, LANES>,
         right: Vector<U32, LANES>,
-    ) -> Result<Vector<I32, LANES>, LaneError> {
-        let result = self.type_of::<I32>()?;
+    ) -> Result<Vector<U32, LANES>, LaneError> {
+        let result = self.type_of::<U32>()?;
         let mut ids = Vec::with_capacity(left.strip_count());
 
         for (&a, &b) in left.strips().iter().zip(right.strips()) {
@@ -255,6 +264,40 @@ mod tests {
         lanes.dot_signed(value, value).expect("dot");
 
         assert_eq!(count(&module.finish(), op::S_DOT), 1);
+    }
+
+    #[test]
+    fn the_unsigned_dot_declares_an_unsigned_result_because_the_instruction_demands_one() {
+        // `OpUDot`'s result type must have a signedness of 0. This emitted a *signed* one and
+        // produced a module `spirv-val` rejects — and nothing noticed, because `dot_unsigned` had
+        // no caller, no test of its own, and no entry in the validator suite. All three now exist;
+        // this is the one that names the rule.
+        let mut module = built();
+        let mut lanes = Lanes::new(&mut module, 32).expect("built");
+        let packed = lanes.splat_bits::<U32, 32>(0x0102_0304).expect("splat");
+
+        let total = lanes.dot_unsigned(packed, packed).expect("dot");
+        // Compiles only because `total` is `Vector<U32, 32>`.
+        lanes.add(total, packed).expect("same type");
+
+        let words = module.finish();
+        assert_eq!(count(&words, op::U_DOT), 1);
+
+        // And the result type it named really is the unsigned one — the same id the operands have.
+        let integers: Vec<Vec<u32>> = decode::body(&words)
+            .filter(|instruction| instruction.opcode() == op::TYPE_INT)
+            .map(|instruction| instruction.operands().to_vec())
+            .collect();
+        let unsigned = integers
+            .iter()
+            .find(|operands| operands[2] == 0)
+            .expect("an unsigned 32-bit integer type");
+        let result = decode::body(&words)
+            .find(|instruction| instruction.opcode() == op::U_DOT)
+            .expect("emitted")
+            .operands()[0];
+
+        assert_eq!(result, unsigned[0], "OpUDot named a signed result type");
     }
 
     #[test]

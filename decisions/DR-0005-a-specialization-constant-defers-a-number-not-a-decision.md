@@ -84,7 +84,13 @@ One *pipeline* per parameter value is not, and no specialization constant makes 
 What the measurement does say is that setup is ~884 µs against a dispatch's 0.8 µs, and that the
 reduction chain's real saving is to **hold its pipelines** across calls rather than defer its
 constants. That is `Reducer`, and it is built: `runner/examples/reducer.rs` measures **5.0×** on a
-reduction over 8 192 elements and 1.6× over 2²⁰, where the arithmetic starts to dominate.
+reduction over 8 192 elements and **2.2×** over 2²⁰, where the setup is a smaller share of a larger
+call.
+
+> That last clause said "where the arithmetic starts to dominate", and the arithmetic does not.
+> The same example was later made to break the remaining time down, and it is the host round trip
+> and the chained dispatches — not the sums. The ratio also moved from 1.6× once the reduction
+> stopped copying its whole output buffer home to read one number out of it.
 
 `kernels::fold_halves_open` and `Kernel::load_offset_by` are kept rather than deleted: they are
 what made the comparison possible, they cost one `OpIAdd` per strip against the baked-in form, and

@@ -2,9 +2,14 @@
 //!
 //! [`crate::Gpu::sum`] builds a pipeline per fold on every call and throws them all away. That is
 //! the right shape for a test and the wrong one for anything that reduces more than once:
-//! `runner/examples/reducer.rs` measures the same reduction at **967 µs** rebuilt and **192 µs**
-//! held, over 8 192 elements — 5.0×. Over 2²⁰ it is 1.6×, because by then the arithmetic is most
-//! of the time rather than the setup.
+//! `runner/examples/reducer.rs` measures the same reduction at about **1000 µs** rebuilt and
+//! **200 µs** held over 8 192 elements — 5.0× — and **2.2×** over 2²⁰, where the setup is a
+//! smaller share of a larger call.
+//!
+//! That last clause used to read "because by then the arithmetic is most of the time", and the
+//! arithmetic is not. Broken down, a held reduction over 2²⁰ is roughly a quarter chained
+//! dispatches, a quarter uploading the input, and a twentieth bringing the answer back — the rest
+//! being the buffers and the queue. `notes/FINDINGS.md` has the table.
 //!
 //! This is the same trade [`crate::Session`] makes for one pipeline, applied to a chain of them.
 //!

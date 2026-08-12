@@ -323,9 +323,10 @@ mod tests {
     /// `false` left the whole suite green.
     ///
     /// Asked of the builder directly rather than through the public wrapper, because the wrapper
-    /// now refuses anything that is not 32 or 64 *first* — it has to, since the lane count is a
-    /// const generic and those are the two it instantiates. Going through it would test the
-    /// dispatcher and leave this guard unreached all over again.
+    /// refuses any width it has no lane count for *first* — it has to, since the lane count is a
+    /// const generic and it can only instantiate the widths `whole_subgroup_of!` lists, which are
+    /// 4, 8, 16, 32 and 64. Going through it would test the dispatcher and leave this guard
+    /// unreached all over again.
     #[test]
     fn a_subgroup_the_workgroup_does_not_divide_by_is_refused() {
         // 64 invocations do not split into whole subgroups of 24 or 48.

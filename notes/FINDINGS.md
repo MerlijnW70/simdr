@@ -1642,3 +1642,86 @@ it is has not been chased further than that, because the fix is a flag:
 $env:LP_NATIVE_VECTOR_WIDTH = "128"     # or 512
 cargo test -p runner -- --test-threads=1
 ```
+
+## A self-audit, and the invalid instruction it found in four minutes — 2026-08-12
+
+Every claim this project makes about itself, checked rather than re-read. What held is as much the
+point as what did not, so both are below.
+
+### Held
+
+- **Zero dependencies in the emitter.** `cargo tree -p simdr` is one line.
+- **No lint escape outside a test.** Every `#[allow]` and `#[expect]` in `src/` sits inside a
+  `#[cfg(test)]` module — checked mechanically, not by reading. So `unwrap_used`, `expect_used`,
+  `panic` and `indexing_slicing` are denied for real in everything that ships.
+- **No `# Safety` section missing.** `clippy::missing_safety_doc` over `runner` reports nothing.
+- **The only non-FFI `unsafe` is documented and bounds-checked.** `Buffer::write` and
+  `Buffer::read` are the two `copy_nonoverlapping` calls in the crate; both carry an argument and
+  both refuse a length past the mapping.
+- **`decode` cannot panic or loop.** `checked_sub` and `get`, and an instruction always consumes at
+  least its own opcode word. It is now *tested* against arbitrary word streams rather than only
+  argued — see below.
+- **`tests/integrity.rs` checks what it says it checks**, in both directions, including that every
+  file excused from mutation still contains the `unsafe` that excused it.
+
+### The one that did not: `OpUDot` with a signed result type
+
+The audit asked a question nothing had asked before — *which public operations appear in no test
+that runs `spirv-val`?* — and the answer was **fifteen**, including the whole shuffle and vote
+surface, both right shifts, half the dot product, and four GLSL.std.450 instructions.
+
+Writing those tests took twenty minutes. The first run failed:
+
+```
+error: line 53: Result must be an unsigned int scalar type.
+```
+
+`Lanes::dot_unsigned` emitted `OpUDot` with a `Vector<I32, _>` result. `OpUDot`'s result type must
+have a signedness of 0, so **the module was invalid** — and it had shipped that way, because:
+
+- it had **no caller**, anywhere in the workspace;
+- it had **no unit test** of its own, while `dot_signed` had three;
+- and the validator suite had never been pointed at it.
+
+Three layers, and the operation fell between all of them. `dot_signed` and `dot_mixed` were fine:
+a signed result is legal for both, so only the one unsigned instruction had a rule to break.
+
+It is `Vector<U32, _>` now, which is also the right type on its own terms — four products of
+unsigned bytes cannot be negative.
+
+**The shape worth carrying:** a public method with no caller is not "unused", it is *unverified*.
+Nothing in the ordinary run of the suite touches it, so every layer reports green about it by
+saying nothing at all. `dot_unsigned` existed for symmetry with `dot_signed`, which is exactly the
+reason a thing gets written and never exercised.
+
+### Drift, in three places, all of it in the *reasoning* rather than the numbers
+
+- `reduction/held.rs` and `decisions/DR-0005` both said the reduction's remaining time at 2²⁰ is
+  where "the arithmetic starts to dominate". This project *measured* that six items later and it is
+  the host round trip and the chained dispatches. Both now say so, and the 1.6× they quoted is
+  2.2×.
+- `kernels/reduce.rs` said the whole-subgroup wrapper "instantiates 32 and 64", which stopped being
+  true when the width list grew to five.
+- The README's layer diagram omitted `encode.rs` entirely and drew `half.rs` and `decode.rs` as
+  directories.
+
+### And one argument that had not expired yet
+
+`sign_extend(bits, width)` shifts by `32 - width`. A width of 0 shifts by 32 and one above 32
+underflows; both panic in a debug build, in a crate whose first claim is that no input makes it
+panic. Every caller passes 8 or 16 — which is *precisely* the argument `Buffer::write`'s safety
+comment made before `Session` falsified it six hours later. It is clamped and tested now, rather
+than left resting on who happens to call it.
+
+### What was reported and not changed
+
+`clippy::undocumented_unsafe_blocks` fires **78** times across `runner`. That number looks much
+worse than it is: almost all of them are a single `ash` call inside a function that is already
+`unsafe fn` with a `# Safety` section covering exactly that obligation, and writing 78 restatements
+of "the device is live and the enclosing contract holds" would be noise in a codebase whose
+comments are supposed to carry an argument.
+
+What is genuinely missing is not the comments but a way to tell the two apart — an FFI call under a
+stated contract from a block that needs a new argument. Nothing enforces that distinction, so a
+novel `unsafe` block would arrive unremarked among the seventy-eight. Recorded rather than papered
+over.
