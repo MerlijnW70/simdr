@@ -125,7 +125,9 @@ impl Gpu {
             .collect();
 
         let words: Vec<u32> = input.iter().map(|value| value.to_bits()).collect();
-        let output = self.run_chain(&passes, &words)?;
+        // One word home, not the buffer: the answer is a single number and the rest is the last
+        // fold's leftovers. Reading it all was 37% of the call — see `notes/FINDINGS.md`.
+        let output = self.run_chain_head(&passes, &words, 1)?;
 
         // One number, read rather than assembled. Every invocation of the final workgroup wrote
         // the same total, so any of them would do; slot zero is the obvious one.

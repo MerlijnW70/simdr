@@ -262,3 +262,59 @@ fn a_chain_of_either_parity_returns_the_buffer_its_last_pass_wrote() {
         assert_eq!(output, expected, "{passes} passes, factor {factor}");
     }
 }
+
+#[test]
+fn a_head_read_returns_that_many_words_and_the_right_ones() {
+    // `run_chain_head` brings only a prefix home. The failure it has to not have is returning the
+    // right *count* of the wrong words — a `head` applied to the read but not to the copy, or the
+    // other way round, would still return something of the expected length.
+    //
+    // So every element is distinct and the prefix is compared against the full run's, element for
+    // element, at several lengths.
+    let Some(gpu) = device("chain-head") else {
+        return;
+    };
+    let width = gpu.limits().subgroup_size;
+
+    let doubling = runner::kernels::scale(width, 2.0).expect("built");
+    let count = 4 * WORKGROUP_SIZE as usize;
+    let input: Vec<u32> = (0..count).map(|index| (index as f32).to_bits()).collect();
+    let passes = [runner::Pass::new(&doubling, count as u32 / WORKGROUP_SIZE)];
+
+    let whole = gpu.run_chain(&passes, &input).expect("dispatched");
+    assert_eq!(whole.len(), count, "the full read is still the full buffer");
+
+    for head in [1_usize, 2, 17, count - 1, count] {
+        let prefix = gpu
+            .run_chain_head(&passes, &input, head)
+            .expect("dispatched");
+
+        assert_eq!(prefix.len(), head, "asked for {head}");
+        assert_eq!(
+            prefix.as_slice(),
+            whole.get(..head).expect("in range"),
+            "the first {head} words are not the first {head} words"
+        );
+    }
+}
+
+#[test]
+fn a_head_larger_than_the_buffer_returns_the_buffer() {
+    // Clamped rather than refused: a caller asking for more than exists has asked for everything,
+    // and copying past the end of the allocation is undefined rather than merely wrong.
+    let Some(gpu) = device("chain-head-clamp") else {
+        return;
+    };
+    let width = gpu.limits().subgroup_size;
+
+    let doubling = runner::kernels::scale(width, 2.0).expect("built");
+    let count = 2 * WORKGROUP_SIZE as usize;
+    let input: Vec<u32> = (0..count).map(|index| (index as f32).to_bits()).collect();
+    let passes = [runner::Pass::new(&doubling, count as u32 / WORKGROUP_SIZE)];
+
+    let output = gpu
+        .run_chain_head(&passes, &input, count * 100)
+        .expect("dispatched");
+
+    assert_eq!(output.len(), count);
+}

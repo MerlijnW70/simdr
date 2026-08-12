@@ -1513,3 +1513,59 @@ The copy-shortening before it predicted 111 µs and delivered 85. This predicted
 32. Both times the error was the same: a component was timed *with its barriers included* and then
 costed as though removing the component removed the barriers too. The barriers were never the thing
 being removed.
+
+## Four bytes were being shipped as four megabytes — 2026-08-12
+
+The breakdown built for the last two items said the host download was 37% of a held reduction over
+2²⁰ elements. Three items in a row had been spent shaving the *device* side of that call — 85 µs,
+then 32 — while the largest single line in the table went unread.
+
+`Reducer::sum` ended:
+
+```rust
+self.gpu.copy(answer, staging, bytes)?;      // bytes = 4 MB
+staging.read(self.gpu, self.elements)?       // 1 048 576 words
+...
+output.first()                               // one of them
+```
+
+A reduction produces **one number**. Every invocation of the final workgroup holds the whole total,
+so slot zero is the answer and the other 1 048 575 words are the last fold's leftovers. Both the
+device-to-host copy and the host read were sized to the buffer.
+
+It is `copy(answer, staging, 4)` and `read(1)` now, and `Gpu::sum` gets the same through
+`Gpu::run_chain_head`, which brings a prefix home instead of everything.
+
+### Paired against the previous build, alternating runs, 2²⁰ elements
+
+| device | `Reducer::sum` | | `Gpu::sum` | |
+| --- | --- | --- | --- | --- |
+| RTX 4080 | 1866 → 1250 µs | **33%** | 3442 → 2728 µs | 20% |
+| integrated Radeon | 3663 → 2550 µs | **30%** | 5270 → 4375 µs | 17% |
+| lavapipe | 4844 → 3619 µs | **25%** | 87 000 → 79 200 µs | 9% |
+
+Every round on every device, by a wide margin. **This is the first change in four that helped
+everywhere** — the workgroup size, the integer dot product and the ping-pong all split by device,
+because all three traded memory traffic for instructions and only the integrated part is short of
+bandwidth. This one removes 4 MB and adds nothing, so there is nothing for a device to be
+indifferent about.
+
+### What it says about the three items before it
+
+They were all real and all small: 85 µs, 32 µs, and this one 616. The difference is not cleverness
+— the ping-pong is by far the most intricate of the three — it is that the first two were chosen
+from a *guess* about where the time went and this one was chosen from the table.
+
+The table existed for two of those items. It was built to test the guess, it answered, and then
+three more measurements were taken before anyone read the largest row in it.
+
+**The habit:** when a breakdown is produced, act on its biggest row before its most interesting
+one. `notes/NEXT.md` had "the host round trip is 57%" as item 1 and the reason it read as hard was
+the *upload* — which is genuinely hard, because the data has to arrive. The download was sitting in
+the same row and was four lines of code.
+
+### What is left
+
+The upload, at ~294 µs of a 1275 µs call, and it is real: a caller passing `&[f32]` has to have it
+copied to the device. What removes it is not an optimisation but a shape — a reduction that reads a
+buffer already on the device — and that is what `notes/NEXT.md` now heads with.

@@ -29,6 +29,13 @@ use crate::kernels::{self, WORKGROUP_SIZE};
 use crate::{Error, Gpu};
 use simdr::lanes::F32;
 
+/// How much of the answer buffer comes home: one `f32`.
+///
+/// Every invocation of the final workgroup holds the whole total, so slot zero is the answer and
+/// the rest of the buffer is the last fold's leftovers. Reading it all was 37% of a reduction over
+/// 2²⁰ elements — see `notes/FINDINGS.md`.
+const ANSWER_BYTES: u64 = size_of::<f32>() as u64;
+
 /// A reduction over a fixed number of elements, with its pipelines already built.
 pub struct Reducer<'gpu> {
     gpu: &'gpu Gpu,
@@ -207,8 +214,13 @@ impl Reducer<'_> {
             } else {
                 source
             };
-            self.gpu.copy(answer, staging, bytes)?;
-            staging.read(self.gpu, self.elements)?
+
+            // **One word, not the buffer.** A reduction produces a single number and this read
+            // whole megabytes of it home to call `.first()`. `runner/examples/reducer.rs` costed
+            // the download at 37% of the call, which is what a 4 MB round trip for four bytes
+            // looks like from the outside.
+            self.gpu.copy(answer, staging, ANSWER_BYTES)?;
+            staging.read(self.gpu, 1)?
         };
 
         let total = output

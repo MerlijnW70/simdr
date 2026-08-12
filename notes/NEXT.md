@@ -290,18 +290,43 @@ lost `outputs` and `writing`, `Step` stopped existing — and with them a copy-l
 returned the previous call's data. What arrived instead is one sharp question, which is that the
 answer now moves between the two buffers by parity.
 
-## 1. The host round trip is 57% of a large reduction
+### 15. The download — **half of it was four bytes wearing four megabytes**
 
-Upload 338 µs, download 662 µs, against a 1762 µs call. No kernel change touches either, and no
-amount of device-side cleverness will: the data has to arrive and the answer has to leave.
+`Reducer::sum` copied the whole answer buffer home and called `.first()` on it. A reduction
+produces one number; the rest is the last fold's leftovers. It reads one word now, and `Gpu::sum`
+does the same through `Gpu::run_chain_head`.
 
-Except that for most real uses it does not. A caller that reduces the *output of a previous
-dispatch* has its data on the device already, and one that feeds the total into another kernel does
-not need it on the host. `Reducer::sum` takes `&[f32]` and returns `f32`, so it forces both.
+| paired, 2²⁰ elements | `Reducer::sum` | `Gpu::sum` |
+| --- | --- | --- |
+| RTX 4080 | 1866 → 1250 µs, **33%** | 3442 → 2728 µs, 20% |
+| integrated Radeon | 3663 → 2550 µs, **30%** | 5270 → 4375 µs, 17% |
+| lavapipe | 4844 → 3619 µs, **25%** | 87.0 → 79.2 ms, 9% |
 
-What this needs is a shape, not an optimisation: something like `Reducer::sum_binding`, taking and
-leaving a device buffer, with `sum` as the convenience wrapper that copies. `Session` already
-proves the pieces exist. The measurement to beat is `runner/examples/reducer.rs`.
+Every round on every device. The first change in four that helped everywhere, because it removes
+traffic without adding instructions — and the three before it all split by device for exactly that
+reason.
+
+**Worth carrying:** the breakdown that found this was built two items earlier, to test a guess about
+the copies. It answered, and then three more measurements were taken before anyone acted on its
+largest row. *Act on a breakdown's biggest row before its most interesting one.*
+
+## 1. The upload is what is left, and it needs a shape rather than an optimisation
+
+~294 µs of a 1275 µs call, and it is real: a caller passing `&[f32]` has to have it copied to the
+device. No device-side change touches it.
+
+Except that for most real uses it should not exist. A caller reducing the *output of a previous
+dispatch* has its data on the device already, and one feeding the total into another kernel does
+not need it on the host either. `Reducer::sum` takes `&[f32]` and returns `f32`, so it forces both
+crossings whether or not the caller wanted them.
+
+Something like `Reducer::fold()` over a binding the caller already filled, with `sum` as the
+convenience wrapper that copies — `Session` already proves every piece exists. The measurement to
+beat is `runner/examples/reducer.rs`.
+
+**What would refute it:** nothing in this repository having data on the device to begin with, which
+is currently true — every caller here starts from a `Vec`. That makes this an API for a use that
+has not arrived, and the honest first step is a caller that wants it, not the method.
 
 ---
 

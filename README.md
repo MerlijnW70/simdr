@@ -135,7 +135,7 @@ did not.
 
 | Layer | What it is | What it caught |
 | --- | --- | --- |
-| **Unit tests** | 320 in the emitter, decoding what was emitted; 585 across the workspace | Everything cheap |
+| **Unit tests** | 320 in the emitter, decoding what was emitted; 587 across the workspace | Everything cheap |
 | **`spirv-val`** | Khronos' validator, at `--target-env vulkan1.1` | `OpLoopMerge` in the wrong position — a unit test asserted "merge before branch" and passed while the comparison sat between them |
 | **Execution** | Real dispatches on a real GPU, against CPU references | A missing staging write: every computing kernel returned garbage and the empty-kernel test still passed |
 | **Other devices** | The same suite at 64 lanes and at 8, as well as at 32 | Ten tests that had conflated "32 lanes" with "the subgroup", four of which could not build at all because a vote has no clustered form. Then, at 8: a fuzzer generating shuffles that leave the subgroup, and three tests assuming uninitialised device memory is zero |
@@ -332,7 +332,7 @@ the integrated Radeon in the same machine. It does not make the kernel faster an
 remove the host copies — it removes the setup the measurement said was there to remove.
 
 A full-buffer reduction is a chain of a dozen pipelines rather than one, and `Gpu::reducer` is the
-same idea applied to all of them: **5.0×** over 8 192 elements, 1.8× over 2²⁰ where the setup is a
+same idea applied to all of them: **5.0×** over 8 192 elements, 2.2× over 2²⁰ where the setup is a
 smaller share of a larger call.
 
 ```rust
@@ -351,24 +351,28 @@ Measured rather than argued, each row a difference between two calls that differ
 
 | | per call | share |
 | --- | --- | --- |
-| fourteen chained steps — one barrier each, nothing copied | 234 µs | 12% |
-| host upload of the input | 352 µs | 18% |
-| host download of the output | 726 µs | 37% |
+| fourteen chained steps — one barrier each, nothing copied | 300 µs | 24% |
+| host upload of the input | 294 µs | 23% |
+| host download of the answer — one `f32` | 59 µs | 5% |
+| *(what a whole-buffer download would cost, and no longer does)* | *718 µs* | *56%* |
 
-**The host round trip is most of it**, and nothing on the device touches that. A caller whose data
-is already on the device pays neither, which is what `notes/NEXT.md` heads with now.
+That last row is where most of the work went, and it took three attempts to notice. Two changes
+shaved the device side — shortening the between-pass copies, then replacing them with a ping-pong
+across two descriptor sets — for 85 µs and 32 µs against predictions of 111 and 250. Both missed
+the same way: a component was timed *with its barriers included* and then costed as though removing
+the component removed the barriers too.
 
-The chained steps got there through two changes and **both were smaller than predicted, the same
-way**. `notes/NEXT.md` said the between-pass copies were probably most of the cost: they were a
-fifth, and shortening them to what each pass reads bought 85 µs of a predicted 111. Then it said
-the *barriers* around those copies were the real item: replacing the copy with a ping-pong across
-two descriptor sets bought 32 µs of a predicted 250, because one barrier costs nearly what two did.
+Meanwhile `Reducer::sum` was copying 4 MB home and calling `.first()` on it. A reduction produces
+one number. Reading one word instead is **33% of the whole call** on an RTX 4080, 30% on the
+integrated Radeon and 25% on lavapipe — every round on every device, which none of the other three
+managed, because it removes traffic without adding instructions.
 
-Each time a component was timed with its barriers included and then costed as though removing the
-component removed the barriers too. The ping-pong is kept for being shorter code — no copies, no
-copy lengths, no class of bug where a short copy returns the previous call's data — and because on
-the **integrated Radeon**, where bandwidth is scarce, it *is* worth 5.5%. On the 4080 and on
-lavapipe it is worth nothing measurable.
+The ping-pong is kept for being shorter code — no copies, no copy lengths, and no class of bug
+where a short copy returns the previous call's data — and because on the integrated Radeon it *is*
+worth 5.5%.
+
+What is left is the upload, and it is real: a caller passing `&[f32]` has to have it copied across.
+Removing that is a different API rather than a faster one, and `notes/NEXT.md` heads with it.
 
 ## One instruction where there were eleven
 

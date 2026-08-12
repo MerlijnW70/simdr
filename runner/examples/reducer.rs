@@ -181,6 +181,14 @@ fn breakdown(gpu: &Gpu, whole: Duration) -> Result<(), Box<dyn std::error::Error
     for _ in 0..REPEATS {
         session.read(1, ELEMENTS)?;
     }
+    let whole_download = started.elapsed() / REPEATS as u32;
+
+    // What a reduction actually brings home: one `f32`. It used to be the row above, which is the
+    // same buffer for the same one number.
+    let started = Instant::now();
+    for _ in 0..REPEATS {
+        session.read(1, 1)?;
+    }
     let download = started.elapsed() / REPEATS as u32;
 
     println!(
@@ -193,7 +201,8 @@ fn breakdown(gpu: &Gpu, whole: Duration) -> Result<(), Box<dyn std::error::Error
     for (name, taken) in [
         ("fourteen chained steps", fourteen),
         ("host upload of the input", upload),
-        ("host download of the output", download),
+        ("host download of the answer", download),
+        ("(a whole-buffer download, unpaid)", whole_download),
     ] {
         let share = taken.as_secs_f64() / whole.as_secs_f64() * 100.0;
         println!("{name:>36} {:>12} {share:>9.0}%", micros(taken));
@@ -204,10 +213,12 @@ fn breakdown(gpu: &Gpu, whole: Duration) -> Result<(), Box<dyn std::error::Error
          4080, of which 19.0 us was the barriers. It is one barrier and no copy now, at 16.7 us,\n\
          and removing the second barrier turned out to save about 2 us rather than half of 19.\n\
          Paired against the old build on the same machine: no measurable difference on the 4080\n\
-         or on lavapipe, and 5.5%% on the integrated Radeon, where bandwidth is scarce enough for\n\
+         or on lavapipe, and 5.5% on the integrated Radeon, where bandwidth is scarce enough for\n\
          4 MB of copying to show. notes/FINDINGS.md has the runs.\n\n\
        \x20 Shares are against the `Reducer::sum` time in the table above, same run, same device.\n\
-         The two host transfers are most of the call, and no kernel change touches them."
+         The last row is what the download used to be: the whole buffer, copied home so that\n\
+         `.first()` could be called on it. It is one `f32` now, and the row above shows what\n\
+         that costs. The upload is what is left, and it is real — the data has to arrive."
     );
 
     Ok(())
