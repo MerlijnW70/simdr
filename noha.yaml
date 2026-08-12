@@ -117,6 +117,7 @@ sources:
   - runner/src/kernels/specialized.rs
   - runner/src/dispatch/grid.rs
   - runner/src/dispatch/specialization.rs
+  - runner/src/dispatch/step.rs
   - runner/src/dispatch/run.rs
   - runner/src/kernels/network.rs
   - runner/src/kernels/occupancy.rs

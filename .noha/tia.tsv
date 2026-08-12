@@ -26,6 +26,7 @@ runner/src/dispatch/run.rs	<<→>>	generated_narrow_programs_agree_with_the_cpu_
 runner/src/dispatch/run.rs	>>→<<	generated_narrow_programs_agree_with_the_cpu_reference	.flat_map(|word| [*word as u16, (word >> 16) as u16])
 runner/src/dispatch/specialization.rs	*→/	dispatch::specialization::tests::each_value_lands_at_its_own_offset	.offset((index * size_of::<u32>()) as u32)
 runner/src/dispatch/specialization.rs	==→!=	dispatch::specialization::tests::each_value_lands_at_its_own_offset	.find(|(existing, _)| *existing == spec_id)
+runner/src/dispatch/step.rs	*→/	dispatch::step::tests::a_count_of_zero_becomes_one_word_because_an_empty_copy_is_not_allowed	Some(words) => ((words.max(1) * size_of::<u32>()) as u64).min(bytes),
 runner/src/fuzz/domain.rs	&→|	fuzz::domain::tests::a_narrow_domain_never_produces_a_value_outside_its_width	value & self.mask()
 runner/src/fuzz/domain.rs	*→/	a_strip_mined_dot_product_folds_four_products_per_lane	(f32::from_bits(left) * f32::from_bits(right)).to_bits()
 runner/src/fuzz/domain.rs	*→/	generated_float_programs_agree_with_the_cpu_reference	Self::Float => (f32::from_bits(left) * f32::from_bits(right)).to_bits(),

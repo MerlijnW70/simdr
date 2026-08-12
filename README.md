@@ -135,7 +135,7 @@ did not.
 
 | Layer | What it is | What it caught |
 | --- | --- | --- |
-| **Unit tests** | 320 in the emitter, decoding what was emitted; 576 across the workspace | Everything cheap |
+| **Unit tests** | 320 in the emitter, decoding what was emitted; 586 across the workspace | Everything cheap |
 | **`spirv-val`** | Khronos' validator, at `--target-env vulkan1.1` | `OpLoopMerge` in the wrong position — a unit test asserted "merge before branch" and passed while the comparison sat between them |
 | **Execution** | Real dispatches on a real GPU, against CPU references | A missing staging write: every computing kernel returned garbage and the empty-kernel test still passed |
 | **Other devices** | The same suite at 64 lanes and at 8, as well as at 32 | Ten tests that had conflated "32 lanes" with "the subgroup", four of which could not build at all because a vote has no clustered form. Then, at 8: a fuzzer generating shuffles that leave the subgroup, and three tests assuming uninitialised device memory is zero |
@@ -327,8 +327,8 @@ the integrated Radeon in the same machine. It does not make the kernel faster an
 remove the host copies — it removes the setup the measurement said was there to remove.
 
 A full-buffer reduction is a chain of a dozen pipelines rather than one, and `Gpu::reducer` is the
-same idea applied to all of them: **5.0×** over 8 192 elements, 1.6× over 2²⁰ where the arithmetic
-starts to dominate.
+same idea applied to all of them: **5.0×** over 8 192 elements, 1.8× over 2²⁰ where the setup is a
+smaller share of a larger call.
 
 ```rust
 let mut reducer = gpu.reducer(8_192)?;   // every pipeline built once
@@ -338,6 +338,24 @@ let total = reducer.sum(&input)?.total;  // and again, and again
 The two numbers are why the test that guards this asserts a factor of three. Ten passed comfortably
 for as long as there was one device to run it on, and was a property of that device wearing the
 costume of a property of sessions.
+
+### Where the rest of a large reduction goes
+
+Measured rather than argued, each row a difference between two calls that differ in one thing —
+`runner/examples/reducer.rs`, RTX 4080, 2²⁰ elements, a 1762 µs call:
+
+| | per call | share |
+| --- | --- | --- |
+| fourteen between-pass copies, shortened to what each pass reads | 274 µs | 16% |
+| host upload of the input | 338 µs | 19% |
+| host download of the output | 662 µs | 38% |
+
+**The host round trip is most of it**, and nothing on the device touches that. The copies used to
+be 386 µs and shortening them bought **85 µs**, not the 111 the traffic suggested — a whole-buffer
+step is 27.5 µs of which 19.0 is the two pipeline barriers around the copy and 8.6 is the data. The
+barriers stay whatever the copy carries, which makes them the largest device-side item left.
+
+`notes/NEXT.md` had this down as "the copies are probably most of the cost". They were a fifth.
 
 ## One instruction where there were eleven
 

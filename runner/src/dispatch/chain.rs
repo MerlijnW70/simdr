@@ -10,34 +10,27 @@
 //!
 //! Every kernel this crate emits binds buffer 0 read and buffer 1 written, and those bindings are
 //! baked into the module. Rather than build a second descriptor set and alternate, each pass is
-//! followed by a device-to-device copy of the whole buffer back into the source.
+//! followed by a device-to-device copy back into the source.
 //!
-//! That copy is real work — for a shrinking reduction it is mostly copying elements the next pass
-//! will not read. A ping-pong across two descriptor sets would avoid it, and is the right shape
-//! for a chain that is being *timed*. This one is built to be *correct*, and the copy is the
-//! honest, obvious version of correct.
+//! **The copy is as long as the next pass will read, and no longer.** It used to be the whole
+//! buffer every time, which for a shrinking reduction is mostly copying elements nobody will look
+//! at again: fourteen copies of 4 MB where the fourteen passes between them read 4 MB in total.
+//! `runner/examples/reducer.rs` measured that at ~20% of a held reduction over 2²⁰ elements — not
+//! the majority `notes/NEXT.md` predicted, and not nothing either.
+//!
+//! [`Pass::new`] still copies everything, because a caller who has not said how much its pass
+//! writes has not given anyone the right to guess. [`Pass::writing`] is where the saving is, and it
+//! is what [`crate::Reducer`] and [`crate::Gpu::sum`] use — they know, because the fold sizes are
+//! what they were built from.
+//!
+//! A ping-pong across two descriptor sets would remove the copy entirely and is still the right
+//! shape for a chain built to be fast. This one is built to be correct.
 
 use super::pipeline::Pipeline;
+use super::step::{Pass, Step};
 use crate::buffer::Buffer;
 use crate::{Error, Gpu};
 use ash::vk;
-
-/// One dispatch of a chain.
-#[derive(Debug, Clone, Copy)]
-pub struct Pass<'words> {
-    /// The module to run.
-    pub spirv: &'words [u32],
-    /// How many workgroups of it.
-    pub workgroups: u32,
-}
-
-impl<'words> Pass<'words> {
-    /// A pass running `workgroups` groups of `spirv`.
-    #[must_use]
-    pub const fn new(spirv: &'words [u32], workgroups: u32) -> Self {
-        Self { spirv, workgroups }
-    }
-}
 
 impl Gpu {
     /// Run every pass in order over one pair of device-local buffers, and read the result back.
@@ -115,8 +108,8 @@ impl Gpu {
 
         unsafe { self.copy(staging, source, bytes) }?;
 
-        let groups: Vec<u32> = passes.iter().map(|pass| pass.workgroups).collect();
-        let recorded = unsafe { self.replay(&pipelines, &groups, source, destination, bytes) };
+        let steps = Step::plan(passes, bytes);
+        let recorded = unsafe { self.replay(&pipelines, &steps, source, destination) };
 
         let output = recorded.and_then(|()| {
             unsafe { self.copy(destination, staging, bytes) }?;
@@ -138,31 +131,32 @@ impl Gpu {
     /// builds them and throws them away; [`crate::Reducer`] keeps them. Both record the same
     /// sequence, and it lives here so there is one of it.
     ///
-    /// `workgroups` is one entry per pipeline, in the same order.
+    /// `steps` is one entry per pipeline, in the same order, each saying how many workgroups to
+    /// dispatch and how many bytes to hand it from the pass before.
     ///
     /// # Safety
     ///
     /// The pipelines and both buffers must be live, and the pipelines' descriptor sets must name
-    /// these buffers — a set built against different ones would read freed memory.
+    /// these buffers — a set built against different ones would read freed memory. Every
+    /// `copy_bytes` must be within both buffers.
     pub(crate) unsafe fn replay(
         &self,
         pipelines: &[Pipeline],
-        workgroups: &[u32],
+        steps: &[Step],
         source: &Buffer,
         destination: &Buffer,
-        bytes: u64,
     ) -> Result<(), Error> {
         // The duration `record_and_wait` reports is the host's view of the whole submission, which
         // is not what a chain's caller wants — `Gpu::sum` reports dispatch *counts* and leaves
         // timing to the examples. Discarded here rather than threaded out to nobody.
         let recorded = unsafe {
             self.record_and_wait(|device, command| {
-                for (index, (pipeline, groups)) in pipelines.iter().zip(workgroups).enumerate() {
-                    if index > 0 {
+                for (pipeline, step) in pipelines.iter().zip(steps) {
+                    if step.copy_bytes > 0 {
                         // The previous pass wrote `destination`; this one reads `source`. Both the
                         // copy and the dispatch after it wait on what came before.
                         barrier(device, command, TRANSFER_AFTER_SHADER);
-                        let region = [vk::BufferCopy::default().size(bytes)];
+                        let region = [vk::BufferCopy::default().size(step.copy_bytes)];
                         device.cmd_copy_buffer(command, destination.handle, source.handle, &region);
                         barrier(device, command, SHADER_AFTER_TRANSFER);
                     }
@@ -180,7 +174,7 @@ impl Gpu {
                         &[pipeline.descriptors()],
                         &[],
                     );
-                    device.cmd_dispatch(command, (*groups).max(1), 1, 1);
+                    device.cmd_dispatch(command, step.workgroups.max(1), 1, 1);
                 }
                 Ok(())
             })

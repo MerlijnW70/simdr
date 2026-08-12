@@ -12,8 +12,8 @@
 //! This file is the staging machinery: allocate three buffers, copy in, dispatch, copy out, tear
 //! down. [`run`] is the surface over it — one call per way a caller might spell its data. The rest
 //! are the pieces each of those needs: [`pipeline`] and [`specialization`] to build one, [`grid`]
-//! to say how many workgroups on how many axes, [`submit`] to record and wait, [`session`] and
-//! [`chain`] to keep things alive across calls.
+//! to say how many workgroups on how many axes, [`step`] to say what a chain hands each pass,
+//! [`submit`] to record and wait, [`session`] and [`chain`] to keep things alive across calls.
 
 mod bindings;
 mod chain;
@@ -23,16 +23,18 @@ mod placement;
 mod run;
 mod session;
 mod specialization;
+mod step;
 mod submit;
 mod timestamps;
 
-pub use chain::Pass;
 pub use grid::Grid;
 pub use placement::{MemoryType, Placement};
 pub use session::Session;
 pub use specialization::Specialization;
+pub use step::Pass;
 
 pub(crate) use pipeline::Pipeline;
+pub(crate) use step::Step;
 
 use crate::buffer::Buffer;
 use crate::{Error, Gpu};

@@ -246,22 +246,53 @@ into a closed form and the driver found it; `min(_, u32::MAX)` is the identity a
 the fold came back. Both were caught by running the loop at 64 iterations and at 512 and seeing the
 number not move. `notes/FINDINGS.md` has it under the heading that names it.
 
-## 1. The reduction chain copies the whole buffer between passes
+### 13. The chain's between-pass copy — **shortened, and the premise was wrong**
 
-`Gpu::replay` copies `bytes` from destination back to source after every fold, and `bytes` is the
-*original* buffer's size for all of them. A 15-fold reduction over 2²⁰ elements copies 4 MB fifteen
-times, and after the first fold all but 2¹⁹ of those elements are ones nobody will read again.
+`Gpu::replay` copied the whole buffer back after every fold. `Pass::writing` says how many words a
+pass produced and the copy is that long, which for a 15-fold reduction over 2²⁰ takes the traffic
+from 56 MB to 4 MB.
 
-The hypothesis is that this is most of what `Reducer::sum` still costs at large sizes — it is 5.0×
-faster than `Gpu::sum` over 8 192 elements and only 1.6× over 2²⁰, and a per-call setup saving does
-not explain a gap that *shrinks* with size. Copying that grows with size does.
+The item predicted this was most of what `Reducer::sum` still costs. It is not:
 
-The copy length is known at every step: the chain already knows how many elements each fold leaves.
-So this is arithmetic rather than architecture, and the measurement to beat is in
-`runner/examples/reducer.rs`.
+| where a held reduction over 4 MB goes | per call | share |
+| --- | --- | --- |
+| fourteen full-buffer copies — before | 385.6 µs | 22% |
+| the same fourteen, shortened — after | 274.3 µs | 16% |
+| host upload | 338.5 µs | 19% |
+| host download | 662.4 µs | 38% |
 
-**What would refute it:** the copy being a negligible share of a 1.9 ms reduction, in which case
-the 1.6× is the arithmetic and there is nothing here. Time the copies before shortening them.
+**And a fifth was not a fifth to be had.** End to end the change bought **85 µs**, because a
+whole-buffer step is 27.5 µs of which 19.0 µs is the two pipeline barriers around the copy and only
+8.6 µs is the data. The barriers stay whatever the copy carries. `notes/FINDINGS.md` has the third
+chain that separated them.
+
+Worth doing at 85 µs? Marginally, and it was worth *measuring* regardless — it is the only reason
+the two items below are known to be the real ones.
+
+## 1. The host round trip is 57% of a large reduction
+
+Upload 338 µs, download 662 µs, against a 1762 µs call. No kernel change touches either, and no
+amount of device-side cleverness will: the data has to arrive and the answer has to leave.
+
+Except that for most real uses it does not. A caller that reduces the *output of a previous
+dispatch* has its data on the device already, and one that feeds the total into another kernel does
+not need it on the host. `Reducer::sum` takes `&[f32]` and returns `f32`, so it forces both.
+
+What this needs is a shape, not an optimisation: something like `Reducer::sum_binding`, taking and
+leaving a device buffer, with `sum` as the convenience wrapper that copies. `Session` already
+proves the pieces exist. The measurement to beat is `runner/examples/reducer.rs`.
+
+## 2. The barriers are now the largest device-side item
+
+266 µs of the remaining 274 µs is fourteen pairs of pipeline barriers, at ~19 µs a pair. They are
+there because every pass reads the buffer the pass before it wrote, through a copy.
+
+A ping-pong across two descriptor sets — pass `n` reads A writes B, pass `n+1` reads B writes A —
+removes the copy entirely and one of the two barriers with it. `chain.rs` has said so in a comment
+since it was written; what is new is that the comment now has a number against it.
+
+**What would refute it:** the remaining barrier costing what both did, in which case the ping-pong
+buys the 8 µs of payload and nothing else. Time one barrier before removing the other.
 
 ---
 
@@ -293,8 +324,6 @@ has no z field, so that dispatch cannot be written by accident.
 ## Kept in view
 
 - **`Gpu::run` still assumes input length equals output length.** `run_bound` and `Session` do not.
-- **The chain copies the whole buffer between passes.** For a shrinking reduction that is mostly
-  copying elements nobody will read.
 - **`whole_subgroup!` is a macro in a codebase with no other macros.** It exists because the list
   of widths appeared in twelve places and a list in twelve places drifts. If a third width is ever
   added, that is the one line to change — which is the argument for it.

@@ -1391,3 +1391,65 @@ gate has nothing to mutate. A 100% score over them is not evidence of anything.
 What covers them is `runner/tests/plane.rs` and `runner/tests/occupancy.rs`, on a device, against
 host references. Worth saying out loud: a green mutation score is a statement about the mutants
 that were generated, and for some files that set is empty.
+
+## The between-pass copy was a fifth of a reduction, and most of that fifth was the barriers — 2026-08-12
+
+`notes/NEXT.md` proposed shortening the chain's between-pass copies, on the grounds that they were
+probably most of what `Reducer::sum` still costs at 2²⁰ elements, and said to time them first.
+`runner/examples/reducer.rs` now does. Every row below is a difference between two calls that
+differ in one thing, rather than a subtraction from an estimate.
+
+### Where a held reduction over 4 MB goes
+
+| | per call | share of 1762 µs |
+| --- | --- | --- |
+| fourteen full-buffer copies — what the chain did | 385.6 µs | 22% |
+| the same fourteen, shortened — what it does now | 274.3 µs | 16% |
+| host upload of the input | 338.5 µs | 19% |
+| host download of the output | 662.4 µs | 38% |
+
+**The hypothesis is refuted.** The copies were a fifth, not a majority. The majority is the host
+round trip, at 57% between the two — and no kernel change touches it. A caller whose data is
+already on the device pays neither.
+
+### And a fifth was not a fifth to be had
+
+Shortening the copies removed 52 of 56 MB of device-to-device traffic and the end-to-end time moved
+by **85 µs**, not by 385. The reason is in the same example, from a third chain: 61 empty passes
+copying **one word** each, which keeps every barrier and carries nothing.
+
+| one whole-buffer step | 27.5 µs |
+| --- | --- |
+| the two pipeline barriers around the copy | 19.0 µs |
+| the 4 MB itself | 8.6 µs |
+
+So a step is 69% barrier. Fourteen barrier pairs stay whatever the copies carry — a pass still has
+to wait for the one before it — and 385.6 − 274.3 = 111 µs is all the payload there was to remove.
+The observed 85 µs agrees with that within the spread, which is how the numbers are known to be
+describing the same thing.
+
+**What that points at.** The remaining 274 µs is 266 µs of barrier and 8 µs of data. A ping-pong
+across two descriptor sets removes the copy *and* one of the two barriers, and `chain.rs` has said
+so in a comment since it was written. That is now the largest device-side item, and the host
+transfers are twice it again.
+
+### The measurement had to be lengthened before it said anything
+
+The first version compared 15 passes against 1. Both cost about 2 ms, the difference was about a
+tenth of either, and the repeats were themselves about a tenth apart — so signal and noise were the
+same size. Two runs reported **188 µs and 337 µs for the same quantity**.
+
+Sixty-one passes makes the difference roughly half the measurement instead of a tenth. The repeats
+are no steadier; they simply no longer swamp what is being measured. That is the whole fix, and it
+is worth remembering as a shape: *a difference of two large numbers needs the difference to be
+large, not the numbers to be quiet.*
+
+### What guards the shortened copy
+
+A copy shorter than the next pass reads is not a slower answer, it is a wrong one — the tail holds
+whatever the source buffer held before, which on a reducer's second call is the first call's data.
+`runner/tests/reducer.rs` runs a reducer twice with different inputs at nine lengths, heavy first
+so a stale tail makes the answer too large rather than too small.
+
+It was checked by being broken: halving the declared output length fails **five** tests, including
+that one. A guard that has never fired is not known to be a guard.
