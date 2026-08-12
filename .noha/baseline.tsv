@@ -1,4 +1,0 @@
-# noha-core behavioral mutation-coverage baseline — the ratchet floor (may only shrink)
-runner/src/fuzz/generate.rs	56	<→<=	let clustered = lanes < subgroup;
-runner/src/fuzz/interpret/steps.rs	70	false→true	let takes = passed.get(invocation / width).copied().unwrap_or(false);
-runner/src/reduction.rs	105	/→*	modules.push((words, half as u32 / WORKGROUP_SIZE));

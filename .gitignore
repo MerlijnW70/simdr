@@ -1,24 +1,19 @@
 # Build output.
 /target/
 
-# The mutation gate's configuration and state.
+# The mutation gate's configuration and state are **not** here, and not by accident.
 #
-# **This machine's global gitignore excludes `noha.yaml` and `.noha/`**, and had been doing so
-# silently: the block below already said the baseline and the TIA table were kept, and neither had
-# ever been committed. `tests/integrity.rs` reads `noha.yaml` and compares its source list against
-# the tree in both directions, so without it that test cannot run from a clone at all — which is
-# the strongest argument for the file being in the repository rather than beside it.
+# This machine's global gitignore (`~/.config/git/ignore`) excludes `noha.yaml` and `.noha/` from
+# every repository on it, under the heading "local verification toolchain — never commit, in any
+# repository on this machine". That is policy, and a `!noha.yaml` negation in this file would
+# outrank it — which is exactly why there is not one.
 #
-# A negation in a repository's own `.gitignore` outranks `core.excludesFile`, which is why these
-# work. `!.noha/` has to come before the two directories below it: git will not re-include a file
-# whose parent directory is excluded, so the directory is un-excluded first and its scratch is
-# excluded again after.
-!noha.yaml
-!.noha/
-
-# The mutation tester's scratch, which is genuinely temporary. `.noha/baseline.tsv` is the floor a
-# run is measured against and `.noha/tia.tsv` is which test kills which mutant; both are worth more
-# to a reader who can see them than they cost in diff noise.
+# **The price, stated rather than worked around:** `tests/integrity.rs` reads `noha.yaml`, so a
+# fresh clone cannot run it, and the mutation gate's source list cannot be reviewed from the
+# repository. `README.md` says so where it describes the gate. The list lives beside the tree; ask
+# for it rather than assuming a clone is missing something.
+#
+# The scratch below is ignored on its own account, for anyone who does have the files locally.
 .noha/work/
 .noha/tmp/
 

@@ -1314,31 +1314,36 @@ happen. This is the third time in this file — a probe that measured allocation
 creation, a grid comparison that measured occupancy as addressing, and now a loop that was not
 there. Each was caught by the number being better than the mechanism could explain.
 
-## A test that could never have run from a clone — 2026-08-12
+## A test that cannot run from a clone, and that is the deal — 2026-08-12
 
 `tests/integrity.rs` reads `noha.yaml`, compares its source list against the tree in both
 directions, and fails when either has something the other does not. It has caught every file added
-in the last three sittings.
+in the last four sittings.
 
-It could not have run from a fresh clone, because `noha.yaml` was not in the repository. This
-machine's **global** gitignore excludes `noha.yaml` and `.noha/`, and a global exclusion is
-invisible from inside the project: `git status` is clean, the file is there, the test passes.
+It cannot run from a fresh clone, because `noha.yaml` is not in the repository and is not going to
+be. This machine's **global** gitignore excludes `noha.yaml` and `.noha/` from every repository on
+it, under the heading *"local verification toolchain — never commit, in any repository on this
+machine"*.
 
-The repository's own `.gitignore` had been asserting the opposite for months —
+Two things are worth carrying from that.
+
+**A global exclusion is invisible from inside a working tree.** The file is present, `git status`
+is clean, the test passes, and nothing distinguishes "tracked" from "there". `git ls-files <path>`
+is the whole check, and a test that reads a file it does not own has a second failure mode beside
+being wrong — being absent for the next reader.
+
+**A `!` negation in a repository's own `.gitignore` outranks `core.excludesFile`, so the policy is
+defeatable in one line — which is exactly why it should not be.** That line was written here and
+then removed: the exclusion is deliberate, the consequence is a price the policy chooses to pay,
+and the right response is to say so where a reader will look. `README.md` does, next to the
+description of the gate.
+
+The repository `.gitignore` had also been asserting the opposite for months —
 
 > `.noha/baseline.tsv` and `.noha/tia.tsv` are *not* ignored
 
-— and neither had ever been committed. A comment describing an intention that the tool it describes
-was silently overruling.
-
-The fix is three lines: `!noha.yaml` and `!.noha/` in the repository's own `.gitignore`, which
-outranks `core.excludesFile`, with the scratch directories re-excluded after. `!.noha/` has to come
-first, because git will not re-include a file whose parent directory is excluded.
-
-**The shape worth carrying:** a check that reads a file it does not own has a second failure mode
-beside being wrong — being absent. `git ls-files <the file>` is the whole test, and nothing in a
-working tree distinguishes "tracked" from "present" without asking.
-
+— which was never true, because the global rule had them the whole time. That comment is corrected;
+the files are still not committed.
 ## Two survivors the batched gate never reported — 2026-08-12
 
 The mutation gate is normally run scoped: `NOHA_ONLY` naming the files a piece of work touched.

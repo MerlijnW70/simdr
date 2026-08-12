@@ -233,10 +233,15 @@ current set of callers has an expiry date and does not say when.**
 
 ### The paperwork is checked too
 
-`tests/integrity.rs` reads `noha.yaml` — which is in the repository, and for three sittings was
-not: a *global* gitignore excluded it, which is invisible from inside a working tree where the file
-is present and `git status` is clean. The check ran here and could not have run from a clone. It
-compares the mutation tool's source list against the tree in both directions,
+`tests/integrity.rs` reads `noha.yaml`, **which is deliberately not in this repository** — a global
+gitignore keeps the local verification toolchain out of every repo on this machine. So that one
+test cannot run from a clone, and the mutation gate's source list cannot be reviewed from here. It
+is a price, it is chosen, and it is written down rather than worked around; the file lives beside
+the tree and is available on request. Worth knowing that a *global* exclusion is invisible from
+inside a working tree, where the file is present and `git status` is clean.
+
+What it does, when it can run: it compares the mutation tool's source list against the tree in both
+directions,
 holds the list of files deliberately *not* mutated with a reason for each, checks that each of
 those still contains the `unsafe` that excused it, and extracts every `Thing::member` written in
 backticks in `decisions/` and fails when the source no longer defines it. All of it because
