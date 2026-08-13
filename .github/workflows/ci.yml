@@ -1,0 +1,113 @@
+# Everything that can be checked without the two GPUs in the author's machine.
+#
+# Which is most of it. The emitter needs no device at all, and Mesa's lavapipe is a Vulkan
+# implementation that runs on the CPU — so `spirv-val`, the execution suite and the differential
+# fuzzer all run here, at three subgroup widths the hardware in that machine cannot report.
+#
+# What does NOT run here, and is stated rather than implied:
+#
+#   * widths 32 and 64, which need the RTX 4080 and the integrated Radeon;
+#   * the mutation gate, whose configuration is deliberately not in this repository — see
+#     `tests/integrity.rs`, whose config-dependent checks skip loudly when it is absent;
+#   * every measurement in `notes/FINDINGS.md`, none of which means anything on a shared runner.
+#
+# So a green run here is not the whole suite. It is the part that travels.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  emitter:
+    name: emitter — no device needed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # Denied rather than warned: the lint set in `runner/src/lib.rs` is part of the design, and
+      # a warning nobody reads is the state this project keeps finding things in. Not set for the
+      # MSRV job below, where an older compiler's warnings are not this repository's business.
+      - name: formatting
+        run: cargo fmt --all --check
+
+      - name: clippy
+        env:
+          RUSTFLAGS: -D warnings
+        run: cargo clippy --workspace --all-targets
+
+      # `spirv-val` is what the emitter's own suite validates against, and it is in the distro.
+      - name: install spirv-tools
+        run: sudo apt-get update && sudo apt-get install -y spirv-tools
+
+      - name: emitter tests
+        env:
+          SPIRV_VAL: /usr/bin/spirv-val
+        run: cargo test -p simdr
+
+      # The paperwork checks. Four of them skip here because `noha.yaml` is not in the repository;
+      # the ones that run are the ones that need no configuration, and they are the interesting
+      # half — see `tests/integrity.rs`.
+      - name: integrity
+        run: cargo test --test integrity
+
+  device:
+    name: lavapipe — widths 4, 8 and 16
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # llvmpipe's subgroup is its vector width over 32, and `minSubgroupSize` equals
+        # `maxSubgroupSize` at each setting — so the width is pinned rather than a default the
+        # driver may vary. 256 is the default and reports 8.
+        include:
+          - vector: 128
+            width: 4
+          - vector: 256
+            width: 8
+          - vector: 512
+            width: 16
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: install lavapipe and spirv-tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers vulkan-tools spirv-tools
+
+      - name: which device
+        env:
+          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+        run: cargo run -p simdr-cli -- list
+
+      # `--test-threads=1` is not optional at 128 or 512: lavapipe is unstable there under
+      # concurrent devices, and about 40% of parallel runs report a disagreement that does not
+      # reproduce. See README.
+      - name: runner tests at subgroup ${{ matrix.width }}
+        env:
+          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          LP_NATIVE_VECTOR_WIDTH: ${{ matrix.vector }}
+          SPIRV_VAL: /usr/bin/spirv-val
+        run: cargo test -p runner -- --test-threads=1
+
+  msrv:
+    name: the version Cargo.toml claims
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # `rust-version` was asserted in `Cargo.toml` and never tested against anything. It said
+      # 1.97 — the version that happened to be installed — and the workspace builds on 1.88, so
+      # the claim was nine releases too conservative and nobody could have known. This is what
+      # makes it a fact rather than a number.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.88"
+      - run: cargo check --workspace --all-targets

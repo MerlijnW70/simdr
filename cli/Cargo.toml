@@ -4,7 +4,7 @@ version = "0.0.0"
 edition = "2024"
 description = "Ask a device what simdr needs to know about it before a module can be built."
 license = "MIT OR Apache-2.0"
-rust-version = "1.97"
+rust-version = "1.88"
 
 # One path dependency and nothing from the registry. The emitter's `[dependencies]` stays empty;
 # this reaches Vulkan through `runner`, which is where the FFI and the `unsafe` already live.

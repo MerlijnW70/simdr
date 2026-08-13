@@ -553,11 +553,18 @@ and what it says about the width sweep: an out-of-bounds *read* is only an acces
 crosses a page, so the sweep catches this class when it is unlucky and the bounds check catches it
 always.
 
-**4. No CI and no pinned toolchain.** Every layer is run by hand on one machine that happens to
-have two GPUs at two widths. `rust-version = "1.97"` is asserted in `Cargo.toml` and never tested
-against anything. Most of the suite needs no GPU at all — the emitter's 324 tests and lavapipe at
-4, 8 and 16 all run on a CPU — so the automatable part is most of it. The device layers stay manual
-and that is worth saying out loud rather than leaving as an assumption about who runs what.
+**4. No CI and no pinned toolchain — done, and the MSRV was wrong by nine releases.**
+`.github/workflows/ci.yml` runs formatting, clippy at `-D warnings`, the emitter's suite against
+`spirv-val`, the integrity checks, and the whole runner suite on lavapipe at widths 4, 8 and 16.
+Widths 32 and 64 stay manual because they need the two GPUs, and the workflow says so rather than
+leaving it to be assumed.
+
+`rust-version` said **1.97** under a comment reading *"Measured, not assumed"*. It was neither: 1.97
+is the version that happened to be installed, and nothing had ever built the workspace with anything
+else. The true floor is **1.88**, where `if let` chains stabilised —
+`runner/src/fuzz/generate/coverage.rs` uses one and 1.87 fails on exactly that. Nine releases of
+users were excluded for no reason, and all 706 tests pass on 1.88. CI holds it there now, which is
+what makes the first word of that comment true.
 
 ### Tier 2 — the scan, and what it needs
 
@@ -627,9 +634,10 @@ its own heading.
 ten tests at width 64, undefined behaviour at 4 and 8. A third driver is where "portable" stops
 being a claim resting on two data points. Intel integrated is the cheap one.
 
-**13. Name the neighbours in the README.** "What this is not" points at rust-gpu for anyone who
-wants a real Rust-to-GPU compiler. For the narrower question — `Simd<T, N>` onto lanes — VectorWare
-is the closer comparison, and a reader deciding between approaches is better served by both.
+**13. Name the neighbours in the README — done.** "What this is not" now points at VectorWare
+beside rust-gpu, with what actually differs: they compile the `Simd` you already wrote, so one
+source targets three architectures; this is a builder that needs no compiler and works on stable.
+And with what they say about a smaller `N`, which is the case `ClusteredReduce` exists for.
 
 ---
 

@@ -319,6 +319,22 @@ $env:SIMDR_FUZZ_ROUNDS = "6000"              # search harder
 $env:NOHA_JOBS = "4"                         # the mutation gate drives the GPU; do not oversubscribe
 ```
 
+**Rust 1.88 or newer**, which is where `if let` chains stabilised. That number is checked rather
+than declared: `.github/workflows/ci.yml` builds the workspace with exactly it, because the version
+written there before was the one that happened to be installed and excluded nine releases of users
+for no reason.
+
+### What CI runs, and what it cannot
+
+Formatting, clippy at `-D warnings`, the emitter's suite against `spirv-val`, the integrity checks,
+and the **whole runner suite on lavapipe at widths 4, 8 and 16** — Mesa's CPU implementation needs
+no GPU, so most of the layers above travel to a shared runner.
+
+Three things do not, and the workflow lists them rather than leaving them to be assumed: **widths 32
+and 64**, which need the two devices in this machine; the **mutation gate**, whose configuration is
+deliberately not in this repository; and every **measurement** in `notes/FINDINGS.md`, none of which
+means anything on a shared runner. A green run there is the part that travels, not the whole suite.
+
 **`--workspace` on all of them.** This is a root package with a member, so leaving it off runs six
 suites of nineteen — which is how the mutation gate came to be measuring a fraction of the suite
 for weeks.
@@ -580,6 +596,17 @@ hand-done addressing is exactly what ten tests got wrong the first time a second
 - **Not a shader language.** There is no Rust-to-GPU compiler here. You write the kernel against
   `Kernel` and `Lanes`, in Rust, and get SPIR-V words out. If you want to compile arbitrary Rust to
   the GPU, that is [rust-gpu](https://github.com/Rust-GPU/rust-gpu) and it is a much larger thing.
+- **Not `core::simd`.** The nearest neighbour on the narrower question — lowering `Simd<T, N>` onto
+  subgroup lanes — is [VectorWare](https://www.vectorware.com/blog/simd-on-gpu/), which is building
+  it as a compiler backend consuming Rust's own portable SIMD. Their premise is this one: *"a warp
+  issues one instruction, and each of its 32 lanes runs that instruction on its own data"*. The
+  difference is where the code comes from. They compile the `Simd` you already wrote, so one source
+  targets x86-64, Arm and a GPU; here you write against a builder and get words out, which is a
+  smaller thing that needs no compiler and works on stable.
+
+  Their post is honest about the same hard part `decisions/DR-0002` is about — what to do when `N`
+  is not the width — and describes idling lanes for a smaller `N`. That is the case a
+  `ClusteredReduce` exists for, and it is why the three mappings are named rather than implied.
 - **Not portable across subgroup widths.** A module is built for one width, deliberately and
   visibly. That is what the hardware is. **Five widths have been run** — 32 on an RTX 4080, 64 on an
   integrated Radeon in the same machine, and 4, 8 and 16 on lavapipe, whose subgroup follows

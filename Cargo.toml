@@ -4,10 +4,17 @@ version = "0.0.0"
 edition = "2024"
 description = "SIMD on the GPU: portable-SIMD semantics lowered onto SPIR-V subgroup operations."
 license = "MIT OR Apache-2.0"
-# Measured, not assumed: this is what is installed and what the code is held to. Emitting a binary
-# format needs nothing newer, and staying on stable is the point of not building on rust-gpu —
-# that route pins nightly-2026-04-11.
-rust-version = "1.97"
+# **Measured, and it used to say that while being neither.** This read 1.97 — the version that
+# happened to be installed — with a comment claiming it was measured. Nothing had ever built the
+# workspace with anything else, so it excluded nine releases' worth of users for no reason.
+#
+# 1.88 is where `if let` chains stabilised, and `runner/src/fuzz/generate/coverage.rs` uses one.
+# 1.87 fails on exactly that and nothing else. CI holds this to it now, which is what makes the
+# first word of this comment true.
+#
+# Staying on stable at all is the point of not building on rust-gpu — that route pins
+# nightly-2026-04-11.
+rust-version = "1.88"
 
 # ZERO dependencies. Emitting SPIR-V is pure computation: words in, words out. Nothing here needs
 # to reach the outside world, so nothing here may take a crate to do it. Running the result *does*
