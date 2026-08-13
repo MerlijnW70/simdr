@@ -76,6 +76,9 @@ impl Buffer {
     /// ~370 MB/s on a bus good for tens of gigabytes. `preferred` is what makes the better type
     /// win where it exists, without refusing a device that has no such type at all.
     pub(crate) unsafe fn staging(gpu: &Gpu, bytes: u64) -> Result<Self, Error> {
+        // SAFETY: `preferring` asks exactly what this function's own contract asks — a live device
+        // and a caller who will destroy what comes back. Forwarding discharges nothing, so there
+        // is nothing new to argue here beyond that the two contracts are the same one.
         unsafe {
             Self::preferring(
                 gpu,
@@ -104,8 +107,12 @@ impl Buffer {
             | vk::BufferUsageFlags::TRANSFER_SRC
             | vk::BufferUsageFlags::TRANSFER_DST;
 
+        // SAFETY: as `staging` — `new` asks what this function's contract already asks, and the
+        // fallback below is the same call with different flags, so it inherits the same argument.
         match unsafe { Self::new(gpu, bytes, usage, vk::MemoryPropertyFlags::DEVICE_LOCAL) } {
             Ok(buffer) => Ok(buffer),
+            // SAFETY: as immediately above. Nothing was allocated by the failed attempt — `new`
+            // destroys the buffer it created before returning an error — so this starts clean.
             Err(Error::NoHostVisibleMemory) => unsafe {
                 Self::new(
                     gpu,
@@ -153,6 +160,7 @@ impl Buffer {
             | vk::BufferUsageFlags::TRANSFER_SRC
             | vk::BufferUsageFlags::TRANSFER_DST;
 
+        // SAFETY: as `staging` — the same contract forwarded to the same function.
         match unsafe {
             Self::preferring(
                 gpu,
@@ -164,6 +172,8 @@ impl Buffer {
         } {
             Ok(buffer) => Ok(buffer),
             // No device-local type at all: same fallback as `device_local`, for the same reason.
+            // SAFETY: `device_local` asks the same of its caller as this does, and the failed
+            // attempt above left nothing allocated to leak.
             Err(Error::NoHostVisibleMemory) => unsafe { Self::device_local(gpu, bytes) },
             Err(other) => Err(other),
         }
@@ -180,6 +190,8 @@ impl Buffer {
         usage: vk::BufferUsageFlags,
         wanted: vk::MemoryPropertyFlags,
     ) -> Result<Self, Error> {
+        // SAFETY: as `staging`. An empty `preferred` asks for no tiebreak, which is a value
+        // rather than a weaker precondition.
         unsafe { Self::preferring(gpu, bytes, usage, wanted, vk::MemoryPropertyFlags::empty()) }
     }
 
@@ -205,8 +217,12 @@ impl Buffer {
             .size(bytes)
             .usage(usage)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        // SAFETY: the device outlives this call — the caller holds the `Gpu` that owns it — and
+        // `info` describes a buffer with no external handles or queue families to get wrong.
         let handle = unsafe { device.create_buffer(&info, None) }?;
 
+        // SAFETY: `handle` was created immediately above by this device and has not been
+        // destroyed, which is all this query requires of it.
         let requirements = unsafe { device.get_buffer_memory_requirements(handle) };
         let permitted = requirements.memory_type_bits;
 
@@ -233,6 +249,9 @@ impl Buffer {
             let allocation = vk::MemoryAllocateInfo::default()
                 .allocation_size(requirements.size)
                 .memory_type_index(memory_type);
+            // SAFETY: the size comes from the device's own requirements for this buffer and the
+            // type index from `memory_type`, which only ever returns indices the device reported
+            // and that `requirements.memory_type_bits` permits for it.
             match unsafe { device.allocate_memory(&allocation, None) } {
                 Ok(memory) => allocated = Some((memory, offered)),
                 Err(result) => refusal = Error::Vulkan(result),
@@ -240,11 +259,17 @@ impl Buffer {
         }
 
         let Some((memory, offered)) = allocated else {
+            // SAFETY: the buffer was created above, nothing was ever bound to it — every
+            // allocation attempt failed — and nothing else holds the handle.
             unsafe { device.destroy_buffer(handle, None) };
             return Err(refusal);
         };
 
+        // SAFETY: both handles are this device's and were made above; the memory is freshly
+        // allocated, so nothing is bound to it yet, and its size is the buffer's own requirement.
         if let Err(result) = unsafe { device.bind_buffer_memory(handle, memory, 0) } {
+            // SAFETY: the bind failed, so nothing refers to either object and neither has been
+            // handed to a caller. Freeing memory that nothing is bound to is the ordinary case.
             unsafe {
                 device.free_memory(memory, None);
                 device.destroy_buffer(handle, None);
@@ -341,6 +366,9 @@ impl Buffer {
         }
 
         let device = gpu.device();
+        // SAFETY: the memory is this buffer's own and is host-visible — the check above refused
+        // it otherwise — and it is not already mapped: every mapping in this file is unmapped
+        // before the function that made it returns.
         let mapped =
             unsafe { device.map_memory(self.memory, 0, self.bytes, vk::MemoryMapFlags::empty()) }?;
 
@@ -378,6 +406,7 @@ impl Buffer {
         }
 
         let device = gpu.device();
+        // SAFETY: as the write side — this buffer's own host-visible memory, not already mapped.
         let mapped =
             unsafe { device.map_memory(self.memory, 0, self.bytes, vk::MemoryMapFlags::empty()) }?;
 
@@ -397,6 +426,9 @@ impl Buffer {
     /// Nothing may still be using it.
     pub(crate) unsafe fn destroy(self, gpu: &Gpu) {
         let device = gpu.device();
+        // SAFETY: `self` is taken by value, so no other `Buffer` names these handles, and this
+        // function's own contract says nothing is still using them. The buffer goes before the
+        // memory it is bound to, which is the order Vulkan requires.
         unsafe {
             device.destroy_buffer(self.handle, None);
             device.free_memory(self.memory, None);

@@ -129,6 +129,10 @@ pub(super) unsafe fn supported(
         features = features.push_next(&mut dot_product);
     }
 
+    // SAFETY: `physical` belongs to `instance`, which is this function's stated precondition, and
+    // every struct in the `push_next` chain is a local that outlives the call. Only structs whose
+    // extension the device reported were chained in above — asking for one it does not have is
+    // what this filtering exists to avoid.
     unsafe { instance.get_physical_device_features2(physical, &mut features) };
 
     // The core features are copied out at the chain's last use, and only then can the chained
@@ -139,6 +143,8 @@ pub(super) unsafe fn supported(
     // Whether the packed form is *accelerated* is a device **property**, not a feature, so it
     // arrives through a different call — and it is worth asking only if the instruction exists.
     let packed_dot_accelerated =
+        // SAFETY: `packed_dot_is_accelerated` asks what this function's own contract already
+        // asks — that `physical` belong to `instance`.
         integer_dot_product && unsafe { packed_dot_is_accelerated(instance, physical) };
 
     Narrow {
@@ -171,6 +177,8 @@ unsafe fn packed_dot_is_accelerated(
         // Scoped, so the chain's borrow of `dot` ends before `dot` is read. A `drop` would not do
         // it — the struct is `Copy`, so dropping a copy releases nothing.
         let mut properties = vk::PhysicalDeviceProperties2::default().push_next(&mut dot);
+        // SAFETY: `physical` belongs to `instance` by this function's contract, and `dot` is a
+        // local the chain borrows for no longer than this scope.
         unsafe { instance.get_physical_device_properties2(physical, &mut properties) };
     }
 

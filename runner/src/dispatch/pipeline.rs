@@ -42,6 +42,8 @@ impl Pipeline {
         let bindings: Vec<vk::DescriptorSetLayoutBinding<'_>> =
             (0..count).map(storage_binding).collect();
         let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+        // SAFETY: the device outlives this call, and `bindings` — which the info borrows — is a
+        // local that outlives it too. `Pipeline::destroy` releases what is created here.
         let set_layout = unsafe { device.create_descriptor_set_layout(&layout_info, None) }?;
 
         let sizes = [vk::DescriptorPoolSize::default()
@@ -50,12 +52,16 @@ impl Pipeline {
         let pool_info = vk::DescriptorPoolCreateInfo::default()
             .max_sets(1)
             .pool_sizes(&sizes);
+        // SAFETY: as above; `sizes` is a local the info borrows for the length of the call, and
+        // the pool is sized for exactly the one set allocated from it below.
         let descriptor_pool = unsafe { device.create_descriptor_pool(&pool_info, None) }?;
 
         let set_layouts = [set_layout];
         let allocate = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(descriptor_pool)
             .set_layouts(&set_layouts);
+        // SAFETY: the pool was created immediately above with room for one set, and the layout is
+        // the one created above from the same binding count.
         let sets = unsafe { device.allocate_descriptor_sets(&allocate) }?;
         let descriptors = sets.first().copied().ok_or(Error::NoPipeline)?;
 
@@ -71,12 +77,18 @@ impl Pipeline {
             .enumerate()
             .map(|(binding, info)| storage_write(descriptors, binding as u32, info))
             .collect();
+        // SAFETY: `writes` points into `infos`, which is still in scope, and each info names a
+        // buffer the caller supplied and guaranteed live. The descriptor set is not in use by any
+        // submission — it was allocated a few lines ago and has not been bound.
         unsafe { device.update_descriptor_sets(&writes, &[]) };
 
         let module_info = vk::ShaderModuleCreateInfo::default().code(spirv);
+        // SAFETY: the device is live and `spirv` outlives the call. The words are handed over
+        // untouched, which is the whole point — see the crate doc on why this is not `wgpu`.
         let shader = unsafe { device.create_shader_module(&module_info, None) }?;
 
         let layout_info = vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts);
+        // SAFETY: `set_layouts` holds the layout created above and outlives the call.
         let layout = unsafe { device.create_pipeline_layout(&layout_info, None) }?;
 
         // Declared before the stage that borrows them, and left in scope until the pipeline is
@@ -101,6 +113,9 @@ impl Pipeline {
         let pipeline_info = vk::ComputePipelineCreateInfo::default()
             .stage(stage)
             .layout(layout);
+        // SAFETY: the shader module and layout were created above and are still live, and the
+        // specialization info points into `entries` and `data`, which are held in scope for
+        // exactly this reason — a temporary would be freed while the driver held its address.
         let pipelines = unsafe {
             device.create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
         }
@@ -139,6 +154,10 @@ impl Pipeline {
     /// No submission using this may still be in flight.
     pub(crate) unsafe fn destroy(self, gpu: &Gpu) {
         let device = gpu.device();
+        // SAFETY: `self` is taken by value, so nothing else names these handles, and the caller's
+        // contract says no submission using them is in flight. The pipeline goes before the layout
+        // and module it was built from, and the descriptor pool before the set layout — destroying
+        // a pool frees the sets allocated from it, which is why those are not released separately.
         unsafe {
             device.destroy_pipeline(self.handle, None);
             device.destroy_pipeline_layout(self.layout, None);

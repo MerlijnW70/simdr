@@ -39,6 +39,8 @@ impl Timestamps {
         let info = vk::QueryPoolCreateInfo::default()
             .query_type(vk::QueryType::TIMESTAMP)
             .query_count(2);
+        // SAFETY: the device outlives this call, and this function's own contract puts the
+        // matching `destroy` before it goes away. Two queries is what `begin` and `end` write.
         let pool = unsafe { gpu.device().create_query_pool(&info, None) }?;
 
         Ok(Some(Self { pool, period }))
@@ -54,6 +56,9 @@ impl Timestamps {
     /// `command` must be a command buffer in the recording state.
     pub(super) unsafe fn begin(&self, gpu: &Gpu, command: vk::CommandBuffer) {
         let device = gpu.device();
+        // SAFETY: `command` is in the recording state, which this function's contract requires,
+        // and the pool is this object's own — created with exactly the two queries indexed here.
+        // The reset is recorded rather than assumed: a pool's contents are undefined until it is.
         unsafe {
             device.cmd_reset_query_pool(command, self.pool, 0, 2);
             device.cmd_write_timestamp(command, vk::PipelineStageFlags::TOP_OF_PIPE, self.pool, 0);
@@ -66,6 +71,8 @@ impl Timestamps {
     ///
     /// As [`Timestamps::begin`], and after it.
     pub(super) unsafe fn end(&self, gpu: &Gpu, command: vk::CommandBuffer) {
+        // SAFETY: as `begin`, and query 1 is the second of the two the pool was created with —
+        // reset by the `begin` this function's contract says came first.
         unsafe {
             gpu.device().cmd_write_timestamp(
                 command,
@@ -83,6 +90,9 @@ impl Timestamps {
     /// The fence for the submission that wrote these must have been waited on.
     pub(super) unsafe fn read(&self, gpu: &Gpu) -> Result<Option<Duration>, Error> {
         let mut ticks = [0_u64; 2];
+        // SAFETY: the submission that wrote these has been waited on, which this function's
+        // contract requires, so both queries are available. `ticks` is two `u64`s for the two
+        // queries the pool holds, which is what `TYPE_64` says they are.
         unsafe {
             gpu.device().get_query_pool_results(
                 self.pool,
@@ -111,6 +121,8 @@ impl Timestamps {
     ///
     /// No submission using it may still be in flight.
     pub(super) unsafe fn destroy(self, gpu: &Gpu) {
+        // SAFETY: `self` is taken by value so nothing else names this pool, and the caller's
+        // contract says no submission using it is still in flight.
         unsafe { gpu.device().destroy_query_pool(self.pool, None) };
     }
 }

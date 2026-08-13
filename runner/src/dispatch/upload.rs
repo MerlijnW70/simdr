@@ -32,6 +32,8 @@ pub(crate) unsafe fn deliver<'a>(
     staging: &'a Buffer,
     source: &'a Buffer,
 ) -> Result<Option<Staged<'a>>, Error> {
+    // SAFETY: `route` and `Buffer::write` ask exactly what this function's own contract asks —
+    // live buffers, big enough, device idle with respect to them. Nothing new is discharged here.
     unsafe {
         route(staging, source, words.len(), |target| {
             target.write(gpu, words)
@@ -50,6 +52,8 @@ pub(crate) unsafe fn deliver_floats<'a>(
     staging: &'a Buffer,
     source: &'a Buffer,
 ) -> Result<Option<Staged<'a>>, Error> {
+    // SAFETY: as `deliver`. `write_floats` differs from `write` only in how it reads the
+    // caller's slice, and both write the same number of bytes for the same number of elements.
     unsafe {
         route(staging, source, values.len(), |target| {
             target.write_floats(gpu, values)

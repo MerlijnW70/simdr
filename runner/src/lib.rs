@@ -26,8 +26,18 @@
 // an `unsafe fn` body is not automatically an unsafe block, so every FFI call names itself and
 // carries its own `SAFETY` note. That convention is why the audit of those notes was possible at
 // all, and why it found the one that had stopped being true.
+// `undocumented_unsafe_blocks` is the half of that convention which was not being checked. Every
+// `unsafe fn` here carried a `# Safety` clause and most of the blocks inside them carried nothing,
+// which is the wrong way round: the clause is what a *caller* owes, and the note is what the
+// callee's own reasoning was. There were 79 of the latter missing.
+//
+// The temptation was to collapse each function's blocks into one and write one note. That would
+// have deleted the granularity this crate says above is what made an audit of these possible at
+// all — and that audit found a note which had stopped being true. So the notes were written
+// instead, one per block, and where two calls share an argument they now share a block as well.
 #![deny(missing_docs)]
 #![deny(clippy::unwrap_used, clippy::panic)]
+#![deny(clippy::undocumented_unsafe_blocks)]
 
 mod buffer;
 mod device;

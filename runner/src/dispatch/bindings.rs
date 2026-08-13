@@ -105,6 +105,9 @@ impl Gpu {
                 return Err(Error::NoPipeline);
             };
             let bytes = (words.len().max(1) * size_of::<u32>()) as u64;
+            // SAFETY: both buffers were allocated by the caller of this function and are live for
+            // it; the staging buffer was sized to the largest input, so `words` fits. `copy` waits
+            // on its own fence, so the next iteration's write cannot overlap this one's copy.
             unsafe {
                 staging.write(self, words)?;
                 self.copy(staging, target, bytes)?;
@@ -116,10 +119,16 @@ impl Gpu {
             .zip(sizes)
             .map(|(buffer, &bytes)| (buffer, bytes))
             .collect();
+        // SAFETY: every buffer in `bound` is the caller's, live for this call, and no longer
+        // being written — the uploads above each waited on a fence.
         let pipeline =
             unsafe { Pipeline::new(self, spirv, &bound, &super::Specialization::none()) }?;
 
+        // SAFETY: the pipeline was built immediately above and outlives the submission, which
+        // `dispatch` waits for before returning.
         let dispatched = unsafe { self.dispatch(&pipeline, super::Grid::linear(workgroups), 1) };
+        // SAFETY: that wait means no submission using the pipeline is still in flight. Destroyed
+        // before `dispatched` is unwrapped so that a failed dispatch leaks nothing.
         unsafe { pipeline.destroy(self) };
         dispatched?;
 
@@ -127,6 +136,8 @@ impl Gpu {
             return Err(Error::NoPipeline);
         };
         let bytes = (output_len * size_of::<u32>()) as u64;
+        // SAFETY: the dispatch completed above, so the output buffer holds the kernel's whole
+        // result; `copy` then waits before `read` maps the staging buffer it filled.
         unsafe {
             self.copy(output, staging, bytes)?;
             staging.read(self, output_len)

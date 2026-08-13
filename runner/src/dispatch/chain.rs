@@ -135,6 +135,9 @@ impl Gpu {
             // The buffer pair alternates, which is the whole ping-pong: this pipeline's descriptor
             // set is what decides which end the pass reads.
             let (read, written) = Ends::of(index).order(source, destination);
+            // SAFETY: this function's contract says the buffers are live and the device idle with
+            // respect to them, which is what pointing descriptors at them requires. Every pipeline
+            // built here is destroyed before returning, on both the error and the success path.
             match unsafe {
                 Pipeline::new(
                     self,
@@ -146,6 +149,8 @@ impl Gpu {
                 Ok(pipeline) => pipelines.push(pipeline),
                 Err(error) => {
                     for pipeline in pipelines {
+                        // SAFETY: nothing was submitted — the failure happened while building, so
+                        // none of these has ever been dispatched.
                         unsafe { pipeline.destroy(self) };
                     }
                     return Err(error);
@@ -166,6 +171,8 @@ impl Gpu {
         // One submission for the upload, the chain and the answer together. These were three, and
         // on a device with memory both sides can reach the upload is not even one of them —
         // `deliver` has already put the input into `source` and handed back `None`.
+        // SAFETY: every pipeline in `pipelines` was built above and is still live, the buffers are
+        // the caller's and outlive the call, and `replay` waits on its fence before returning.
         let recorded = unsafe {
             self.replay(
                 &pipelines,
@@ -179,9 +186,12 @@ impl Gpu {
             )
         };
 
+        // SAFETY: `replay` waited on the submission that wrote it, so the answer is in staging
+        // rather than still in flight — which is exactly what `Buffer::read` asks.
         let output = recorded.and_then(|()| unsafe { staging.read(self, count) });
 
         for pipeline in pipelines {
+            // SAFETY: the one submission that used them has completed, as above.
             unsafe { pipeline.destroy(self) };
         }
         output
@@ -253,6 +263,9 @@ impl Gpu {
         // The duration `record_and_wait` reports is the host's view of the whole submission, which
         // is not what a chain's caller wants — `Gpu::sum` reports dispatch *counts* and leaves
         // timing to the examples. Discarded here rather than threaded out to nobody.
+        // SAFETY: `record_and_wait` asks that whatever the closure names outlive the submission.
+        // It names the pipelines and the buffers in `before`/`after`, all of which are the
+        // caller's and live for this call by its own contract, and the wait happens inside.
         let recorded = unsafe {
             self.record_and_wait(|device, command| {
                 if let Some(upload) = before {

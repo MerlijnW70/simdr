@@ -129,6 +129,9 @@ impl Gpu {
         iterations: u32,
         specialization: &Specialization,
     ) -> Result<(Vec<u32>, Duration), Error> {
+        // SAFETY: this function's own contract says the buffers are live and the device idle with
+        // respect to them, which is what `Pipeline::new` needs of the ones it points descriptors
+        // at. The pipeline is destroyed at the end of this function.
         let pipeline = unsafe {
             Pipeline::new(
                 self,
@@ -140,13 +143,23 @@ impl Gpu {
 
         // Upload: the host's words are already in `staging`; copy them where the kernel can see
         // them. Untimed, because a benchmark of PCIe is not what anyone asked for.
+        // SAFETY: both buffers are the caller's, alive for this call, and nothing is using them —
+        // `copy` waits on its own fence before returning, so the dispatch below cannot overlap it.
         unsafe { self.copy(staging, source, bytes) }?;
 
+        // SAFETY: the pipeline was built above and outlives the submission, which `dispatch` waits
+        // for before returning.
         let elapsed = unsafe { self.dispatch(&pipeline, grid, iterations) }?;
 
+        // SAFETY: as the upload copy. The dispatch has completed — it waited on its fence — so the
+        // destination holds the kernel's output rather than a partial write.
         unsafe { self.copy(destination, staging, bytes) }?;
+        // SAFETY: the copy above waited on its fence, so the staging buffer holds the whole
+        // result, which is exactly what `Buffer::read` asks of its caller.
         let output = unsafe { staging.read(self, count) }?;
 
+        // SAFETY: every submission that used this pipeline waited on a fence before returning, so
+        // none is in flight.
         unsafe { pipeline.destroy(self) };
         Ok((output, elapsed))
     }
@@ -163,6 +176,9 @@ impl Gpu {
         iterations: u32,
     ) -> Result<Duration, Error> {
         let (x, y) = grid.counts();
+        // SAFETY: `record_and_wait` asks that whatever the closure names outlive the submission.
+        // It names only `pipeline`, which this function's contract says is live, and the call
+        // waits for the submission before returning.
         unsafe {
             self.record_and_wait(|device, command| {
                 device.cmd_bind_pipeline(

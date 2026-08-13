@@ -128,6 +128,8 @@ impl Gpu {
         let names = unsafe { guard.enumerate_physical_devices() }?
             .into_iter()
             .filter(|&physical| {
+                // SAFETY: as the enumeration above — the guard holds the instance live for this
+                // whole block, and `physical` is a handle that enumeration just returned.
                 let families =
                     unsafe { guard.get_physical_device_queue_family_properties(physical) };
                 families.iter().any(|family| {
@@ -135,6 +137,8 @@ impl Gpu {
                 })
             })
             .map(|physical| {
+                // SAFETY: as above, and a physical device handle needs no destruction — it is
+                // owned by the instance, not by this.
                 let properties = unsafe { guard.get_physical_device_properties(physical) };
                 properties
                     .device_name_as_c_str()
@@ -213,12 +217,15 @@ unsafe fn open_on(
     instance: Guard,
     pattern: Option<&str>,
 ) -> Result<Gpu, Error> {
+    // SAFETY: this function's own contract says the instance is live, and the guard keeps it so
+    // until it is either released into a `Gpu` or destroyed on the way out.
     let candidates = unsafe { instance.enumerate_physical_devices() }?;
     let wanted = pattern.map(str::to_lowercase);
 
     let Some((physical, queue_family)) = candidates
         .into_iter()
         .filter_map(|physical| {
+            // SAFETY: live instance as above, and `physical` came from its own enumeration.
             let families =
                 unsafe { instance.get_physical_device_queue_family_properties(physical) };
             let family = families.iter().position(|family| {
@@ -232,6 +239,7 @@ unsafe fn open_on(
             let Some(wanted) = wanted.as_deref() else {
                 return true;
             };
+            // SAFETY: as above.
             let properties = unsafe { instance.get_physical_device_properties(physical) };
             properties
                 .device_name_as_c_str()
@@ -240,6 +248,7 @@ unsafe fn open_on(
         // Prefer a discrete GPU when nothing was asked for. With a pattern this still applies, and
         // only among the devices that matched it.
         .max_by_key(|&(physical, _)| {
+            // SAFETY: as above.
             let properties = unsafe { instance.get_physical_device_properties(physical) };
             u8::from(properties.device_type == vk::PhysicalDeviceType::DISCRETE_GPU)
         })
@@ -247,11 +256,14 @@ unsafe fn open_on(
         return Err(Error::NoComputeDevice);
     };
 
+    // SAFETY: live instance, and `physical` is one of the handles it enumerated.
     let memory_properties = unsafe { instance.get_physical_device_memory_properties(physical) };
 
     // Which of the narrow-type extensions this device has. Enabling one it does not have is a
     // failed `create_device`, so the list is filtered rather than assumed — and the same query
     // decides what `Limits` reports, so the two cannot drift apart.
+    // SAFETY: as above. The device has not been created yet, which is exactly when this must be
+    // asked — enabling an extension the device does not have is a failed `create_device`.
     let available = unsafe { instance.enumerate_device_extension_properties(physical) }?;
     let offers = |wanted: &CStr| {
         available
@@ -266,7 +278,10 @@ unsafe fn open_on(
     // is fewer lines and does not compile: the chain holds a mutable borrow of each struct for as
     // long as the chain lives, so nothing can read a flag out of one until the create call is
     // done with it.
+    // SAFETY: both ask only that `physical` belong to a live `instance`, which is this function's
+    // own precondition and the guard's job for as long as it holds one.
     let narrow = unsafe { narrow::supported(&instance, physical, &offers) };
+    // SAFETY: as above, and `queue_family` is the index chosen from this same device's families.
     let limits = unsafe { describe(&instance, physical, queue_family, narrow) };
 
     let (mut storage8, mut storage16, mut float16int8, mut extended_types, mut dot_product) =
@@ -302,7 +317,12 @@ unsafe fn open_on(
         // chain is used; `enabled_features` must stay null, and setting both is invalid.
         .push_next(&mut features);
 
+    // SAFETY: the instance is live, `physical` is one of its devices, and every extension named
+    // in `names` was filtered against what this device reported — enabling one it lacks is the
+    // failure this avoids. The feature chain borrows structs that all outlive the call.
     let device = unsafe { instance.create_device(physical, &device_info, None) }?;
+    // SAFETY: the device was created immediately above with exactly one queue of this family, so
+    // index 0 is the queue that was asked for and it exists.
     let queue = unsafe { device.get_device_queue(queue_family, 0) };
 
     Ok(Gpu {
@@ -330,6 +350,8 @@ unsafe fn describe(
 ) -> Limits {
     let mut subgroup = vk::PhysicalDeviceSubgroupProperties::default();
     let mut properties = vk::PhysicalDeviceProperties2::default().push_next(&mut subgroup);
+    // SAFETY: `physical` belongs to `instance`, which is this function's stated precondition, and
+    // `properties` holds the subgroup struct alive through the `push_next` chain for the call.
     unsafe { instance.get_physical_device_properties2(physical, &mut properties) };
 
     // Copied out first: `push_next` keeps `properties` holding a mutable borrow of `subgroup`, so
@@ -353,6 +375,8 @@ unsafe fn describe(
     // Timestamps need two things and both are optional: a non-zero period on the device, and a
     // queue family that reports valid bits. A queue with zero valid bits accepts the write and
     // returns nothing useful, which is worse than refusing.
+    // SAFETY: as above — the device belongs to the instance and the query allocates nothing this
+    // has to release.
     let families = unsafe { instance.get_physical_device_queue_family_properties(physical) };
     let valid_bits = families
         .get(queue_family as usize)
