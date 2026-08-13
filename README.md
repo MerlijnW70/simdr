@@ -263,18 +263,32 @@ current set of callers has an expiry date and does not say when.**
 ### The paperwork is checked too
 
 `tests/integrity.rs` reads `noha.yaml`, **which is deliberately not in this repository** — a global
-gitignore keeps the local verification toolchain out of every repo on this machine. So that one
-test cannot run from a clone, and the mutation gate's source list cannot be reviewed from here. It
-is a price, it is chosen, and it is written down rather than worked around; the file lives beside
-the tree and is available on request. Worth knowing that a *global* exclusion is invisible from
-inside a working tree, where the file is present and `git status` is clean.
+gitignore keeps the local verification toolchain out of every repo on this machine, and a *global*
+exclusion is invisible from inside a working tree, where the file is present and `git status` is
+clean. It is a price, it is chosen, and it is written down rather than worked around.
 
-What it does, when it can run: it compares the mutation tool's source list against the tree in both
-directions,
-holds the list of files deliberately *not* mutated with a reason for each, checks that each of
-those still contains the `unsafe` that excused it, and extracts every `Thing::member` written in
-backticks in `decisions/` and fails when the source no longer defines it. All of it because
-hand-maintained lists had drifted while reporting green.
+That used to mean four of those tests **panicked** on any clone, which is the same failure the file
+exists to catch: a check that reported green for a reason that did not travel. They skip loudly now,
+naming themselves, the way the GPU harness reports a missing device. `cargo test --workspace` from a
+clone passes.
+
+What still runs without the config is the more interesting half, because the excuse is "this file is
+FFI, so it contains `unsafe`" and **both directions of that are checkable**:
+
+- every excused file still exists and still contains the `unsafe` that excused it — an expired
+  excuse costs coverage;
+- every file containing `unsafe` **is** excused — unsafe code left inside the gate costs the
+  mutation run itself, because a mutant that passes a wrong handle or frees twice kills the process
+  instead of failing a test. That direction was missing, and it is the rule this project had already
+  applied by hand three times: `dispatch/step.rs` split out of `chain.rs`, `reduction/plan.rs` out of
+  `held.rs`, `step::upload_bytes` out of `dispatch/upload.rs` — each so a decision would sit in a
+  file with no `unsafe` and therefore inside the gate. Nothing enforced the shape until now;
+- the emitter still declares `#![forbid(unsafe_code)]`, which is the one line the whole arrangement
+  rests on;
+- and every `Thing::member` written in backticks in `decisions/` still exists in the source.
+
+With the config present it also compares the mutation tool's source list against the tree in both
+directions. All of it because hand-maintained lists had drifted while reporting green.
 
 ---
 

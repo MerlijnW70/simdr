@@ -514,15 +514,19 @@ the work would make this project's central claim true for both of its algorithms
 
 ### Tier 1 — things that are actually wrong
 
-**1. A fresh clone cannot run the test suite.** `tests/integrity.rs` reads `noha.yaml` with an
-`expect`, and `noha.yaml` is excluded by a global ignore covering every repository on this machine.
-Three of that binary's five tests therefore panic on any clone — including CI, and including this
-machine after a reinstall. The suite is green here for a reason that does not travel.
+**1. A fresh clone cannot run the test suite — done.** Four of `tests/integrity.rs`'s five tests
+panicked on any clone, because they `expect`ed a `noha.yaml` that a global ignore keeps out of every
+repository on this machine. They skip loudly now and `cargo test --workspace` from a clone passes.
 
-The fix is not to commit the tool's config. The **source list** is a project fact and can live in a
-committed manifest; the mutation runner's configuration is local tooling and stays local. Failing
-that, skip loudly the way `common::device` does — a skipped test that reports itself is a normal
-state for a suite to find, and a panicking one is not.
+The plan was a committed manifest of the source list. That turned out to be the wrong shape: the
+committed list would be a second copy of a thing derivable from the tree, and the *interesting*
+invariant needed no list at all. The excuse for not mutating a file is "it is FFI, so it contains
+`unsafe`", and only one direction of that was checked. The other — **every file containing `unsafe`
+is excused** — runs on a clone, needs no config, and guards something the first direction does not:
+an expired excuse costs coverage, while unsafe code left inside the gate costs the mutation run,
+since a mutant that passes a wrong handle kills the process instead of failing a test.
+
+It is also the rule this project had applied by hand three times without anything enforcing it.
 
 **2. The runner's whole kernel library is never validated.** `spirv-val` runs over kernels built in
 `simdr`'s own tests. Everything in `runner/src/kernels/` — scan, reduce, dot, narrow, plane,
