@@ -6,8 +6,18 @@
 
 #![allow(
     dead_code,
-    reason = "each test binary compiles this file and uses a different subset of it"
+    unused_imports,
+    reason = "each test binary compiles this file and uses a different subset of it — and a               re-export nobody in *this* binary names is an unused import rather than dead code,               which is a second lint saying the same thing about the same arrangement"
 )]
+
+// The validator, from the emitter's test tree rather than copied into this one. Two copies would
+// be two things to keep in step, and the one covering these kernels is the one that did not exist
+// until now — every kernel in `runner::kernels` reached a driver without ever meeting `spirv-val`.
+// The path is relative to *this file's* directory, so it climbs out of `runner/tests/common/`
+// three times to reach the workspace root and not twice.
+#[path = "../../../tests/common/spirv_val.rs"]
+mod spirv_val;
+pub use spirv_val::{VULKAN_1_1, expect_valid, validate, validator};
 
 use runner::Gpu;
 

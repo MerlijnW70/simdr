@@ -498,6 +498,103 @@ knows it was considered rather than missed.
 
 ---
 
+## The list, rewritten 2026-08-13, worst first
+
+Twenty-two items above were finished in a fortnight, so this is what a survey of the tree turned up
+once the obvious work ran out. It is ordered by how badly it is wrong rather than by how good it
+would be, because the first four are all *things that are already false* and the rest are things
+that are merely absent.
+
+One item was prompted from outside. VectorWare published a piece describing the same premise this
+project runs on — a warp is a vector unit, so `Simd<T, N>` lowers onto lane instructions — from a
+compiler backend consuming `core::simd`. Their post is honest about the same hard part this file
+has circled for a month: what to do when `N` does not equal the width. They idle lanes for a small
+`N` and do not detail the large case. That is item 8 below, and it is the one place where finishing
+the work would make this project's central claim true for both of its algorithms rather than one.
+
+### Tier 1 — things that are actually wrong
+
+**1. A fresh clone cannot run the test suite.** `tests/integrity.rs` reads `noha.yaml` with an
+`expect`, and `noha.yaml` is excluded by a global ignore covering every repository on this machine.
+Three of that binary's five tests therefore panic on any clone — including CI, and including this
+machine after a reinstall. The suite is green here for a reason that does not travel.
+
+The fix is not to commit the tool's config. The **source list** is a project fact and can live in a
+committed manifest; the mutation runner's configuration is local tooling and stays local. Failing
+that, skip loudly the way `common::device` does — a skipped test that reports itself is a normal
+state for a suite to find, and a panicking one is not.
+
+**2. The runner's whole kernel library is never validated.** `spirv-val` runs over kernels built in
+`simdr`'s own tests. Everything in `runner/src/kernels/` — scan, reduce, dot, narrow, plane,
+network, scatter, occupancy — goes straight to a driver, and the dependency arrow means `simdr`'s
+tests *cannot* reach it even in principle. Drivers are lenient about things the validator is not:
+`OpUDot` with a signed result type ran correctly on two devices for weeks and was invalid the whole
+time. That is the gap this leaves open, and it is the highest value per line on the list.
+
+**3. `dispatch::extent` cannot see strip-mining.** It reads the workgroup size and the element
+stride out of the module, so it catches a dispatch with too many workgroups. It does not catch a
+kernel that reads `LANES` elements per invocation — which is *exactly* the failure that made
+`kernels::scale` read eight times its buffer at width 4. The check documents the limit honestly and
+the limit still covers the bug that actually happened.
+
+The emitter knows the lane count when it builds. Carrying elements-per-invocation out of
+`Kernel::finish`, or as a decoration on the module, would let the runner multiply by it and close
+the case.
+
+**4. No CI and no pinned toolchain.** Every layer is run by hand on one machine that happens to
+have two GPUs at two widths. `rust-version = "1.97"` is asserted in `Cargo.toml` and never tested
+against anything. Most of the suite needs no GPU at all — the emitter's 324 tests and lavapipe at
+4, 8 and 16 all run on a CPU — so the automatable part is most of it. The device layers stay manual
+and that is worth saying out loud rather than leaving as an assumption about who runs what.
+
+### Tier 2 — the scan, and what it needs
+
+**5. `WorkgroupId` wired into `Kernel`.** A kernel cannot write one value per workgroup at all
+today. That is what blocks 6, and it is a small thing on its own.
+
+**6. A scan across more than one workgroup.** Block totals scanned and added back: two more
+dispatches, the same chain shape `Reducer` already has. Needs 5.
+
+**7. The exclusive scan.** `scan_workgroup`'s doc says a caller who wants it can subtract their own
+element, which is true and is not the same as it existing. Cheap once the inclusive form is there,
+and a promise in a doc comment is worth making true.
+
+**8. A strip-mined and clustered scan.** `Lanes::prefix_sum` refuses every mapping but
+`WholeSubgroup` — *"a strip-mined scan must carry a running total between strips, which is not
+built"*. The reduction handles all three mappings; the scan handles one.
+
+**This is the item that finishes the project's central claim.** Three mappings for any `N` against
+any width is what `decisions/DR-0002` is about, and it is currently true of reductions and false of
+scans. It is also the exact gap the outside comparison above leaves open, which is a reason to
+believe it is the hard part rather than an oversight.
+
+### Tier 3 — plumbing, and one measurement
+
+**9. `run_bound` pays a submission per input.** `k` inputs cost `k + 2` command buffers, each with
+its own fence. The chain was three submissions and is one; this is the same shape, unfixed. Nothing
+measures it yet, which is the first thing to do rather than the last.
+
+**10. The breakdown reads 123% of the call.** Its rows are timed in isolation and the call got a
+third shorter around them, so they no longer add up to anything. Device timestamps recorded
+*inside* the real chain would make the rows the call itself rather than probes that resemble it —
+and this project has now mismeasured five times, of which the last was precisely a cost measured
+alone behaving differently in company.
+
+**11. A buffer the caller already owns.** Unchanged and still deferred; the argument is above under
+its own heading.
+
+### Tier 4 — reach
+
+**12. A third vendor.** Two vendors and a CPU implementation is enough to have caught real bugs —
+ten tests at width 64, undefined behaviour at 4 and 8. A third driver is where "portable" stops
+being a claim resting on two data points. Intel integrated is the cheap one.
+
+**13. Name the neighbours in the README.** "What this is not" points at rust-gpu for anyone who
+wants a real Rust-to-GPU compiler. For the narrower question — `Simd<T, N>` onto lanes — VectorWare
+is the closer comparison, and a reader deciding between approaches is better served by both.
+
+---
+
 ## Deliberately not doing
 
 **Chasing the large-working-set cliff.** Past ~50 MB the timings stop being steady, and three
@@ -525,16 +622,10 @@ has no z field, so that dispatch cannot be written by accident.
 
 ## Kept in view
 
-- **A scan across more than one workgroup.** `kernels::scan::scan_workgroup` scans 64 elements and
-  says so in its name. A longer input needs its block totals scanned and added back, which is two
-  more dispatches and the same shape the reducer's chain already has — and it needs one thing the
-  emitter does not offer: a way for a kernel to write one value per *workgroup*, which is either
-  `WorkgroupId` wired into `Kernel` or a strided gather over the block ends.
-- **`Gpu::run`'s equal-length rule is now stated and checked** — `dispatch::extent` refuses a
-  dispatch that does not fit the buffer, reading the workgroup size and the element stride out of
-  the module. It is a floor, not a proof: it cannot see how many strips a load walks, so a lane
-  mapping that reads eight times its buffer still gets through. `run_bound` and `Session` size
-  their outputs separately and always did.
+The scan's block limit and `dispatch::extent`'s blind spot were both here and are now items 6 and 3
+above, with the work they need spelled out. What is left is the one thing that is neither a gap nor
+a plan:
+
 - **`whole_subgroup!` is a macro in a codebase with no other macros.** It exists because the list
   of widths appeared in twelve places and a list in twelve places drifts. If a third width is ever
   added, that is the one line to change — which is the argument for it.
