@@ -614,14 +614,23 @@ scan needs the exclusive form for its block offsets, so this stopped being a nic
 ever emitting one. `Lanes::prefix_sum_exclusive` asks for it, and the two scans now share a builder
 and differ in one literal.
 
-**8. A strip-mined and clustered scan.** `Lanes::prefix_sum` refuses every mapping but
-`WholeSubgroup` — *"a strip-mined scan must carry a running total between strips, which is not
-built"*. The reduction handles all three mappings; the scan handles one.
+**8. A strip-mined and clustered scan — the strips are built; the clusters are SPIR-V's gap.**
+`Lanes::prefix_sum` said *"a strip-mined scan must carry a running total between strips, which is
+not built"*. It is now: one scan per strip and one `Reduce` for every strip but the last, carried
+forward. The vector order makes it work — lane `l` holds `l`, `l + width`, `l + 2·width`, so a
+strip is a consecutive run of the vector and every element of strip `s - 1` comes before every
+element of strip `s`. Verified at 2, 4 and 8 strips on three devices.
 
-**This is the item that finishes the project's central claim.** Three mappings for any `N` against
-any width is what `decisions/DR-0002` is about, and it is currently true of reductions and false of
-scans. It is also the exact gap the outside comparison above leaves open, which is a reason to
-believe it is the hard part rather than an oversight.
+The carry is a `Reduce` and not the last lane of the scan, which matters only in the exclusive form
+— an exclusive scan hands no lane the strip's whole total, so reading the carry off it would be
+short by exactly one lane's element.
+
+**Clusters stay refused, and the reason is Khronos'.** There is a `ClusteredReduce` and no
+`ClusteredInclusiveScan`. A scan of a vector narrower than the subgroup would have to be a
+subgroup-wide scan minus each cluster's starting offset, and reading that offset needs a shuffle
+from a lane that differs per lane — `OpGroupNonUniformShuffle` exists as an opcode and `Lanes`
+exposes only the fixed-pattern shuffles. That is the next piece if anyone wants it, and it is one
+primitive rather than an algorithm.
 
 ### Tier 3 — plumbing, and one measurement
 

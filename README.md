@@ -82,13 +82,19 @@ pipeline creation — a specialization constant is a constant instruction, the v
 there and an RTX 4080 runs it at 4, 8 and 16 from a single module. What cannot be deferred is the
 choice of *shape*. `decisions/DR-0005` records the experiment; DR-0002 carries the correction.
 
-| `N` vs width | mapping | what a reduction costs |
-| --- | --- | --- |
-| equal | `WholeSubgroup` | one subgroup instruction |
-| a divisor | `Clusters` | one clustered instruction, several vectors at once |
-| a multiple | `Strips` | `strips - 1` scalar ops, then one subgroup instruction |
+| `N` vs width | mapping | a reduction | a scan |
+| --- | --- | --- | --- |
+| equal | `WholeSubgroup` | one subgroup instruction | one subgroup instruction |
+| a divisor | `Clusters` | one clustered instruction, several vectors at once | **refused** |
+| a multiple | `Strips` | `strips - 1` scalar ops, then one subgroup instruction | one scan per strip, carrying a running total |
 
 Anything else — 12 lanes on a 32-wide subgroup — has no mapping and is refused by name.
+
+**The one gap is a clustered scan, and it is SPIR-V's rather than this project's.** There is a
+`ClusteredReduce` and no `ClusteredInclusiveScan`, so a scan of a vector *narrower* than the
+subgroup would have to be a subgroup-wide scan minus each cluster's own starting offset — and
+reading that offset needs a shuffle from a lane that differs per lane, which `Lanes` does not
+expose. It is refused by name rather than approximated.
 
 ## Crossing between subgroups
 

@@ -151,6 +151,19 @@ fn the_scan_is_valid_at_every_width() {
             "scan_workgroup_exclusive",
             width,
         );
+        // The strip-mined mapping, which the scan refused until it could carry a running total
+        // between strips. Refused by name below 32 lanes, which `valid_at` reports rather than
+        // fails on.
+        valid_at(
+            kernels::scan::scan_strips::<64>(width),
+            "scan_strips-64",
+            width,
+        );
+        valid_at(
+            kernels::scan::scan_strips::<128>(width),
+            "scan_strips-128",
+            width,
+        );
         // The only kernel that *reads* a storage buffer at a runtime index.
         valid_at(
             kernels::scan::add_offsets::<F32>(width),

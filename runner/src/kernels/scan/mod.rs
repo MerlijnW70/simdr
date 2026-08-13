@@ -90,6 +90,30 @@ pub fn scan_workgroup<T: Element>(subgroup: u32) -> Result<Vec<u32>, LaneError> 
     whole_subgroup_of!(T, subgroup, scan_workgroup_at)
 }
 
+/// A prefix sum **within each invocation's own vector**, for a vector wider than the subgroup.
+///
+/// The strip-mined mapping, which `Lanes::prefix_sum` refused until it could carry a running total
+/// between strips. `LANES` elements per subgroup rather than one each: lane `l` holds the elements
+/// at `l`, `l + width`, `l + 2·width`, and the answer at vector position `j` is the sum of
+/// positions `0..=j` of *that subgroup's* vector.
+///
+/// **Not the same thing as [`scan_workgroup`].** This scans each subgroup's vector on its own and
+/// does not cross between subgroups; it is the lane mapping under test rather than a whole
+/// algorithm. A workgroup-wide scan of a strip-mined load would need both, and nothing wants that
+/// yet.
+///
+/// # Errors
+///
+/// As [`scan_workgroup`], and [`LaneError::NoSuchForm`] if `LANES` is *narrower* than the subgroup
+/// — SPIR-V has no clustered scan.
+pub fn scan_strips<const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    let mut kernel = Kernel::<simdr::lanes::F32>::new(shape(subgroup))?;
+    let value = kernel.load::<LANES>(0)?;
+    let scanned = kernel.lanes()?.prefix_sum(value)?;
+    kernel.store(1, scanned)?;
+    kernel.finish()
+}
+
 /// The exclusive scan of one workgroup — `out[i] = in[0] + … + in[i-1]`, and `out[0] = 0`.
 ///
 /// The top of a long scan. Once the block totals have been reduced to no more than

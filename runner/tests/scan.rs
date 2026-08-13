@@ -378,3 +378,62 @@ fn a_length_that_is_not_a_whole_number_of_workgroups_is_refused_before_anything_
         );
     }
 }
+
+#[test]
+fn a_strip_mined_scan_scans_each_subgroups_own_vector() {
+    // **The third lane mapping, which the scan refused until now.** A vector wider than the
+    // subgroup lives in strips: lane `l` holds the elements at `l`, `l + width`, `l + 2·width`,
+    // so vector position `j` is strip `j / width` of lane `j % width`.
+    //
+    // The model below reproduces that addressing rather than assuming it, because the two ways to
+    // get this wrong — scanning strips in the wrong order, and dropping the carry between them —
+    // both give an answer that is right in the first strip and wrong after it.
+    let Some(gpu) = device("scan strips") else {
+        return;
+    };
+    eprintln!("device: {}", gpu.limits().name);
+
+    let width = gpu.limits().subgroup_size as usize;
+    let workgroup = WORKGROUP_SIZE as usize;
+    let lanes = 128_u32;
+    let strips = (lanes as usize).div_ceil(width);
+    if !(lanes as usize).is_multiple_of(width) || strips > 8 {
+        eprintln!("SKIPPED scan strips: 128 lanes does not strip-mine onto {width}");
+        return;
+    }
+
+    let spirv = kernels::scan::scan_strips::<128>(gpu.limits().subgroup_size).expect("built");
+    let elements = workgroup * strips;
+    let input: Vec<f32> = (0..elements).map(|index| (index % 9) as f32).collect();
+
+    let output = gpu.run(&spirv, &input, 1).expect("dispatched");
+
+    // The CPU model, in the same terms the addressing uses.
+    let mut expected = vec![0.0_f32; elements];
+    for local in 0..workgroup {
+        let subgroup = local / width;
+        let lane = local % width;
+
+        // This subgroup's vector, in vector order: position j is strip j/width, lane j%width, and
+        // that element lives at `subgroup * width + j % width + (j / width) * workgroup`.
+        let at = |position: usize| {
+            (subgroup * width) + (position % width) + (position / width) * workgroup
+        };
+
+        let mut running = 0.0_f32;
+        for strip in 0..strips {
+            let position = strip * width + lane;
+            // Everything before this position in the same vector.
+            running = (0..=position).map(|earlier| input[at(earlier)]).sum();
+            expected[at(position)] = running;
+        }
+        let _ = running;
+    }
+
+    for (index, (got, want)) in output.iter().zip(&expected).enumerate() {
+        assert_eq!(
+            got, want,
+            "element {index} of {elements}, {strips} strips at width {width}"
+        );
+    }
+}

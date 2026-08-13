@@ -84,11 +84,13 @@ impl Lanes<'_> {
                     because: "SPIR-V's clustered form is a reduce, so a scan would run across                               lanes belonging to a different vector",
                 });
             }
+            // **Built now, and it is the running total that makes it work.** Lane `l` holds the
+            // elements at `l`, `l + width`, `l + 2·width`, so strip `s` is vector positions
+            // `s·width ..` — every element of strip `s - 1` comes before every element of strip
+            // `s`. Each strip is therefore scanned on its own and raised by the total of the
+            // strips below it, which is `strips` scans, `strips - 1` reduces and the adds.
             Mapping::Strips { .. } => {
-                return Err(LaneError::NoSuchForm {
-                    operation,
-                    because: "a strip-mined scan must carry a running total between strips,                               which is not built",
-                });
+                return self.scan_strips::<T, LANES>(reduction, vector);
             }
         }
 
@@ -103,6 +105,63 @@ impl Lanes<'_> {
             self.module()
                 .subgroup_reduce(T::GROUP_ADD, element, scope, reduction, vector.id())?;
         self.from_lane_value(id)
+    }
+
+    /// A scan of a vector wider than the subgroup, one strip at a time.
+    ///
+    /// The order is the one [`crate::lanes::vector`] documents: lane `l` holds `l`, `l + width`,
+    /// `l + 2·width`, so vector position `j` is strip `j / width` of lane `j % width` and the
+    /// strips are consecutive runs of the vector. A prefix over position `j` is then everything in
+    /// the strips below `j`'s, plus the scan within it.
+    ///
+    /// **The carry is a `Reduce`, not the last lane of the scan.** An exclusive scan hands no lane
+    /// the strip's whole total — leaving it out is what makes it exclusive — so reading the carry
+    /// off the scan would be short by one lane's element in exactly the form where it matters.
+    ///
+    /// The last strip needs no total, and does not compute one: nothing comes after it.
+    fn scan_strips<T: Element, const LANES: u32>(
+        &mut self,
+        reduction: Reduction,
+        vector: Vector<T, LANES>,
+    ) -> Result<Vector<T, LANES>, LaneError> {
+        let element = self.type_of::<T>()?;
+        let scope = self.scope();
+        self.module()
+            .require_capability(Capability::GroupNonUniform)?;
+        self.module()
+            .require_capability(Capability::GroupNonUniformArithmetic)?;
+
+        let strips = vector.strips().to_vec();
+        let last = strips.len().saturating_sub(1);
+        let mut scanned = Vec::with_capacity(strips.len());
+        let mut carried: Option<Id> = None;
+
+        for (index, &strip) in strips.iter().enumerate() {
+            let within =
+                self.module()
+                    .subgroup_reduce(T::GROUP_ADD, element, scope, reduction, strip)?;
+            scanned.push(match carried {
+                None => within,
+                Some(carry) => self.module().binary(T::ADD, element, within, carry)?,
+            });
+
+            if index == last {
+                continue;
+            }
+            let total = self.module().subgroup_reduce(
+                T::GROUP_ADD,
+                element,
+                scope,
+                Reduction::Reduce,
+                strip,
+            )?;
+            carried = Some(match carried {
+                None => total,
+                Some(carry) => self.module().binary(T::ADD, element, carry, total)?,
+            });
+        }
+
+        self.from_strips(&scanned)
     }
 
     /// Fold the strips inside each lane with `local`, then reduce across the subgroup with
@@ -392,42 +451,114 @@ mod tests {
     }
 
     #[test]
-    fn the_exclusive_scan_is_refused_for_the_same_shapes_as_the_inclusive_one() {
-        // Both go through one builder, so a caller must not find that one of them accepts a shape
-        // the other refuses — and the error must name the operation the caller actually asked for.
+    fn the_two_scans_accept_and_refuse_exactly_the_same_shapes() {
+        // Both go through one builder, so a caller must not find that one accepts a shape the
+        // other refuses — and the error must name the operation that was actually asked for.
         let mut module = Module::new(Version::V1_3);
         let mut lanes = Lanes::new(&mut module, 32).expect("built");
         let narrow = lanes.splat_bits::<F32, 8>(0).expect("splat");
-        let wide = lanes.splat_bits::<F32, 64>(0).expect("splat");
+        let whole = lanes.splat_bits::<F32, 32>(0).expect("splat");
+        let wide = lanes.splat_bits::<F32, 128>(0).expect("splat");
 
-        for refused in [
+        assert!(matches!(
             lanes.prefix_sum_exclusive(narrow).err(),
-            lanes.prefix_sum_exclusive(wide).err(),
-        ] {
-            assert!(matches!(
-                refused,
-                Some(LaneError::NoSuchForm {
-                    operation: "prefix_sum_exclusive",
-                    ..
-                })
-            ));
-        }
+            Some(LaneError::NoSuchForm {
+                operation: "prefix_sum_exclusive",
+                ..
+            })
+        ));
+        assert!(lanes.prefix_sum(narrow).is_err());
+
+        // Written out rather than looped: `LANES` is part of the type, so a whole-subgroup vector
+        // and a strip-mined one cannot share an array.
+        assert!(lanes.prefix_sum(whole).is_ok());
+        assert!(lanes.prefix_sum_exclusive(whole).is_ok());
+        assert!(lanes.prefix_sum(wide).is_ok());
+        assert!(lanes.prefix_sum_exclusive(wide).is_ok());
     }
 
     #[test]
-    fn a_scan_is_refused_for_both_shapes_that_have_no_form_of_it() {
+    fn a_scan_is_refused_for_the_one_shape_that_has_no_form_of_it() {
+        // Clusters, and only clusters. SPIR-V's clustered form is a *reduce*: there is no
+        // `ClusteredInclusiveScan`, so a scan of a vector narrower than the subgroup would have to
+        // be built out of a subgroup-wide scan minus each cluster's own starting offset — and
+        // reading that offset needs a shuffle from a lane that differs per lane, which `Lanes`
+        // does not expose. The wide case *is* built; see below.
         let mut module = Module::new(Version::V1_3);
         let mut lanes = Lanes::new(&mut module, 32).expect("built");
         let narrow = lanes.splat_bits::<F32, 8>(0).expect("splat");
-        let wide = lanes.splat_bits::<F32, 64>(0).expect("splat");
 
         assert!(matches!(
             lanes.prefix_sum(narrow).err(),
             Some(LaneError::NoSuchForm { .. })
         ));
         assert!(matches!(
-            lanes.prefix_sum(wide).err(),
+            lanes.prefix_sum_exclusive(narrow).err(),
             Some(LaneError::NoSuchForm { .. })
         ));
+    }
+
+    #[test]
+    fn a_strip_mined_scan_is_one_scan_per_strip_and_one_reduce_fewer() {
+        // Four strips: four scans, and three totals — the last strip needs no carry because
+        // nothing comes after it. A version that reduced four times would emit an instruction
+        // whose result goes nowhere; one that reduced twice would leave the last strip short.
+        let mut module = Module::new(Version::V1_3);
+        let mut lanes = Lanes::new(&mut module, 32).expect("built");
+        let wide = lanes.splat_bits::<F32, 128>(0).expect("splat");
+
+        let scanned = lanes.prefix_sum(wide).expect("scanned");
+        assert_eq!(scanned.strip_count(), 4);
+
+        let words = module.finish();
+        let operations: Vec<u32> = decode::body(&words)
+            .filter(|instruction| instruction.opcode() == op::GROUP_NON_UNIFORM_F_ADD)
+            .filter_map(|instruction| instruction.operands().get(3).copied())
+            .collect();
+
+        assert_eq!(
+            operations
+                .iter()
+                .filter(|&&op| op == GroupOperation::InclusiveScan.word())
+                .count(),
+            4,
+            "one scan per strip"
+        );
+        assert_eq!(
+            operations
+                .iter()
+                .filter(|&&op| op == GroupOperation::Reduce.word())
+                .count(),
+            3,
+            "a carry for every strip but the last"
+        );
+    }
+
+    #[test]
+    fn the_strip_mined_exclusive_scan_carries_the_same_way() {
+        // The carry is a `Reduce` in both, and that is the point: an exclusive scan hands no lane
+        // the strip's whole total, so taking the carry from the scan would be short by one lane's
+        // element — invisible in the inclusive form and wrong in this one.
+        let mut module = Module::new(Version::V1_3);
+        let mut lanes = Lanes::new(&mut module, 32).expect("built");
+        let wide = lanes.splat_bits::<F32, 64>(0).expect("splat");
+
+        lanes.prefix_sum_exclusive(wide).expect("scanned");
+
+        let words = module.finish();
+        let operations: Vec<u32> = decode::body(&words)
+            .filter(|instruction| instruction.opcode() == op::GROUP_NON_UNIFORM_F_ADD)
+            .filter_map(|instruction| instruction.operands().get(3).copied())
+            .collect();
+
+        assert_eq!(
+            operations,
+            vec![
+                GroupOperation::ExclusiveScan.word(),
+                GroupOperation::Reduce.word(),
+                GroupOperation::ExclusiveScan.word(),
+            ],
+            "scan, carry, scan — and the last strip takes no carry"
+        );
     }
 }
