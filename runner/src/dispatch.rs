@@ -26,6 +26,7 @@ mod specialization;
 mod step;
 mod submit;
 mod timestamps;
+mod upload;
 
 pub use grid::Grid;
 pub use placement::{MemoryType, Placement};
@@ -36,6 +37,7 @@ pub use step::Pass;
 pub(crate) use chain::Staged;
 pub(crate) use pipeline::Pipeline;
 pub(crate) use step::{Ends, answer_in_destination};
+pub(crate) use upload::{deliver, deliver_floats};
 
 use crate::buffer::Buffer;
 use crate::{Error, Gpu};

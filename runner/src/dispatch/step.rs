@@ -82,6 +82,27 @@ impl Ends {
     }
 }
 
+/// How many bytes an upload still has to copy, once the host has written what it can reach.
+///
+/// The other half of the same question [`answer_in_destination`] asks. That one is where the
+/// answer comes *from*; this is where the input goes *to*, and both are arithmetic the caller must
+/// not do twice differently.
+///
+/// `None` means the host wrote the kernel's buffer itself and nothing is left to copy — see
+/// [`crate::buffer::Buffer::shared`] for when a device allows that. `Some(bytes)` means the words
+/// went to staging and that many bytes have to follow them across.
+///
+/// **The floor is one word, not zero.** A zero-byte `vkCmdCopyBuffer` is not allowed, and a
+/// caller who uploads nothing still has a buffer to leave alone rather than a copy to record.
+pub(crate) const fn upload_bytes(host_writable: bool, words: usize) -> Option<u64> {
+    if host_writable {
+        return None;
+    }
+
+    let words = if words == 0 { 1 } else { words };
+    Some((words * size_of::<u32>()) as u64)
+}
+
 /// Whether a chain of `passes` leaves its answer in the destination buffer.
 ///
 /// Pass `i` writes the destination when `i` is even, so the last pass — `passes - 1` — writes it
@@ -157,5 +178,38 @@ mod tests {
     #[test]
     fn a_chain_of_none_leaves_the_answer_where_the_host_put_it() {
         assert!(!answer_in_destination(0));
+    }
+
+    #[test]
+    fn a_host_writable_source_leaves_nothing_to_copy() {
+        assert_eq!(upload_bytes(true, 1024), None);
+        assert_eq!(upload_bytes(true, 0), None);
+    }
+
+    #[test]
+    fn a_staged_upload_copies_one_word_per_word() {
+        assert_eq!(upload_bytes(false, 1), Some(4));
+        assert_eq!(upload_bytes(false, 1024), Some(4096));
+        assert_eq!(upload_bytes(false, 1 << 20), Some(4 << 20));
+    }
+
+    #[test]
+    fn an_empty_staged_upload_copies_one_word_rather_than_none() {
+        // Not tidiness: `vkCmdCopyBuffer` rejects a size of zero, so a floor of one word is what
+        // keeps an empty upload from being an invalid command rather than a no-op.
+        assert_eq!(upload_bytes(false, 0), Some(4));
+    }
+
+    #[test]
+    fn the_two_ends_of_a_chain_are_decided_independently() {
+        // `upload_bytes` must not have picked up a dependency on the pass count, and
+        // `answer_in_destination` must not have picked up one on the memory. They answer about
+        // opposite ends of the same chain and share no input.
+        for passes in 0..8_usize {
+            for words in [0_usize, 1, 4096] {
+                assert_eq!(upload_bytes(true, words), None, "{passes} {words}");
+                assert!(upload_bytes(false, words).is_some(), "{passes} {words}");
+            }
+        }
     }
 }

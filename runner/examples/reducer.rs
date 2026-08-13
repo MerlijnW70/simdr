@@ -342,14 +342,18 @@ fn breakdown(gpu: &Gpu, whole: Duration) -> Result<(), Box<dyn std::error::Error
         micros(whole)
     );
     // The input's four megabytes on their own: the whole write minus a one-word write, which pays
-    // the same map, unmap and submission and almost none of the copying.
+    // the same fixed costs and almost none of the copying. Both writes take whichever route the
+    // device offers — straight into the binding where it is host-writable, through staging and a
+    // copy where it is not — so this row follows the code rather than describing the old shape of
+    // it. Where the direct route is taken there is no submission left in either term, and what is
+    // left is the memcpy itself.
     let payload = upload.saturating_sub(mapping);
     let accounted = chained + payload + submission;
 
     for (name, taken) in [
-        ("the chained steps", chained),
+        ("the chained steps (upper bound)", chained),
         ("the input's four megabytes", payload),
-        ("one submission and its fence", submission),
+        ("one submission and its fence (bound)", submission),
         ("---- accounted for ----", accounted),
         ("(a second and third submission, unpaid)", submission * 2),
         ("(a whole-buffer download, unpaid)", whole_download),
@@ -371,10 +375,15 @@ fn breakdown(gpu: &Gpu, whole: Duration) -> Result<(), Box<dyn std::error::Error
          submissions, now recorded inside the chain's own command buffer; the whole buffer copied\n\
          home so `.first()` could be called on it; and a `Vec<u32>` built from the caller's\n\
          `&[f32]` to reinterpret bits that were already the right bits.\n\n\
-       \x20 `accounted for` lands a little over the whole rather than under it. The rows are timed\n\
-         separately and each pays its own fixed costs, so they cannot help double-counting a\n\
-         little — over is the honest direction for that. It read 52% *under* before the missing\n\
-         rows were found, and a breakdown that does not approach the whole is where to look next."
+       \x20 `accounted for` now lands well *over* the whole, and the overshoot is the finding\n\
+         rather than a rounding note. It read 52% under before the missing rows were found, 79%\n\
+         once they were, and past 100% as soon as the upload stopped going through staging: the\n\
+         call got about a third shorter while these rows, measured on their own, did not. Two of\n\
+         them are upper bounds by construction — the step row comes from a chain of empty kernels\n\
+         where a barrier has nothing to overlap, and the submission row is an empty dispatch that\n\
+         waits on its own fence. A cost measured in isolation is not the same cost measured in\n\
+         company, and this table is where that shows. Treat the rows as a ranking of what to\n\
+         attack next, not as a budget that adds up."
     );
 
     Ok(())

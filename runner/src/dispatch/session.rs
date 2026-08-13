@@ -76,7 +76,12 @@ impl Gpu {
 
             let mut buffers = Vec::with_capacity(bytes.len());
             for &size in &bytes {
-                match Buffer::device_local(self, size) {
+                // Host-writable where the device offers it, so that `Session::write` can put the
+                // caller's words in the binding itself. `Buffer::shared` falls back to plain
+                // device-local per buffer, which matters here more than anywhere else: a session
+                // can hold several large bindings, and the memory both sides can reach is often a
+                // small window. The ones that fit it get it and the rest stage as before.
+                match Buffer::shared(self, size) {
                     Ok(buffer) => buffers.push(buffer),
                     Err(error) => {
                         for buffer in buffers {
@@ -122,8 +127,12 @@ impl Session<'_> {
 
     /// Copy `words` into binding `index`.
     ///
-    /// Through the shared staging buffer and one submission, so two writes cannot overlap — which
-    /// is what a `&self` receiver would otherwise let a caller believe.
+    /// `&mut self`, so two writes cannot overlap — which is what a `&self` receiver would let a
+    /// caller believe. That is the reason for the receiver, and it holds either way; what varies
+    /// underneath is only the route. Where the binding is host-writable the words go into it
+    /// directly and no submission happens at all; otherwise they go through the shared staging
+    /// buffer and one copy. [`crate::buffer::Buffer::shared`] says which devices offer which, and
+    /// `runner/examples/reducer.rs` measures the difference at about 30% of a 4 MB reduction.
     ///
     /// # Errors
     ///
@@ -151,8 +160,15 @@ impl Session<'_> {
         // SAFETY: both buffers are this session's and no dispatch is in flight — every one of them
         // waits on its fence before returning.
         unsafe {
-            staging.write(self.gpu, words)?;
-            self.gpu.copy(staging, target, bytes)
+            match super::deliver(self.gpu, words, staging, target)? {
+                // Staged: the copy is a submission of its own, as it has always been.
+                Some(_) => self.gpu.copy(staging, target, bytes),
+                // Written into the binding itself. No copy, and therefore no submission and no
+                // fence to wait on — the words are simply there. A host write to coherent memory
+                // is made visible to the device by the next queue submission, which is the
+                // dispatch this write was preparing for.
+                None => Ok(()),
+            }
         }
     }
 

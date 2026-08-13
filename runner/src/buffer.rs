@@ -1,8 +1,17 @@
-//! Buffers, in the two kinds a measurement needs.
+//! Buffers, in the three kinds a measurement needs.
 //!
 //! A [`Buffer::staging`] one is host-visible: the CPU writes it and reads it directly. A
-//! [`Buffer::device_local`] one is not visible to the host at all, and on a discrete GPU that is
-//! the difference between VRAM and system memory across PCIe.
+//! [`Buffer::device_local`] one is the fastest memory for a kernel, and on a discrete GPU that is
+//! the difference between VRAM and system memory across PCIe. A [`Buffer::shared`] one asks for
+//! both at once — device-local *and* host-writable — and takes plain device-local memory where the
+//! device has no such type, so it never narrows what runs.
+//!
+//! The third kind exists because the first two make the host copy everything twice: into staging,
+//! then across into the kernel's buffer. Where one type is both, the first write lands in the
+//! right place. That is worth about a third of a held reduction over 4 MB, and it is worth
+//! *nothing* — worse, 62% on a 4080 — to a call that allocates its buffers each time, because
+//! allocating out of that memory costs more than the copy it saves. [`Buffer::shared`] says which
+//! callers should ask.
 //!
 //! **That distinction is why this file exists in its current shape.** Everything was host-visible
 //! until the benchmark reported the same number for every kernel, and the reason turned out to be
@@ -19,6 +28,7 @@ pub(crate) struct Buffer {
     memory: vk::DeviceMemory,
     bytes: u64,
     mappable: bool,
+    coherent: bool,
     device_local: bool,
 }
 
@@ -31,6 +41,22 @@ impl Buffer {
     /// made that mistake once already.
     pub(crate) const fn is_device_local(&self) -> bool {
         self.device_local
+    }
+
+    /// Whether the host can write this buffer directly and the device will see it.
+    ///
+    /// **Both halves are required.** Mappable alone is not enough: nothing here flushes a mapping,
+    /// so a host-visible type without `HOST_COHERENT` would take the write and hide it.
+    ///
+    /// This is how a caller skips the staging hop where there is nothing to hop over, and it is a
+    /// question to ask rather than predict. The guess this crate started with — that an integrated
+    /// part shares its memory with the host and a discrete card cannot — is wrong in **both**
+    /// directions here: the integrated Radeon offers a device-local type that is not host-visible,
+    /// and the RTX 4080 offers one that is. `runner/examples/memtypes.rs` prints the tables.
+    ///
+    /// Only a buffer that asked for such memory can answer yes; see [`Buffer::shared`].
+    pub(crate) const fn host_writable(&self) -> bool {
+        self.mappable && self.coherent
     }
 }
 
@@ -63,8 +89,12 @@ impl Buffer {
 
     /// A buffer the kernel reads and writes, in the fastest memory the device offers.
     ///
-    /// Falls back to host-visible when no device-local type accepts a storage buffer, which is
-    /// the normal state of an integrated part — there the two are the same memory anyway.
+    /// Falls back to host-visible when no device-local type accepts a storage buffer. That
+    /// fallback has not fired on any device here: `runner/examples/memtypes.rs` shows a
+    /// device-local type without `HOST_VISIBLE` on both the discrete card **and** the integrated
+    /// Radeon, which is worth saying because the obvious guess — that an integrated part must
+    /// share its memory with the host — is wrong on this machine. See [`Buffer::shared`] for the
+    /// buffer that does ask for both.
     ///
     /// # Safety
     ///
@@ -84,6 +114,57 @@ impl Buffer {
                     vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
                 )
             },
+            Err(other) => Err(other),
+        }
+    }
+
+    /// The same buffer, in memory the host can also write where the device offers such a type.
+    ///
+    /// **This is how an upload copy stops existing rather than getting faster.** A kernel's input
+    /// normally arrives in two hops: the host writes staging memory, then the device copies
+    /// staging into the buffer the kernel reads. Where one type is both device-local and
+    /// host-coherent — a BAR window on a discrete card, plain RAM on a part that has only one kind
+    /// of memory — the host can write the kernel's buffer itself and the second hop has nothing
+    /// left to do.
+    ///
+    /// Host-visibility is a *preference*, not a requirement, so this never narrows the devices
+    /// that run: with no such type, or with one whose heap will not fit `bytes`, this is
+    /// [`Buffer::device_local`] and the caller keeps staging. [`Buffer::host_writable`] is how the
+    /// caller tells which it got, and it must be asked rather than assumed — the answer is a
+    /// property of the device, and guessing it from "discrete" or "integrated" gets it wrong.
+    ///
+    /// # Who should ask for it
+    ///
+    /// **Anything that allocates once and uploads many times**, which is [`crate::Reducer`] and
+    /// [`crate::Session`]. There it is worth about a third of a 4 MB reduction on both devices
+    /// here.
+    ///
+    /// **Not a call that allocates per use.** `Gpu::run_chain` asked for this for one afternoon
+    /// and `Gpu::sum` over 2²⁰ went from ~2153 µs to ~3492 µs on an RTX 4080 — 62% slower, for a
+    /// change that removes a copy. Allocating out of this memory costs more than the copy it
+    /// saves, and the 8 192-element case proves it is the allocation: 32 KB to upload, nothing to
+    /// gain from the transfer, still 22% slower.
+    ///
+    /// # Safety
+    ///
+    /// As [`Buffer::staging`].
+    pub(crate) unsafe fn shared(gpu: &Gpu, bytes: u64) -> Result<Self, Error> {
+        let usage = vk::BufferUsageFlags::STORAGE_BUFFER
+            | vk::BufferUsageFlags::TRANSFER_SRC
+            | vk::BufferUsageFlags::TRANSFER_DST;
+
+        match unsafe {
+            Self::preferring(
+                gpu,
+                bytes,
+                usage,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            )
+        } {
+            Ok(buffer) => Ok(buffer),
+            // No device-local type at all: same fallback as `device_local`, for the same reason.
+            Err(Error::NoHostVisibleMemory) => unsafe { Self::device_local(gpu, bytes) },
             Err(other) => Err(other),
         }
     }
@@ -128,23 +209,39 @@ impl Buffer {
 
         let requirements = unsafe { device.get_buffer_memory_requirements(handle) };
         let permitted = requirements.memory_type_bits;
-        let chosen = memory_type(gpu, permitted, wanted | preferred)
-            .or_else(|| memory_type(gpu, permitted, wanted));
 
-        let Some((memory_type, offered)) = chosen else {
-            unsafe { device.destroy_buffer(handle, None) };
-            return Err(Error::NoHostVisibleMemory);
-        };
+        // Two candidates, best first, and the fallback is an *allocation* fallback rather than a
+        // selection one. A type that suits the buffer is not the same as a type that fits it: the
+        // memory a host can write and a device can read at full speed is usually a BAR window, and
+        // a BAR window is often 256 MB against several gigabytes of plain device memory. Choosing
+        // it and then failing would turn a preference into a size limit.
+        let candidates = [
+            memory_type(gpu, permitted, wanted | preferred),
+            memory_type(gpu, permitted, wanted),
+        ];
 
-        let allocation = vk::MemoryAllocateInfo::default()
-            .allocation_size(requirements.size)
-            .memory_type_index(memory_type);
-        let memory = match unsafe { device.allocate_memory(&allocation, None) } {
-            Ok(memory) => memory,
-            Err(result) => {
-                unsafe { device.destroy_buffer(handle, None) };
-                return Err(Error::Vulkan(result));
+        let mut allocated = None;
+        // Kept from the last attempt, so a device that has no matching type at all and one whose
+        // heap is full report differently. Where both candidates are the same index — no preferred
+        // type exists — the second attempt repeats the first, which costs one failed call on a
+        // path that is already failing and less code than noticing.
+        let mut refusal = Error::NoHostVisibleMemory;
+        for (memory_type, offered) in candidates.into_iter().flatten() {
+            if allocated.is_some() {
+                break;
             }
+            let allocation = vk::MemoryAllocateInfo::default()
+                .allocation_size(requirements.size)
+                .memory_type_index(memory_type);
+            match unsafe { device.allocate_memory(&allocation, None) } {
+                Ok(memory) => allocated = Some((memory, offered)),
+                Err(result) => refusal = Error::Vulkan(result),
+            }
+        }
+
+        let Some((memory, offered)) = allocated else {
+            unsafe { device.destroy_buffer(handle, None) };
+            return Err(refusal);
         };
 
         if let Err(result) = unsafe { device.bind_buffer_memory(handle, memory, 0) } {
@@ -163,6 +260,10 @@ impl Buffer {
             // fell back to host-visible still yields mappable memory, and saying otherwise would
             // turn a fallback into a panic later.
             mappable: offered.contains(vk::MemoryPropertyFlags::HOST_VISIBLE),
+            // Coherent, not merely visible. Nothing in this crate flushes a mapping, so a
+            // host-visible type without `HOST_COHERENT` is one the host may write and the device
+            // may not see — which is a wrong answer rather than a slow one.
+            coherent: offered.contains(vk::MemoryPropertyFlags::HOST_COHERENT),
             device_local: offered.contains(vk::MemoryPropertyFlags::DEVICE_LOCAL),
         })
     }

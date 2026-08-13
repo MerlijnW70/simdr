@@ -394,16 +394,20 @@ Made to add up, it named three things in a row:
 | reading one word home instead of the whole buffer | ~1140 µs |
 | writing the caller's floats straight into the mapping | ~548 µs |
 | recording the copies inside the chain's submission, one instead of three | ~424 µs |
-| folding by sixteen — five dispatches instead of fifteen | **~407 µs** |
+| folding by sixteen — five dispatches instead of fifteen | ~407 µs |
+| writing the input into memory the device can already read | **~280 µs** |
 
-Only the last of the four was an algorithm. The other three were a download sized to the buffer
-rather than the answer; a conversion of bits that were already the right bits; and two submissions
-that existed only to move bytes between buffers a third submission already touched.
+Only one of the five was an algorithm. The others were a download sized to the buffer rather than
+the answer; a conversion of bits that were already the right bits; two submissions that existed
+only to move bytes between buffers a third submission already touched; and a copy from staging into
+the kernel's buffer, on a device where the host could have written that buffer in the first place.
 
-**When a breakdown does not come close to the whole, the gap is the finding.** And when it comes to
-*less* than the whole — 86% above — the rows that remain are upper bounds rather than debts: the
-step row is measured on a chain of empty kernels, where a barrier has nothing to overlap with, and
-it overestimated a real chained step by about four times. That is written beside it.
+**When a breakdown does not come close to the whole, the gap is the finding.** It has been wrong in
+both directions here. It read 52% *under* the call before its missing rows were found; it reads
+about **123%** now, because the call got a third shorter while rows timed in isolation did not.
+Two of the three are upper bounds by construction — the step row comes from a chain of empty
+kernels where a barrier has nothing to overlap with, and it overestimated a real chained step by
+about four times. Both facts are printed in the table itself.
 
 That last row is where most of the work went, and it took three attempts to notice. Two changes
 shaved the device side — shortening the between-pass copies, then replacing them with a ping-pong
@@ -420,11 +424,28 @@ The ping-pong is kept for being shorter code — no copies, no copy lengths, and
 where a short copy returns the previous call's data — and because on the integrated Radeon it *is*
 worth 5.5%.
 
-### The map belongs in the chain
+### Two ways to stop paying for an upload
 
-What was left after that is the upload, and no device-side change touches it — except by not
-happening. Σ f(x) is a map and a reduce, and the obvious way to compute it crosses the bus three
-times: send the input, run the map, bring the result home, send it back, reduce.
+What was left after all that is the upload, at about 70% of the call, and no device-side change
+touches it. There are two ways to not pay it, and this project needed both.
+
+**Write it once instead of twice.** The input went into staging memory and then across into the
+buffer the first pass reads. A device that offers memory which is both device-local and
+host-coherent lets the host write that buffer directly, and the second move stops existing: **31%
+on an RTX 4080, 33% on the integrated Radeon**, over 2²⁰ elements.
+
+Which devices offer it is not something to reason about. The guess written into the first version
+of that change — that an integrated part shares its memory and a discrete card cannot — is wrong in
+*both* directions on this machine, and `cargo run --example memtypes -p runner` prints why. That
+first version was therefore dead code, and it still appeared to save 19 µs consistently, because
+the same binary ran first in every round. Reversing the order reversed the result.
+
+It is also a **62% regression** in `Gpu::sum`, one call away, where the buffers are allocated per
+call rather than held: allocating out of that memory costs more than the copy it saves. Same three
+lines, opposite sign, and the only difference is how often the buffer is made.
+
+**Or don't cross the bus at all.** Σ f(x) is a map and a reduce, and the obvious way to compute it
+crosses three times: send the input, run the map, bring the result home, send it back, reduce.
 
 ```rust
 let square = kernels::square(width)?;                    // out[i] = in[i] * in[i]
@@ -435,7 +456,11 @@ let norm = reducer.sum(&input)?.total;                   // Σ x², one crossing
 **2.4× on an RTX 4080 and 2.6× on the integrated Radeon**, over 2²⁰ elements, against the same
 route with a held `Session` for the map and a held `Reducer` for the fold — so neither column pays
 for allocation or pipeline creation and the only difference is where the intermediate went. The
-993 µs saved is the 718 µs download plus the 294 µs upload measured separately in the same file.
+993 µs saved is the 718 µs download plus the 294 µs upload measured separately in the same file, as
+they stood at the time of that run. The upload row has since fallen to ~190 µs for the reason
+above, so the saving on the current build is smaller than 993 µs; the multiple has not been
+re-measured since, and `cargo run --release --example reducer -p runner` prints today's on whatever
+device runs it.
 
 A first attempt reported 2.9× by writing the old route as `gpu.run`, which allocates and builds a
 pipeline every call. Give the thing you are replacing every advantage you would give the

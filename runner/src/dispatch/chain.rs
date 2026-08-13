@@ -75,11 +75,31 @@ impl Gpu {
         // used only between a submission and the fence that completes it.
         unsafe {
             let staging = Buffer::staging(self, bytes)?;
+            // **Not `Buffer::shared`, and that was measured rather than assumed.** This path
+            // allocates its buffers on every call, and allocating out of the memory both sides can
+            // reach costs more than the upload it saves: `Gpu::sum` over 2²⁰ went from ~2153 µs to
+            // ~3492 µs on an RTX 4080 when this asked for shared memory — 62% slower. The tell is
+            // the 8 192-element case, which has 32 KB to upload and no transfer worth saving, and
+            // still lost 22%. So the cost is in the allocation, not the writing.
+            //
+            // `Reducer` and `Session` do ask for it, because they allocate once and upload many
+            // times. Same memory, opposite answer, and the difference is only how often the buffer
+            // is made. `notes/FINDINGS.md` has both columns.
             let source = Buffer::device_local(self, bytes)?;
             let destination = Buffer::device_local(self, bytes)?;
 
-            staging.write(self, input)?;
-            let outcome = self.chained_run(passes, &staging, &source, &destination, bytes, count);
+            let upload = super::deliver(self, input, &staging, &source)?;
+            let outcome = self.chained_run(
+                passes,
+                Workspace {
+                    staging: &staging,
+                    source: &source,
+                    destination: &destination,
+                    bytes,
+                },
+                count,
+                upload,
+            );
 
             staging.destroy(self);
             source.destroy(self);
@@ -96,12 +116,17 @@ impl Gpu {
     unsafe fn chained_run(
         &self,
         passes: &[Pass<'_>],
-        staging: &Buffer,
-        source: &Buffer,
-        destination: &Buffer,
-        bytes: u64,
+        buffers: Workspace<'_>,
         count: usize,
+        upload: Option<Staged<'_>>,
     ) -> Result<Vec<u32>, Error> {
+        let Workspace {
+            staging,
+            source,
+            destination,
+            bytes,
+        } = buffers;
+
         let mut pipelines = Vec::with_capacity(passes.len());
         for (index, pass) in passes.iter().enumerate() {
             // Built before recording rather than inside it: a failure here must not leave a
@@ -138,16 +163,14 @@ impl Gpu {
         // difference between those two is exactly the mistake that made this read megabytes.
         let home = (count.max(1) * size_of::<u32>()) as u64;
 
-        // One submission for the upload, the chain and the answer together. These were three.
+        // One submission for the upload, the chain and the answer together. These were three, and
+        // on a device with memory both sides can reach the upload is not even one of them —
+        // `deliver` has already put the input into `source` and handed back `None`.
         let recorded = unsafe {
             self.replay(
                 &pipelines,
                 &groups,
-                Some(Staged {
-                    from: staging,
-                    to: source,
-                    bytes,
-                }),
+                upload,
                 Some(Staged {
                     from: answer,
                     to: staging,
@@ -163,6 +186,24 @@ impl Gpu {
         }
         output
     }
+}
+
+/// The three buffers a chain runs over, and how wide they are.
+///
+/// Grouped because they are one decision, not three: the pair alternates and the staging buffer
+/// serves both ends, so a caller that had `source` right and `destination` wrong would have a
+/// working program that returned the second-to-last pass. Passing them together also keeps them
+/// the same width, which every dispatch below assumes.
+#[derive(Clone, Copy)]
+struct Workspace<'a> {
+    /// The host's way in and out.
+    staging: &'a Buffer,
+    /// Read by pass 0, and written by every odd pass after it.
+    source: &'a Buffer,
+    /// Written by pass 0, and read by every odd pass after it.
+    destination: &'a Buffer,
+    /// How wide all three are, in bytes.
+    bytes: u64,
 }
 
 /// One buffer-to-buffer copy, recorded inside a submission rather than being one.

@@ -1,9 +1,15 @@
 //! Where the runner's buffers actually end up, as opposed to where they were asked to go.
 //!
 //! [`crate::buffer::Buffer::device_local`] falls back to host-visible when no device-local type
-//! accepts a storage buffer, silently and by design — an integrated part has no separate memory
-//! to fall back *from*. A benchmark that never checked would report the bus and call it VRAM, and
-//! this project did exactly that for two passes before anyone asked.
+//! accepts a storage buffer, silently and by design. A benchmark that never checked would report
+//! the bus and call it VRAM, and this project did exactly that for two passes before anyone asked.
+//!
+//! The line above used to end "— an integrated part has no separate memory to fall back *from*",
+//! which sounded obvious and is not true here. The integrated Radeon on this machine offers a
+//! device-local type that is **not** host-visible, so the fallback has never once fired; the
+//! 4080 offers one that **is** host-visible, which is the opposite of the same guess.
+//! `runner/examples/memtypes.rs` prints both tables, and it is the reason
+//! [`crate::buffer::Buffer::shared`] asks the device instead of reasoning about it.
 
 use crate::buffer::Buffer;
 use crate::{Error, Gpu};

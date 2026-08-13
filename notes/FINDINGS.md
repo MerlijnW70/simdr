@@ -1985,3 +1985,64 @@ Kept anyway, and not for the 8%: five pipelines instead of fifteen is less to bu
 and less to get wrong, and the chain is nowhere near a command buffer's limit at any size this
 accepts. But the headline number is 8%, not the 35% the arithmetic promised, and the arithmetic is
 written down beside it so the next reader can see which half of it was real.
+## Writing the input where the device can already read it — and the premise being wrong twice
+
+`Reducer::sum` over 2²⁰ was **70% host upload** once everything else had been taken out of it. The
+input went into staging memory and then across into the buffer the first pass reads: the same four
+megabytes moved twice. Asking for memory that is device-local *and* host-coherent removes the
+second move, because the first write already landed in the right place.
+
+Paired A/B, alternating which binary ran first in each round, medians of three:
+
+| device | staged | shared source | |
+| --- | --- | --- | --- |
+| RTX 4080, 2²⁰ | ~404 µs | ~280 µs | **31%** |
+| integrated Radeon, 2²⁰ | ~924 µs | ~617 µs | **33%** |
+| either, 8 192 | — | — | nothing above the noise |
+
+### The premise was wrong, and the first measurement of it was noise
+
+The change was written as "on an integrated part `device_local` *is* host-visible, so staging is a
+pointless second copy". Both halves of that were wrong on this machine, and `runner/examples/
+memtypes.rs` prints why:
+
+* The **integrated Radeon** offers a device-local type that is *not* host-visible, at index 0.
+  `Buffer::device_local` takes the first match, so it has never once fallen back to host-visible —
+  the fallback the code documents as "the normal state of an integrated part" has never fired.
+* The **RTX 4080** offers a type at index 4 that is device-local, host-visible *and* host-coherent
+  — a resizable-BAR window. The discrete card is the one that could do this all along.
+
+So the first version of the change was dead code on every device here, and it still appeared to
+save 19 µs consistently. That was **ordering**: the A binary ran first in every round and paid the
+warm-up. Running the B binary first reversed the result exactly. Two behaviourally identical
+binaries "differed" by 5% and would have been committed as a win, with a wrong explanation
+attached, if the memory tables had not contradicted the story first.
+
+The fix is not to guess better. It is that `Buffer::host_writable()` asks the buffer, and no code
+in this crate infers it from the kind of device.
+
+### The same change is a 62% regression one call away
+
+`Buffer::shared` was applied to the one-shot `Gpu::run_chain` at the same time. That path allocates
+its buffers on every call, and:
+
+| `Gpu::sum`, RTX 4080 | device-local source | shared source | |
+| --- | --- | --- | --- |
+| 2²⁰ | ~2153 µs | ~3492 µs | **62% slower** |
+| 8 192 | ~748 µs | ~919 µs | 22% slower |
+
+The 8 192 row is what identifies the cause: 32 KB of upload, nothing to gain from removing a copy
+of it, and it still lost 22%. Allocating out of a BAR window costs more than the copy it saves, so
+the cost is in the allocation. Reverted there and kept in `Reducer` and `Session`, which allocate
+once and upload many times.
+
+**The same three lines are a third faster or two thirds slower depending only on how often the
+buffer is made.** Nothing about the memory changed between those two columns.
+
+### What this does to the breakdown table
+
+`accounted for` in `runner/examples/reducer.rs` now reads about **123%** of the call. It read 52%
+*under* the whole before its missing rows were found, 79% once they were, and past 100% as soon as
+the call itself got a third shorter while the rows — each timed in isolation, each paying its own
+fixed costs — did not. Two of the three are upper bounds by construction and now say so in the
+table itself. It is a ranking of what to attack next, not a budget that adds up.

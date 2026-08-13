@@ -7,9 +7,16 @@
 //! smaller share of a larger call.
 //!
 //! That last clause used to read "because by then the arithmetic is most of the time", and the
-//! arithmetic is not. Broken down, a held reduction over 2²⁰ is roughly a quarter chained
-//! dispatches, a quarter uploading the input, and a twentieth bringing the answer back — the rest
-//! being the buffers and the queue. `notes/FINDINGS.md` has the table.
+//! arithmetic is not. Broken down, a held reduction over 2²⁰ is mostly **the host writing its
+//! input** — around 70% of it once everything else had been taken out — with the chained
+//! dispatches and the single submission accounting for most of the rest. `notes/FINDINGS.md` has
+//! the table, and `runner/examples/reducer.rs` prints a fresh one on whatever device it is run on.
+//!
+//! Getting there took four passes, and the reduction over 2²⁰ went from ~1930 µs to ~280 µs on an
+//! RTX 4080. Only the last of them touched the arithmetic. The others removed a download of the
+//! whole buffer to read one word out of it, a `Vec<u32>` built to reinterpret bits that were
+//! already the right bits, two of three submissions, and — this pass — the staging copy, by
+//! writing the input into memory the device could already read.
 //!
 //! This is the same trade [`crate::Session`] makes for one pipeline, applied to a chain of them.
 //!
@@ -29,7 +36,7 @@
 
 use super::Reduction;
 use crate::buffer::Buffer;
-use crate::dispatch::{Ends, Pipeline, Staged, answer_in_destination};
+use crate::dispatch::{Ends, Pipeline, Staged, answer_in_destination, deliver_floats};
 use crate::{Error, Gpu};
 
 /// How much of the answer buffer comes home: one `f32`.
@@ -80,7 +87,9 @@ impl Gpu {
     /// **This is what removes an upload and a download.** Σ f(x) over a device the caller cannot
     /// reach otherwise costs three host crossings: send the input, run `f`, bring the result home,
     /// send it back, reduce. Two of those are 4 MB each at 2²⁰ elements, and
-    /// `runner/examples/reducer.rs` prices a 4 MB upload at ~294 µs and a download at ~718 µs.
+    /// `runner/examples/reducer.rs` prices a 4 MB upload at ~190 µs and a download at ~710 µs on
+    /// an RTX 4080 — the download being the more expensive direction because the memory a host
+    /// reads back is uncached.
     ///
     /// Here `map` is simply the first pass of the same chain. Its output never leaves the device —
     /// the ping-pong hands it straight to the first fold — so the intermediate crossing does not
@@ -124,7 +133,11 @@ impl Gpu {
         // returning. The early returns below release what was allocated before them.
         unsafe {
             let staging = Buffer::staging(self, bytes)?;
-            let source = match Buffer::device_local(self, bytes) {
+            // The source is the one buffer the host writes, so it is the one worth asking to be
+            // reachable from both sides — see `Buffer::shared`. The destination is written only by
+            // the device and read only by the device, and asking for a BAR window to hold it would
+            // spend a scarce heap on a buffer no host ever touches.
+            let source = match Buffer::shared(self, bytes) {
                 Ok(buffer) => buffer,
                 Err(error) => {
                     staging.destroy(self);
@@ -217,15 +230,17 @@ impl Reducer<'_> {
             return Err(Error::NoPipeline);
         };
 
-        let bytes = (self.elements.max(1) * size_of::<u32>()) as u64;
-
         // SAFETY: every buffer and pipeline here is owned by `self` and outlives the call, and the
         // submission waits on a fence before returning.
         let output = unsafe {
-            // Straight from the caller's slice. This used to build a `Vec<u32>` of the whole input
-            // first — four megabytes allocated and copied per call to reinterpret bits that were
-            // already the right bits, and **52%** of the call by measurement.
-            staging.write_floats(self.gpu, input)?;
+            // Straight from the caller's slice, and — where the device has memory both sides can
+            // reach — straight into the buffer the first pass reads. `deliver_floats` picks, and
+            // returns the copy that is left to record, which on such a device is none.
+            //
+            // The slice half came first: this used to build a `Vec<u32>` of the whole input to
+            // reinterpret bits that were already the right bits — four megabytes allocated and
+            // copied per call, **52%** of it by measurement.
+            let upload = deliver_floats(self.gpu, input, staging, source)?;
 
             // The buffers alternate, so which one holds the answer depends on how many passes ran.
             // Reading the wrong one returns the *second to last* fold — a plausible number, and
@@ -246,11 +261,7 @@ impl Reducer<'_> {
             self.gpu.replay(
                 &self.pipelines,
                 &self.workgroups,
-                Some(Staged {
-                    from: staging,
-                    to: source,
-                    bytes,
-                }),
+                upload,
                 Some(Staged {
                     from: answer,
                     to: staging,
