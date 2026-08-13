@@ -160,3 +160,51 @@ fn the_device_reports_a_subgroup_width_that_is_a_power_of_two() {
         "a width that is not a power of two would break every clustered reduction"
     );
 }
+
+#[test]
+fn a_dispatch_wider_than_its_buffer_is_refused_rather_than_run() {
+    // The trap in a one-argument call: the output is sized to the input, so a caller who asks for
+    // more workgroups than the buffer has room for gets a kernel writing off the end of it. That
+    // is undefined behaviour rather than an error — an access violation on one device here and
+    // plausible wrong numbers on another — so it is refused before anything is allocated.
+    let Some(gpu) = device("oversized") else {
+        return;
+    };
+
+    let width = gpu.limits().subgroup_size;
+    let spirv = kernels::scale(width, 2.0).expect("built");
+    let input = ramp(WORKGROUP_SIZE as usize);
+
+    // Exactly one workgroup's worth of buffer, and exactly one workgroup: the boundary holds.
+    assert!(gpu.run(&spirv, &input, 1).is_ok());
+
+    for workgroups in [2_u32, 3, 64] {
+        assert!(
+            matches!(
+                gpu.run(&spirv, &input, workgroups),
+                Err(runner::Error::TooLarge { .. })
+            ),
+            "{workgroups} workgroups over one workgroup's worth of buffer was accepted"
+        );
+    }
+}
+
+#[test]
+fn a_dispatch_that_fills_its_buffer_exactly_is_not_refused() {
+    // The other side of the same boundary. A check that refused this would be unusable: filling
+    // the buffer is what every kernel here is dispatched to do.
+    let Some(gpu) = device("exact") else {
+        return;
+    };
+
+    let width = gpu.limits().subgroup_size;
+    let spirv = kernels::scale(width, 3.0).expect("built");
+
+    for workgroups in [1_u32, 2, 8] {
+        let input = ramp(WORKGROUP_SIZE as usize * workgroups as usize);
+        let output = gpu.run(&spirv, &input, workgroups).expect("dispatched");
+
+        let expected: Vec<f32> = input.iter().map(|value| value * 3.0).collect();
+        assert_eq!(output, expected, "{workgroups} workgroups");
+    }
+}

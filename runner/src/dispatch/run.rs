@@ -22,11 +22,26 @@ impl Gpu {
     /// `simdr` emits. `workgroups` is the dispatch's x dimension; [`Gpu::run_grid`] takes both.
     ///
     /// The words go to `vkCreateShaderModule` exactly as the emitter produced them. Nothing here
-    /// inspects or rewrites them, which is the point: any disagreement that shows up is between
-    /// our module and the driver, with no third opinion in between.
+    /// rewrites them, which is the point: any disagreement that shows up is between our module and
+    /// the driver, with no third opinion in between. They are *read* — see below.
+    ///
+    /// # Both buffers are `input.len()` long
+    ///
+    /// The output is allocated to the same length as the input and returned whole, so a kernel
+    /// that writes fewer elements than it read leaves the rest of the returned vector holding
+    /// whatever the device's memory held — which is zeros on two drivers here and is not on
+    /// lavapipe. Which prefix is meaningful is the caller's arithmetic. [`Gpu::run_bound`] sizes
+    /// the output separately, and takes several inputs while it is there.
+    ///
+    /// That equal length is what makes this a one-argument call, and it is also the trap in it: a
+    /// dispatch big enough to need more elements than the buffer holds writes off the end of it.
+    /// So `workgroups` is checked against the buffer before anything is allocated — the workgroup
+    /// size and the element size are read out of `spirv` rather than taken on trust. See
+    /// [`super::extent`] for what that check is and, more importantly, what it is not.
     ///
     /// # Errors
     ///
+    /// [`Error::TooLarge`] if the dispatch needs more elements than `input` holds,
     /// [`Error::Vulkan`] if any call fails, [`Error::NoPipeline`] if the driver returns none.
     pub fn run(&self, spirv: &[u32], input: &[f32], workgroups: u32) -> Result<Vec<f32>, Error> {
         let words: Vec<u32> = input.iter().map(|value| value.to_bits()).collect();

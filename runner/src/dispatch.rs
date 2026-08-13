@@ -17,6 +17,7 @@
 
 mod bindings;
 mod chain;
+mod extent;
 mod grid;
 mod pipeline;
 mod placement;
@@ -56,6 +57,24 @@ impl Gpu {
     ) -> Result<(Vec<u32>, Duration), Error> {
         let count = input.len();
         let bytes = (count.max(1) * size_of::<u32>()) as u64;
+
+        // **The output buffer is exactly as long as the input, so the dispatch has to fit in it.**
+        // That equal-length rule is what makes this call a one-argument one, and it is also the
+        // trap in it: nothing about `workgroups` is checked against `input.len()`, so a caller who
+        // dispatches twice what their buffer holds gets a kernel writing off the end of it. That
+        // is undefined behaviour — an access violation on one device here and plausible wrong
+        // numbers on another — rather than an error.
+        //
+        // `extent::fits` reads the workgroup size out of the module and refuses instead. It is a
+        // floor rather than a proof: see `dispatch::extent` for what it cannot catch.
+        if !extent::fits(spirv, grid, count) {
+            return Err(Error::TooLarge {
+                words: extent::workgroup_size(spirv)
+                    .map(|size| extent::invocations(grid, size))
+                    .unwrap_or_default() as usize,
+                capacity: count,
+            });
+        }
 
         // SAFETY: every object below is created here and destroyed before returning, and each is
         // used only between a submission and the fence that completes it.
