@@ -460,6 +460,31 @@ the same shape and got the same treatment.
 was an algorithm. Each was a cost the *measurement* had been hiding, and the breakdown found all
 three only once it was made to add up.
 
+### 22. Folding by sixteen — **built, and worth a quarter of what was predicted**
+
+The breakdown's largest row was the chain: fourteen steps, 56% of the call. `kernels::fold_by` adds
+`factor` elements per invocation instead of two, and `folds()` picks the widest factor that still
+leaves a whole workgroup. **Five dispatches instead of fifteen** at 2²⁰, three instead of eight at
+8 192.
+
+| 2²⁰ | halving | by sixteen | |
+| --- | --- | --- | --- |
+| `Reducer::sum` | ~442 µs | ~407 µs | 8% |
+| `Gpu::sum` | ~2357 µs | ~2203 µs | 6% |
+
+Nothing at all at 8 192, where the chain was short already.
+
+**Both arguments for it were wrong, optimistically.** "It halves the memory traffic" is true as a
+ratio and worth ~6 µs, because the first pass reads N either way and the levels that differ are the
+tail. "Ten dispatches at ~15 µs" was ~35 µs total, because that per-step figure comes from a chain
+of *empty* kernels where a barrier has nothing to overlap with.
+
+Kept for being shorter — five pipelines to build and hold instead of fifteen — rather than for the
+8%. The per-step row in `runner/examples/reducer.rs` now says it is an upper bound.
+
+**Fifth measurement lesson of the week and a new kind:** the first four mismeasured a *change*, this
+one mismeasured a *component*. A cost measured in isolation is not the same cost measured in company.
+
 ## 1. A buffer the caller already owns
 
 `reducer_of` covers Σ f(x). What it does not cover is a caller whose data was produced by some

@@ -1939,3 +1939,49 @@ and two submissions that a per-step row cancelled out by being a difference.
 
 **The breakdown found all three, and only once it was made to add up.** It read 52% of the call for
 weeks, and the missing 48% was where every one of them lived.
+
+## Folding by sixteen: five dispatches instead of fifteen, and a quarter of the predicted saving — 2026-08-13
+
+With the breakdown adding up, its largest row was the chain itself: fourteen steps, 237 µs, 56% of
+a 425 µs call. The reduction folded in **halves** — `out[i] = in[i] + in[i + h]` — which takes
+`log₂(N/64)` passes. `kernels::fold_by` adds `factor` elements per invocation instead of two, and
+`folds()` picks the widest factor that still leaves a whole workgroup for the next pass.
+
+Over 2²⁰ elements that is **five dispatches instead of fifteen**, and over 8 192, three instead of
+eight.
+
+Paired against the halving build, alternating runs:
+
+| 2²⁰ | halving | by sixteen | |
+| --- | --- | --- | --- |
+| `Reducer::sum` | ~442 µs | ~407 µs | 8% |
+| `Gpu::sum` | ~2357 µs | ~2203 µs | 6% |
+
+At 8 192 the held reduction does not move at all; only `Gpu::sum` does, and for a reason that has
+nothing to do with the chain — it builds a pipeline per pass, so five fewer passes is five fewer
+pipelines.
+
+### Both arguments for the change were wrong, and both in the optimistic direction
+
+**"It halves the memory traffic."** True as a ratio, irrelevant as a duration. Halving reads about
+`2N` across the chain because every level re-reads what the level above wrote; folding by sixteen
+reads about `1.07N`. But the difference is one buffer's worth — 4 MB at 2²⁰ — which is roughly
+**6 µs** of bandwidth on this device. The *first* pass reads N either way and dominates both; the
+levels that differ are the tail, and the tail is small by construction.
+
+**"Ten fewer dispatches at ~15 µs each is ~150 µs."** It was about 35. The ~15 µs per step comes
+from this file's own chain-of-empty-kernels measurement, and that chain has nothing for a barrier
+to overlap with. In a real reduction the removed passes are the tail — dispatches of one to sixty-
+four workgroups whose launch hides behind the pass before them. **The per-step row is an upper
+bound**, and it now says so.
+
+### The fifth measurement lesson of the week, and a new kind
+
+The first four all mismeasured a *change*. This one mismeasured a *component*: the breakdown's
+step row was honest about what it measured and wrong about what it predicted, because a cost
+measured in isolation is not the same cost measured in company.
+
+Kept anyway, and not for the 8%: five pipelines instead of fifteen is less to build, less to hold
+and less to get wrong, and the chain is nowhere near a command buffer's limit at any size this
+accepts. But the headline number is 8%, not the 35% the arithmetic promised, and the arithmetic is
+written down beside it so the next reader can see which half of it was real.

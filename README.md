@@ -139,7 +139,7 @@ did not.
 
 | Layer | What it is | What it caught |
 | --- | --- | --- |
-| **Unit tests** | 324 in the emitter, decoding what was emitted; 620 across the workspace | Everything cheap |
+| **Unit tests** | 324 in the emitter, decoding what was emitted; 622 across the workspace | Everything cheap |
 | **`spirv-val`** | Khronos' validator, at `--target-env vulkan1.1` | `OpLoopMerge` in the wrong position — a unit test asserted "merge before branch" and passed while the comparison sat between them. And, the first time it was pointed at `Lanes::dot_unsigned`, that `OpUDot` had been emitted with a **signed** result type: invalid SPIR-V in a shipped public method that had no caller, no unit test and no validator coverage |
 | **Execution** | Real dispatches on a real GPU, against CPU references | A missing staging write: every computing kernel returned garbage and the empty-kernel test still passed |
 | **Other widths** | The same suite at **4, 8, 16, 32 and 64** lanes, across three devices | Ten tests that had conflated "32 lanes" with "the subgroup", four of which could not build at all because a vote has no clustered form. Then, at 8: a fuzzer generating shuffles that leave the subgroup, and three tests assuming uninitialised device memory is zero. Then, at 4: `kernels::scale` — *the control kernel* — reading and writing eight times its buffer, which had been undefined behaviour returning zeros at width 8 for a day before it became an access violation at 4 |
@@ -352,6 +352,10 @@ remove the host copies — it removes the setup the measurement said was there t
 A full-buffer reduction is a chain of a dozen pipelines rather than one, and `Gpu::reducer` is the
 same idea applied to all of them: **11.2×** over 8 192 elements and **5.6×** over 2²⁰.
 
+The chain itself is five dispatches over 2²⁰ and three over 8 192, folding sixteen elements into
+one at each level rather than two. That is a quarter of the passes halving needed — and worth
+about 8%, which is a quarter of what its arithmetic promised. `notes/FINDINGS.md` has both halves.
+
 ```rust
 let mut reducer = gpu.reducer(8_192)?;   // every pipeline built once
 let total = reducer.sum(&input)?.total;  // and again, and again
@@ -368,10 +372,10 @@ Measured rather than argued, each row a difference between two calls that differ
 
 | | per call | share |
 | --- | --- | --- |
-| fourteen chained steps — one barrier each, nothing copied | 237 µs | 56% |
-| the input's four megabytes | 201 µs | 47% |
-| one submission and its fence | 63 µs | 15% |
-| **accounted for** | **501 µs** | **118%** |
+| the chained steps — one barrier each, nothing copied | 76 µs | 19% |
+| the input's four megabytes | 205 µs | 52% |
+| one submission and its fence | 56 µs | 14% |
+| **accounted for** | **337 µs** | **86%** |
 | *(a second and third submission, no longer paid)* | *126 µs* | *30%* |
 | *(a whole-buffer download, no longer paid)* | *697 µs* | *164%* |
 | *(an `f32` → `u32` copy of the input, no longer paid)* | *583 µs* | *137%* |
@@ -389,13 +393,17 @@ Made to add up, it named three things in a row:
 | where the day started | ~1930 µs |
 | reading one word home instead of the whole buffer | ~1140 µs |
 | writing the caller's floats straight into the mapping | ~548 µs |
-| recording the copies inside the chain's submission, one instead of three | **~424 µs** |
+| recording the copies inside the chain's submission, one instead of three | ~424 µs |
+| folding by sixteen — five dispatches instead of fifteen | **~407 µs** |
 
-None of the three was an algorithm. A download sized to the buffer rather than the answer; a
-conversion of bits that were already the right bits; and two submissions that existed only to move
-bytes between buffers a third submission already touched.
+Only the last of the four was an algorithm. The other three were a download sized to the buffer
+rather than the answer; a conversion of bits that were already the right bits; and two submissions
+that existed only to move bytes between buffers a third submission already touched.
 
-**When a breakdown does not come close to the whole, the gap is the finding.**
+**When a breakdown does not come close to the whole, the gap is the finding.** And when it comes to
+*less* than the whole — 86% above — the rows that remain are upper bounds rather than debts: the
+step row is measured on a chain of empty kernels, where a barrier has nothing to overlap with, and
+it overestimated a real chained step by about four times. That is written beside it.
 
 That last row is where most of the work went, and it took three attempts to notice. Two changes
 shaved the device side — shortening the between-pass copies, then replacing them with a ping-pong

@@ -43,7 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Emitting the modules. No device, no driver — this is the emitter alone.
     let emitting = repeat(|| {
         for fold in &folds {
-            kernels::fold_halves(width, fold.half).expect("built");
+            kernels::fold_by(width, fold.factor, fold.stride).expect("built");
         }
     });
 
@@ -54,7 +54,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the pipeline itself is nearer 180 — allocation was the larger half of its own measurement.
     let modules: Vec<Vec<u32>> = folds
         .iter()
-        .map(|fold| kernels::fold_halves(width, fold.half).expect("built"))
+        .map(|fold| kernels::fold_by(width, fold.factor, fold.stride).expect("built"))
         .collect();
     let none = Specialization::none();
     let per_module_builds: Vec<(&[u32], &Specialization)> = modules
@@ -70,7 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let open = kernels::fold_halves_open(width)?;
     let specializations: Vec<Specialization> = folds
         .iter()
-        .map(|fold| Specialization::none().set(FOLD_HALF_SPEC_ID, fold.half))
+        .map(|fold| Specialization::none().set(FOLD_HALF_SPEC_ID, fold.stride))
         .collect();
     let specialized_builds: Vec<(&[u32], &Specialization)> = specializations
         .iter()

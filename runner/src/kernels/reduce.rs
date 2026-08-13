@@ -75,13 +75,46 @@ fn butterfly_pair_sum_at<const LANES: u32>(
 ///
 /// [`LaneError`] if the module cannot be built.
 fn fold_halves_at<const LANES: u32>(subgroup: u32, half: u32) -> Result<Vec<u32>, LaneError> {
+    fold_by_at::<LANES>(subgroup, 2, half)
+}
+
+/// `out[i] = Σ in[i + k × stride]` for `k` in `0..factor` — a fold by more than two.
+///
+/// A chain of these is a quarter as long as a chain of halvings: `log₁₆` passes instead of `log₂`,
+/// or five dispatches instead of fifteen over 2²⁰ elements. `super::super::reduction::MAX_FOLD`
+/// records what that is worth once measured, which is **less than the arithmetic suggests** —
+/// about 8% at 2²⁰ and nothing at 8 192.
+///
+/// `stride` is three numbers at once and they are the same number: the distance between the
+/// elements one invocation adds, how many invocations there are, and how many elements the pass
+/// leaves behind.
+///
+/// # Errors
+///
+/// [`LaneError`] if the module cannot be built.
+pub fn fold_by(subgroup: u32, factor: u32, stride: u32) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup!(subgroup, fold_by_at, factor, stride)
+}
+
+fn fold_by_at<const LANES: u32>(
+    subgroup: u32,
+    factor: u32,
+    stride: u32,
+) -> Result<Vec<u32>, LaneError> {
     use simdr::lanes::F32;
 
     let mut kernel = Kernel::<F32>::new(shape(subgroup))?;
-    let near = kernel.load::<LANES>(0)?;
-    let far = kernel.load_offset::<LANES>(0, half)?;
-    let folded = kernel.lanes()?.add(near, far)?;
-    kernel.store(1, folded)?;
+
+    // The first outside the fold, so there is no "nothing yet" case to default. A factor of one is
+    // a copy, which is what it should be rather than an error: the plan never asks for one, and an
+    // arm nothing can reach is an equivalent mutant waiting to be reported.
+    let mut total = kernel.load::<LANES>(0)?;
+    for step in 1..factor {
+        let next = kernel.load_offset::<LANES>(0, step.saturating_mul(stride))?;
+        total = kernel.lanes()?.add(total, next)?;
+    }
+
+    kernel.store(1, total)?;
     kernel.finish()
 }
 

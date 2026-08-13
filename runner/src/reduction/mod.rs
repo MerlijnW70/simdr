@@ -112,7 +112,7 @@ impl Gpu {
         // failure happens before anything is submitted.
         let mut modules = Vec::new();
         for step in folds(input.len()) {
-            let words = kernels::fold_halves(width, step.half).map_err(Error::Emit)?;
+            let words = kernels::fold_by(width, step.factor, step.stride).map_err(Error::Emit)?;
             modules.push((words, step.workgroups));
         }
         // The last pass crosses between the subgroups of the final workgroup, through shared
@@ -146,15 +146,46 @@ impl Gpu {
     }
 }
 
-/// One halving pass: how far apart the two operands are, and how many workgroups run it.
+/// One folding pass: how many elements each invocation adds, how far apart they are, and how many
+/// workgroups run it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Fold {
-    /// The offset between the two elements each invocation adds — and how many invocations there
-    /// are, since the dispatch is sized to exactly that.
-    pub half: u32,
-    /// Workgroups to dispatch, which is `half / WORKGROUP_SIZE` and nothing else.
+    /// How many elements each invocation adds together.
+    ///
+    /// Two, until 2026-08-13. See [`MAX_FOLD`] for why it is sixteen where it can be.
+    pub factor: u32,
+    /// The offset between those elements — and how many invocations there are, and how many
+    /// elements the pass leaves behind. All three are the same number.
+    pub stride: u32,
+    /// Workgroups to dispatch, which is `stride / WORKGROUP_SIZE` and nothing else.
     pub workgroups: u32,
 }
+
+/// The most elements one invocation will add in a single pass.
+///
+/// Halving takes `log₂(N/64)` passes to reduce N elements; folding by sixteen takes a quarter as
+/// many. Over 2²⁰ elements that is **five dispatches instead of fifteen**.
+///
+/// # What it is worth, which is less than it looks
+///
+/// Measured, paired against the halving build: **~8%** off `Reducer::sum` at 2²⁰ (~442 → ~407 µs)
+/// and nothing at all at 8 192, where the chain was short already. `Gpu::sum` gains more — ~6% —
+/// and for a different reason: it builds a pipeline per pass, so ten fewer passes is ten fewer
+/// pipelines.
+///
+/// Two arguments for this change were *wrong*, and both were wrong in the optimistic direction:
+///
+/// - **"It halves the memory traffic."** True as a ratio and irrelevant as a duration. Halving
+///   reads ~2N and this reads ~1.07N, but the difference is one buffer's worth — 4 MB at 2²⁰,
+///   which is about **6 µs** of bandwidth. The first pass reads N either way and dominates both.
+/// - **"Ten fewer dispatches at ~15 µs each is ~150 µs."** That per-step figure comes from a chain
+///   of *empty* kernels with nothing to overlap, and it overestimates a real chained step by
+///   about four times. The passes removed are the tail, where the dispatches are tiny.
+///
+/// Sixteen rather than more because the passes have to keep landing on whole workgroups: the last
+/// fold has to leave exactly [`WORKGROUP_SIZE`] elements for the finisher, and a larger factor
+/// overshoots that sooner and spends the difference on a narrower final fold anyway.
+pub const MAX_FOLD: u32 = 16;
 
 /// The folding passes for a buffer of `length`, largest first.
 ///
@@ -169,18 +200,41 @@ pub struct Fold {
 #[must_use]
 pub fn folds(length: usize) -> Vec<Fold> {
     let mut steps = Vec::new();
-    let mut remaining = length / 2;
+    let mut remaining = length;
 
-    while remaining >= WORKGROUP_SIZE as usize {
-        let half = remaining as u32;
+    // Down to exactly one workgroup, which is what the finisher takes. `remaining` starts a power
+    // of two of at least two workgroups and every factor is a power of two that divides it, so it
+    // stays one and the loop ends on `WORKGROUP_SIZE` rather than stepping past it.
+    while remaining > WORKGROUP_SIZE as usize {
+        let factor = fold_factor(remaining);
+        let stride = (remaining / factor as usize) as u32;
+
         steps.push(Fold {
-            half,
-            workgroups: half / WORKGROUP_SIZE,
+            factor,
+            stride,
+            workgroups: stride / WORKGROUP_SIZE,
         });
-        remaining /= 2;
+        remaining = stride as usize;
     }
 
     steps
+}
+
+/// The widest fold that still leaves a whole workgroup behind.
+///
+/// A fold by `f` leaves `remaining / f`, and that has to be at least one workgroup — so `f` can be
+/// at most **how many workgroups there are**, and at most [`MAX_FOLD`].
+///
+/// `remaining` is a power of two of more than one workgroup whenever [`folds`] asks, so `groups` is
+/// a power of two of at least two: there is no rounding to do and no floor to apply.
+///
+/// This was a loop that started at `MAX_FOLD` and halved `while factor > 2 && …`. The guard could
+/// never fire — at a factor of two the condition beside it is already false, because `remaining` is
+/// never less than two workgroups — so the mutation gate reported it as an equivalent mutant, and
+/// it was right. Saying the bound directly removes the loop as well as the unfalsifiable branch.
+fn fold_factor(remaining: usize) -> u32 {
+    let groups = (remaining / WORKGROUP_SIZE as usize) as u32;
+    groups.min(MAX_FOLD)
 }
 
 /// How many dispatches [`Gpu::sum`] will run for a buffer of `length`.
@@ -195,14 +249,21 @@ pub fn dispatches_for(length: usize) -> usize {
 mod tests {
     use super::*;
 
+    /// Every length the reduction accepts, up to 2²⁴.
+    fn lengths() -> impl Iterator<Item = usize> {
+        (7..=24).map(|power| 1_usize << power)
+    }
+
     #[test]
     fn a_buffer_of_two_workgroups_folds_once_and_finishes() {
-        // 128 → fold at 64 → 64 elements → the workgroup pass.
+        // 128 → one fold of two → 64 elements → the workgroup pass. Two is the only factor that
+        // fits here: anything wider would leave less than a workgroup.
         assert_eq!(dispatches_for(128), 2);
         assert_eq!(
             folds(128),
             vec![Fold {
-                half: 64,
+                factor: 2,
+                stride: 64,
                 workgroups: 1
             }]
         );
@@ -210,31 +271,85 @@ mod tests {
 
     #[test]
     fn each_fold_dispatches_exactly_the_invocations_it_needs() {
-        // The mutation that survived: `half / WORKGROUP_SIZE` changed to `half *` over-dispatches
-        // by four thousand times and still gives the right answer, because the extra invocations
-        // write past the buffer and are discarded. Only the clock notices, and no test watches it.
-        for fold in folds(65_536) {
+        // The mutation that survived once: `stride / WORKGROUP_SIZE` changed to `stride *`
+        // over-dispatches by four thousand times and still gives the right answer, because the
+        // extra invocations write past the buffer and are discarded. Only the clock notices, and
+        // no test watches it.
+        for length in lengths() {
+            for fold in folds(length) {
+                assert_eq!(
+                    fold.workgroups * WORKGROUP_SIZE,
+                    fold.stride,
+                    "at {length}: a fold leaving {} dispatched {} workgroups",
+                    fold.stride,
+                    fold.workgroups
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_chain_consumes_the_whole_buffer_and_leaves_exactly_one_workgroup() {
+        // The property that makes the answer right rather than merely plausible: the first fold
+        // reads every element, each fold after it reads exactly what the one before left, and the
+        // last hands the finisher the one workgroup it expects. A chain that lost a level would
+        // return a partial sum, which looks like an answer.
+        for length in lengths() {
+            let steps = folds(length);
+            let mut remaining = length;
+
+            for fold in &steps {
+                assert_eq!(
+                    fold.factor as usize * fold.stride as usize,
+                    remaining,
+                    "at {length}: a fold read {} of {remaining} elements",
+                    fold.factor as usize * fold.stride as usize
+                );
+                remaining = fold.stride as usize;
+            }
+
             assert_eq!(
-                fold.workgroups * WORKGROUP_SIZE,
-                fold.half,
-                "a fold of {} dispatched {} workgroups",
-                fold.half,
-                fold.workgroups
+                remaining, WORKGROUP_SIZE as usize,
+                "at {length}: the finisher was handed {remaining} elements"
             );
         }
     }
 
     #[test]
-    fn the_folds_halve_from_half_the_buffer_down_to_one_workgroup() {
-        let steps = folds(1_024);
-        let halves: Vec<u32> = steps.iter().map(|fold| fold.half).collect();
+    fn every_fold_is_the_widest_that_still_leaves_a_whole_workgroup() {
+        // Narrower than it needs to be is a longer chain; wider is a fold that leaves less than a
+        // workgroup for the next dispatch, which cannot be dispatched at all.
+        for length in lengths() {
+            for fold in folds(length) {
+                assert!(fold.factor <= MAX_FOLD, "at {length}: {fold:?}");
+                assert!(fold.factor >= 2, "at {length}: {fold:?}");
 
-        assert_eq!(halves, vec![512, 256, 128, 64]);
-        assert_eq!(
-            steps.last().map(|fold| fold.workgroups),
-            Some(1),
-            "the last fold is one workgroup, which is the smallest dispatch there is"
+                let wider = fold.factor * 2;
+                let leaves = fold.factor as usize * fold.stride as usize / wider as usize;
+                assert!(
+                    fold.factor == MAX_FOLD || leaves < WORKGROUP_SIZE as usize,
+                    "at {length}: {fold:?} could have folded by {wider} and left {leaves}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_wider_fold_reads_the_buffer_about_once_where_halving_read_it_twice() {
+        // The reason for [`MAX_FOLD`], stated as arithmetic rather than as a timing. Halving reads
+        // `2h` at every level for h = N/2, N/4, …, which comes to very nearly 2N; folding by
+        // sixteen reads N + N/16 + N/256 + …, which is a little over N.
+        let length = 1_usize << 20;
+        let read: usize = folds(length)
+            .iter()
+            .map(|fold| fold.factor as usize * fold.stride as usize)
+            .sum();
+
+        assert!(
+            read < length * 6 / 5,
+            "the chain reads {read} for {length} elements, which is not much better than halving"
         );
+        assert!(read >= length, "it has to read every element at least once");
     }
 
     #[test]
@@ -244,19 +359,34 @@ mod tests {
     }
 
     #[test]
-    fn each_doubling_of_the_input_costs_exactly_one_more_dispatch() {
-        let mut previous = dispatches_for(128);
-        for power in 8..=20 {
-            let next = dispatches_for(1 << power);
-            assert_eq!(next, previous + 1, "at 2^{power}");
+    fn the_chain_grows_with_the_logarithm_of_the_input_and_not_with_its_length() {
+        // It used to be one more dispatch per doubling. Four doublings now buy one, because each
+        // fold takes sixteen elements to one — so a buffer sixteen times larger costs one pass
+        // more rather than four.
+        assert_eq!(
+            dispatches_for(1 << 20),
+            5,
+            "2^20: four folds and a finisher"
+        );
+        assert_eq!(dispatches_for(1 << 24), 6, "sixteen times the elements");
+
+        let mut previous = 0;
+        for length in lengths() {
+            let next = dispatches_for(length);
+            assert!(
+                next >= previous,
+                "at {length}: a larger buffer took fewer dispatches"
+            );
             previous = next;
         }
     }
 
     #[test]
-    fn a_million_elements_take_fewer_than_twenty_dispatches() {
-        // The point of halving: the pass count is logarithmic, so the chain stays short enough to
-        // fit one command buffer however large the buffer gets.
-        assert_eq!(dispatches_for(1 << 20), 15);
+    fn a_million_elements_take_a_handful_of_dispatches() {
+        // The pass count is logarithmic, so the chain stays short however large the buffer gets —
+        // and the base of that logarithm is `MAX_FOLD` rather than two, which is the difference
+        // between five dispatches and fifteen. This asserted 15 while the folds halved.
+        assert_eq!(dispatches_for(1 << 20), 5);
+        assert!(dispatches_for(1 << 30) < 12, "still one command buffer");
     }
 }

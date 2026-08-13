@@ -67,7 +67,7 @@ pub(crate) fn stages(
 
     for step in &plan {
         stages.push(Stage {
-            words: kernels::fold_halves(width, step.half).map_err(Error::Emit)?,
+            words: kernels::fold_by(width, step.factor, step.stride).map_err(Error::Emit)?,
             workgroups: step.workgroups,
         });
     }
@@ -149,26 +149,29 @@ mod tests {
     }
 
     #[test]
-    fn the_folds_halve_and_the_first_one_covers_half_the_input() {
-        // Between the map and the finisher, each fold dispatches half the workgroups of the one
-        // before it. A list that stopped halving would still reduce, and would reduce the wrong
-        // elements.
-        let elements = 1_usize << 16;
-        let stages = stages(WIDTH, elements, None).expect("planned");
+    fn the_stages_dispatch_exactly_what_the_fold_plan_says() {
+        // Two descriptions of the same chain — `folds` decides the shape and this builds modules
+        // for it — and a stage dispatched at a count the plan did not choose would read elements
+        // no fold ever wrote. They are checked against each other rather than against a literal,
+        // because the literals are what went stale when the folds stopped halving.
+        for power in 7..=20 {
+            let elements = 1_usize << power;
+            let stages = stages(WIDTH, elements, None).expect("planned");
+            let plan = crate::reduction::folds(elements);
 
-        let folds: Vec<u32> = stages
-            .iter()
-            .take(stages.len() - 1)
-            .map(|stage| stage.workgroups)
-            .collect();
+            let dispatched: Vec<u32> = stages
+                .iter()
+                .take(stages.len() - 1)
+                .map(|stage| stage.workgroups)
+                .collect();
+            let planned: Vec<u32> = plan.iter().map(|fold| fold.workgroups).collect();
 
-        assert_eq!(
-            folds[0] as usize * WORKGROUP_SIZE as usize,
-            elements / 2,
-            "the first fold does not cover half the input"
-        );
-        for pair in folds.windows(2) {
-            assert_eq!(pair[1], pair[0] / 2, "the folds stopped halving: {folds:?}");
+            assert_eq!(dispatched, planned, "at {elements} elements");
+            assert_eq!(
+                stages.last().map(|stage| stage.workgroups),
+                Some(1),
+                "the finisher is one workgroup"
+            );
         }
     }
 

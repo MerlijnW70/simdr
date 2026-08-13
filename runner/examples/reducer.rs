@@ -191,7 +191,10 @@ fn mapped(gpu: &Gpu) -> Result<(), Box<dyn std::error::Error>> {
 /// from an estimate:
 ///
 /// - **chained step** — a chain of empty kernels at [`LONG`] passes against the same chain at one.
-///   Both do nothing else, so the difference is one dispatch and the barrier before it.
+///   Both do nothing else, so the difference is one dispatch and the barrier before it. **Read this
+///   row as an upper bound**: a chain of empty kernels has nothing for a barrier to overlap with,
+///   and when ten of these were removed from the reduction the call moved by about a quarter of
+///   what this row predicted.
 /// - **host upload / download** — `Session::write` and `Session::read` on a session that is already
 ///   built, so no allocation and no pipeline creation is in the number.
 /// - **the `f32` copy** and **one submission** — added because the rows above accounted for only
@@ -255,7 +258,11 @@ fn breakdown(gpu: &Gpu, whole: Duration) -> Result<(), Box<dyn std::error::Error
         chained.get(1).ok_or("no long chain")?,
     );
     let each = long.median.saturating_sub(short.median) / (LONG as u32 - 1);
-    let fourteen = each * 14;
+    // As many as this reduction actually chains, asked of the planner rather than written down.
+    // It was a literal 14 — right while the folds halved, and wrong the moment they stopped: the
+    // same reduction is five dispatches now, and the row would have gone on charging for fifteen.
+    let steps = (runner::reduction::dispatches_for(ELEMENTS) - 1) as u32;
+    let chained = each * steps;
 
     println!(
         "  one chained step — a dispatch and the barrier before it — costs about {}, from\n\
@@ -337,10 +344,10 @@ fn breakdown(gpu: &Gpu, whole: Duration) -> Result<(), Box<dyn std::error::Error
     // The input's four megabytes on their own: the whole write minus a one-word write, which pays
     // the same map, unmap and submission and almost none of the copying.
     let payload = upload.saturating_sub(mapping);
-    let accounted = fourteen + payload + submission;
+    let accounted = chained + payload + submission;
 
     for (name, taken) in [
-        ("fourteen chained steps", fourteen),
+        ("the chained steps", chained),
         ("the input's four megabytes", payload),
         ("one submission and its fence", submission),
         ("---- accounted for ----", accounted),
