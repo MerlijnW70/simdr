@@ -505,6 +505,16 @@ once the obvious work ran out. It is ordered by how badly it is wrong rather tha
 would be, because the first four are all *things that are already false* and the rest are things
 that are merely absent.
 
+**Nine of the thirteen are done**, in one sitting on 2026-08-13/14: 1, 3, 4, 5, 6, 7, 9, 13 and the
+file split under 3. Two of those ended differently from how they were written — item 3's fix needed
+nothing declared, and item 9 turned out not to be worth doing. What is left is **8** (the strip-mined
+and clustered scan, which is the interesting one), **10** (the breakdown that reads 123%), **11**
+(deferred on purpose) and **12** (a third vendor, which needs hardware that is not here).
+
+The three most useful things that happened were not on the list. Item 3 found **eleven tests reading
+past their input**; item 4 found the **MSRV was wrong by nine releases**; and item 7 stopped being a
+nicety when it turned out a float scan cannot recover its exclusive form by subtraction.
+
 One item was prompted from outside. VectorWare published a piece describing the same premise this
 project runs on — a warp is a vector unit, so `Simd<T, N>` lowers onto lane instructions — from a
 compiler backend consuming `core::simd`. Their post is honest about the same hard part this file

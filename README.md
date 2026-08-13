@@ -171,12 +171,12 @@ let answer = lanes.choose_uniform(
 ## How this is known to work
 
 Validity is not correctness. A kernel can satisfy the validator down to the last rule and still
-compute the wrong number, so there are six layers and each has caught something the ones above it
+compute the wrong number, so there are seven layers and each has caught something the ones above it
 did not.
 
 | Layer | What it is | What it caught |
 | --- | --- | --- |
-| **Unit tests** | 324 in the emitter, decoding what was emitted; 622 across the workspace | Everything cheap |
+| **Unit tests** | 333 in the emitter, decoding what was emitted; 706 across the workspace | Everything cheap |
 | **`spirv-val`** | Khronos' validator, at `--target-env vulkan1.1` | `OpLoopMerge` in the wrong position — a unit test asserted "merge before branch" and passed while the comparison sat between them. And, the first time it was pointed at `Lanes::dot_unsigned`, that `OpUDot` had been emitted with a **signed** result type: invalid SPIR-V in a shipped public method that had no caller, no unit test and no validator coverage |
 | **Execution** | Real dispatches on a real GPU, against CPU references | A missing staging write: every computing kernel returned garbage and the empty-kernel test still passed |
 | **Other widths** | The same suite at **4, 8, 16, 32 and 64** lanes, across three devices | Ten tests that had conflated "32 lanes" with "the subgroup", four of which could not build at all because a vote has no clustered form. Then, at 8: a fuzzer generating shuffles that leave the subgroup, and three tests assuming uninitialised device memory is zero. Then, at 4: `kernels::scale` — *the control kernel* — reading and writing eight times its buffer, which had been undefined behaviour returning zeros at width 8 for a day before it became an access violation at 4. And that was not the last of them: eleven more of the same shape were still there four days later, found by the row below rather than by running at 4 again |
