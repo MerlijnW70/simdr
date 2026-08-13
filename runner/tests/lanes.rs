@@ -49,17 +49,34 @@ fn a_workgroup_reduction_crosses_between_subgroups() {
 
     // The discriminator that matters: a subgroup reduction over the same input gives a *different*
     // answer, so this is not passing because the two happen to coincide.
+    //
+    // The **whole-subgroup** form, not `lane_sum::<F32, 32>`. A hard-coded 32 lanes is one element
+    // per invocation on a 32-wide subgroup and eight on a four-wide one, so on a narrow device that
+    // spelling read eight times this buffer — and it read a *different input* than the workgroup
+    // sum above, which is not the comparison this test claims to be making. It passed anyway,
+    // because the first 64 elements were right and the rest was off the end.
     let per_subgroup = gpu
         .run(
-            &kernels::lane_sum::<F32, 32>(limits.subgroup_size).expect("built"),
+            &kernels::reduce::lane_sum_whole::<F32>(limits.subgroup_size).expect("built"),
             &input,
             1,
         )
         .expect("dispatched");
-    assert_ne!(
-        output, per_subgroup,
-        "the workgroup sum equals the subgroup sum, so nothing crossed between them"
-    );
+    // **Whether they should differ depends on the device.** A workgroup holds
+    // `WORKGROUP_SIZE / width` subgroups, and on a 64-wide one that is exactly one — so there is
+    // nothing to cross between, and the two reductions are the same reduction. Asserting they
+    // differ would be asserting that this device is not the one it is.
+    if limits.subgroup_size < WORKGROUP_SIZE {
+        assert_ne!(
+            output, per_subgroup,
+            "the workgroup sum equals the subgroup sum, so nothing crossed between them"
+        );
+    } else {
+        assert_eq!(
+            output, per_subgroup,
+            "one subgroup fills this workgroup, so the two reductions cover the same lanes"
+        );
+    }
     assert_eq!(output.first(), output.last(), "and it is uniform");
 }
 

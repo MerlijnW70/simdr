@@ -39,6 +39,25 @@ pub fn device(label: &str) -> Option<Gpu> {
     }
 }
 
+/// How many elements a kernel built for `lanes` touches, on a device of `width` lanes.
+///
+/// **A buffer of one workgroup is wrong for most kernels here, and was wrong for eleven tests.**
+/// A vector of 32 lanes is one element per invocation only on a 32-wide subgroup; narrower, it
+/// strip-mines — four elements each at 8 lanes, eight at 4. Sizing to `WORKGROUP_SIZE` then hands
+/// the kernel an eighth of what it reads.
+///
+/// Nothing caught that for months. Every test doing it passed on the two GPUs in this machine,
+/// which report 32 and 64, and read off the end of its input on lavapipe at 4, 8 and 16 — right in
+/// the first sixty-four elements and undefined after them. `dispatch::extent` learnt to recover the
+/// strip count from a module's own address arithmetic and refused all eleven the first time it ran.
+///
+/// `lanes` is the count the *kernel* was built for, not the device's. Passing the device's width
+/// gives one element per invocation, which is what a whole-subgroup kernel does at every width.
+pub fn elements(width: u32, lanes: u32) -> usize {
+    let strips = (lanes / width.max(1)).max(1) as usize;
+    runner::kernels::WORKGROUP_SIZE as usize * strips
+}
+
 /// A deterministic input that makes a wrong answer obvious.
 ///
 /// Every element distinct, and small enough that sums stay exact in `f32`: a reduction over a few

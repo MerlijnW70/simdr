@@ -2046,3 +2046,53 @@ buffer is made.** Nothing about the memory changed between those two columns.
 the call itself got a third shorter while the rows — each timed in isolation, each paying its own
 fixed costs — did not. Two of the three are upper bounds by construction and now say so in the
 table itself. It is a ranking of what to attack next, not a budget that adds up.
+
+## Eleven tests were reading past their input, and running at four lanes had not found them
+
+`dispatch::extent` was extended to recover the strip count from a module's own address arithmetic —
+`Kernel::run_start` emits `group × (workgroup × strips)`, and the workgroup size is already read
+from `LocalSize`, so dividing the constant by it gives the count back. Nothing had to be declared
+and no second copy of the number exists.
+
+It refused eleven tests the first time it ran, across five files:
+
+| file | tests | the kernel |
+| --- | --- | --- |
+| `runner/tests/extended.rs` | 8 | `clamped`, `magnitude`, `larger`, `smaller`, `root`, `fused_square` at 32 lanes |
+| `runner/tests/narrow.rs` | 3→1 | `narrow_add`, `narrow_clamp` at 32 lanes |
+| `runner/tests/specialized.rs` | 6 | `specialized_add`, `specialized_affine`, `specialized_derived` at 32 lanes |
+| `runner/tests/lanes.rs` | 1 | `lane_sum::<F32, 32>` as a discriminator |
+
+Every one of them paired a kernel built for **32 lanes** with a buffer of **one workgroup**. That is
+one element per invocation on a 32-wide subgroup and eight on a four-wide one, so on lavapipe each
+was handed an eighth of what its kernel reads — right in the first sixty-four elements and off the
+end for the rest.
+
+**They had all been passing.** Not skipped, not flaky: green at widths 4, 8 and 16 in every run
+since those widths were added, because the part of the answer that was checked happened to be the
+part that was in bounds.
+
+### What this says about the width sweep
+
+`README.md` has claimed for weeks that running at 4, 8 and 16 lanes is what catches a kernel
+conflating "32 lanes" with "the subgroup" — and it did catch `kernels::scale`, loudly, with an
+access violation. The eleven below it were the same bug in the same week and the sweep ran straight
+past them, because an out-of-bounds *read* is only an access violation when it crosses a page.
+
+So the sweep finds this class when it is unlucky and the bounds check finds it always. The two are
+not substitutes: the sweep is what proves the *answers* are right at every width, and nothing about
+the bounds check says a number is correct.
+
+### The fix, and one place it was the wrong fix
+
+Ten of them are a buffer sized to `WORKGROUP_SIZE × strips` rather than `WORKGROUP_SIZE`, and the
+helper that computes it now lives once in `runner/tests/common/mod.rs` rather than being copied per
+file — it was copied into two before that was obvious.
+
+The eleventh is different. `lanes.rs` used `lane_sum::<F32, 32>` as a *discriminator*: a subgroup
+reduction whose answer should differ from a workgroup reduction over the same input. Sizing its
+buffer up would have fixed the over-read and left the test comparing two different inputs. The whole
+-subgroup form is what it meant, and that in turn made the assertion false on a 64-wide device —
+where one subgroup fills the workgroup and the two reductions cover the same lanes. The test now
+says which relationship it expects at which width, which is what it should have said in the first
+place.

@@ -15,15 +15,10 @@
 
 mod common;
 
-use common::device;
+use common::{device, elements};
 use runner::kernels::{self, WORKGROUP_SIZE};
 use simdr::half;
 use simdr::lanes::{F16, I8, I16, U8, U16};
-
-/// The invocations one workgroup runs, as a `usize`.
-fn count() -> usize {
-    WORKGROUP_SIZE as usize
-}
 
 #[test]
 fn a_byte_kernel_adds_at_eight_bits_and_wraps_there() {
@@ -38,7 +33,9 @@ fn a_byte_kernel_adds_at_eight_bits_and_wraps_there() {
     // A ramp that crosses 127, so the last elements wrap into the negatives. That wrap is the
     // claim: if the device were computing at 32 bits and truncating on the way out it would give
     // the same answer, but if the *buffer* were being read at the wrong stride it would not.
-    let input: Vec<u8> = (0..count()).map(|index| index as u8).collect();
+    let input: Vec<u8> = (0..elements(limits.subgroup_size, 32))
+        .map(|index| index as u8)
+        .collect();
 
     let output = gpu
         .run_bytes(
@@ -48,7 +45,7 @@ fn a_byte_kernel_adds_at_eight_bits_and_wraps_there() {
         )
         .expect("dispatched");
 
-    let expected: Vec<u8> = (0..count())
+    let expected: Vec<u8> = (0..elements(limits.subgroup_size, 32))
         .map(|index| (index as i8).wrapping_add(100) as u8)
         .collect();
 
@@ -69,7 +66,9 @@ fn an_unsigned_byte_kernel_wraps_the_other_way() {
         return;
     }
 
-    let input: Vec<u8> = (0..count()).map(|index| (index * 4) as u8).collect();
+    let input: Vec<u8> = (0..elements(limits.subgroup_size, 32))
+        .map(|index| (index * 4) as u8)
+        .collect();
 
     let output = gpu
         .run_bytes(
@@ -98,7 +97,9 @@ fn every_element_of_a_byte_buffer_is_its_own_byte() {
         return;
     }
 
-    let input: Vec<u8> = (0..count()).map(|index| (index % 61) as u8).collect();
+    let input: Vec<u8> = (0..elements(limits.subgroup_size, 32))
+        .map(|index| (index % 61) as u8)
+        .collect();
 
     let output = gpu
         .run_bytes(
@@ -124,7 +125,11 @@ fn a_16_bit_kernel_adds_at_sixteen_bits() {
         return;
     }
 
-    let input: Vec<u16> = (0..count()).map(|index| (index as u16) * 1000).collect();
+    let input: Vec<u16> = (0..elements(limits.subgroup_size, 32))
+        // Bounded, because the buffer is eight times longer on a four-wide device and `index *
+        // 1000` leaves a `u16` at 66.
+        .map(|index| (index % 60) as u16 * 1000)
+        .collect();
 
     let output = gpu
         .run_halves(
@@ -160,7 +165,10 @@ fn an_unsigned_16_bit_clamp_holds_its_bounds() {
         return;
     }
 
-    let input: Vec<u16> = (0..count()).map(|index| (index as u16) * 700).collect();
+    let input: Vec<u16> = (0..elements(limits.subgroup_size, 32))
+        // Bounded, as above.
+        .map(|index| (index % 90) as u16 * 700)
+        .collect();
 
     let output = gpu
         .run_halves(
@@ -191,7 +199,7 @@ fn a_half_kernel_computes_in_halves_and_not_in_floats() {
     // 2048 is where a half's precision runs out: it steps by two from there, so 2048 + 1 is 2048
     // and an `f32` computing the same sum would give 2049. That difference is the assertion — it
     // is the only way to tell a real `f16` add from a widened one.
-    let input: Vec<u16> = (0..count())
+    let input: Vec<u16> = (0..elements(limits.subgroup_size, 32))
         .map(|index| half::from_f32(2048.0 + index as f32))
         .collect();
 
@@ -245,7 +253,11 @@ fn a_narrow_reduction_runs_when_the_device_has_extended_types() {
     let width = limits.subgroup_size as usize;
     // Small values, so the total of a subgroup stays inside an i8 and the answer is a sum rather
     // than a statement about wrapping.
-    let input: Vec<u8> = (0..count()).map(|index| (index % 4) as u8).collect();
+    // `narrow_sum_whole` is built for the device's own width, so it is one element per invocation
+    // whatever that width is — unlike every other kernel in this file, which is built for 32.
+    let input: Vec<u8> = (0..elements(limits.subgroup_size, limits.subgroup_size))
+        .map(|index| (index % 4) as u8)
+        .collect();
 
     let output = gpu
         .run_bytes(
@@ -255,7 +267,7 @@ fn a_narrow_reduction_runs_when_the_device_has_extended_types() {
         )
         .expect("dispatched");
 
-    let expected: Vec<u8> = (0..count())
+    let expected: Vec<u8> = (0..elements(limits.subgroup_size, limits.subgroup_size))
         .map(|lane| {
             let first = lane / width * width;
             let total: i32 = (first..first + width).map(|index| (index % 4) as i32).sum();
@@ -289,7 +301,7 @@ fn a_strip_mined_byte_kernel_reaches_every_strip() {
         return;
     }
 
-    let elements = count() * 4;
+    let elements = elements(limits.subgroup_size, 32) * 4;
     let input: Vec<u8> = (0..elements).map(|index| (index % 61) as u8).collect();
 
     let output = gpu

@@ -7,19 +7,16 @@
 
 mod common;
 
-use common::device;
+use common::{device, elements};
 use runner::Specialization;
 use runner::kernels::{self, WORKGROUP_SIZE, specialized::spec_id};
 use simdr::lanes::U32;
 
-/// The invocations one workgroup runs, as a `usize`.
-fn count() -> usize {
-    WORKGROUP_SIZE as usize
-}
-
-/// A ramp, which makes an elementwise mistake visible at every element.
-fn ramp() -> Vec<u32> {
-    (0..count() as u32).collect()
+/// A ramp as long as a kernel of 32 lanes reads on a `width`-wide device.
+///
+/// The length is not `WORKGROUP_SIZE`: see `common::elements`.
+fn ramp(width: u32) -> Vec<u32> {
+    (0..elements(width, 32) as u32).collect()
 }
 
 #[test]
@@ -31,7 +28,7 @@ fn one_module_gives_two_answers_under_two_specializations() {
 
     // Built once. Everything below dispatches these same words.
     let spirv = kernels::specialized_add::<U32, 32>(limits.subgroup_size, 1).expect("built");
-    let input = ramp();
+    let input = ramp(limits.subgroup_size);
 
     let by_ten = gpu
         .run_specialized(
@@ -75,7 +72,7 @@ fn an_unspecialized_pipeline_uses_the_default_the_module_declared() {
     let limits = gpu.limits().clone();
 
     let spirv = kernels::specialized_add::<U32, 32>(limits.subgroup_size, 5).expect("built");
-    let input = ramp();
+    let input = ramp(limits.subgroup_size);
 
     let defaulted = gpu.run_u32(&spirv, &input, 1).expect("dispatched");
     let overridden = gpu
@@ -109,7 +106,7 @@ fn two_constants_are_told_apart_by_their_ids_and_not_by_their_order() {
     let limits = gpu.limits().clone();
 
     let spirv = kernels::specialized_affine::<32>(limits.subgroup_size, 1, 0).expect("built");
-    let input = ramp();
+    let input = ramp(limits.subgroup_size);
 
     let output = gpu
         .run_specialized(
@@ -137,7 +134,7 @@ fn the_order_the_entries_are_set_in_does_not_matter() {
     let limits = gpu.limits().clone();
 
     let spirv = kernels::specialized_affine::<32>(limits.subgroup_size, 1, 0).expect("built");
-    let input = ramp();
+    let input = ramp(limits.subgroup_size);
 
     let forwards = gpu
         .run_specialized(
@@ -181,7 +178,7 @@ fn a_derived_constant_is_computed_from_the_value_the_pipeline_supplied() {
     let limits = gpu.limits().clone();
 
     let spirv = kernels::specialized_derived::<32>(limits.subgroup_size, 1).expect("built");
-    let input = ramp();
+    let input = ramp(limits.subgroup_size);
 
     let output = gpu
         .run_specialized(
@@ -226,7 +223,7 @@ fn a_clustered_reduction_takes_its_cluster_size_from_the_pipeline() {
     // The default is 32 — the whole subgroup — so every override below asks for something the
     // default would not have given.
     let spirv = kernels::specialized_cluster(32, 32).expect("built");
-    let input = ramp();
+    let input = ramp(limits.subgroup_size);
 
     for cluster in [4_u32, 8, 16] {
         let output = gpu
@@ -239,7 +236,7 @@ fn a_clustered_reduction_takes_its_cluster_size_from_the_pipeline() {
             .expect("dispatched");
 
         let cluster = cluster as usize;
-        let expected: Vec<u32> = (0..count())
+        let expected: Vec<u32> = (0..elements(limits.subgroup_size, 32))
             .map(|lane| {
                 let first = lane / cluster * cluster;
                 (first..first + cluster).map(|index| index as u32).sum()
@@ -252,7 +249,7 @@ fn a_clustered_reduction_takes_its_cluster_size_from_the_pipeline() {
     // And the default, so that "it read the specialization" is distinguishable from "it ignored
     // the operand and reduced the whole subgroup" — which is what a 32-wide answer looks like.
     let defaulted = gpu.run_u32(&spirv, &input, 1).expect("dispatched");
-    let whole: Vec<u32> = (0..count())
+    let whole: Vec<u32> = (0..elements(limits.subgroup_size, 32))
         .map(|lane| {
             let first = lane / 32 * 32;
             (first..first + 32).map(|index| index as u32).sum()
@@ -276,8 +273,13 @@ fn an_offset_supplied_at_pipeline_time_reads_the_same_elements_as_a_baked_in_one
     let limits = gpu.limits().clone();
 
     // Two workgroups of input, folded at 64: out[i] = in[i] + in[i + 64].
+    //
+    // `fold_halves` is built for the device's own width, so it reads one element per invocation at
+    // every width — the 32-lane sizing the tests above need would be eight times too much here.
     let half = WORKGROUP_SIZE;
-    let input: Vec<f32> = (0..count() * 2).map(|index| index as f32).collect();
+    let input: Vec<f32> = (0..elements(limits.subgroup_size, limits.subgroup_size) * 2)
+        .map(|index| index as f32)
+        .collect();
 
     let baked = gpu
         .run(
@@ -300,13 +302,16 @@ fn an_offset_supplied_at_pipeline_time_reads_the_same_elements_as_a_baked_in_one
         .expect("dispatched");
     let open: Vec<f32> = open.into_iter().map(f32::from_bits).collect();
 
-    let expected: Vec<f32> = (0..count())
+    let expected: Vec<f32> = (0..elements(limits.subgroup_size, limits.subgroup_size))
         .map(|index| index as f32 + (index + half as usize) as f32)
         .collect();
 
-    assert_eq!(baked.get(..count()), Some(expected.as_slice()));
     assert_eq!(
-        open.get(..count()),
+        baked.get(..elements(limits.subgroup_size, limits.subgroup_size)),
+        Some(expected.as_slice())
+    );
+    assert_eq!(
+        open.get(..elements(limits.subgroup_size, limits.subgroup_size)),
         Some(expected.as_slice()),
         "the offset arrived at pipeline creation and landed somewhere else"
     );
@@ -328,7 +333,9 @@ fn an_open_offset_of_a_different_value_reads_different_elements() {
     // into an `f32` kernel makes every one of them a denormal — and this device flushes denormals
     // to zero, so the first version of this test compared two buffers of zeros and reported that
     // the specialization had been ignored.
-    let input: Vec<f32> = (0..count() * 2).map(|index| index as f32).collect();
+    let input: Vec<f32> = (0..elements(limits.subgroup_size, limits.subgroup_size) * 2)
+        .map(|index| index as f32)
+        .collect();
     let words: Vec<u32> = input.iter().map(|value| value.to_bits()).collect();
 
     let fold_at = |half: u32| -> Vec<f32> {
@@ -348,14 +355,20 @@ fn an_open_offset_of_a_different_value_reads_different_elements() {
     let at_32 = fold_at(32);
 
     let sum_at = |offset: usize| -> Vec<f32> {
-        (0..count())
+        (0..elements(limits.subgroup_size, limits.subgroup_size))
             .map(|index| index as f32 + (index + offset) as f32)
             .collect()
     };
 
     assert_ne!(at_64, at_32, "the specialization was ignored");
-    assert_eq!(at_64.get(..count()), Some(sum_at(64).as_slice()));
-    assert_eq!(at_32.get(..count()), Some(sum_at(32).as_slice()));
+    assert_eq!(
+        at_64.get(..elements(limits.subgroup_size, limits.subgroup_size)),
+        Some(sum_at(64).as_slice())
+    );
+    assert_eq!(
+        at_32.get(..elements(limits.subgroup_size, limits.subgroup_size)),
+        Some(sum_at(32).as_slice())
+    );
 }
 
 #[test]
@@ -369,7 +382,7 @@ fn a_specialization_naming_an_id_the_module_does_not_have_is_ignored() {
     let limits = gpu.limits().clone();
 
     let spirv = kernels::specialized_add::<U32, 32>(limits.subgroup_size, 4).expect("built");
-    let input = ramp();
+    let input = ramp(limits.subgroup_size);
 
     let output = gpu
         .run_specialized(

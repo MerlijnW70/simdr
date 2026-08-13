@@ -12,15 +12,10 @@
 
 mod common;
 
-use runner::kernels::{self, WORKGROUP_SIZE};
+use runner::kernels;
 use simdr::lanes::{F32, I32, U32};
 
-use common::device;
-
-/// The invocations one workgroup runs, as a `usize`.
-fn count() -> usize {
-    WORKGROUP_SIZE as usize
-}
+use common::{device, elements};
 
 /// `value` as the bits a `u32` buffer carries it in.
 fn signed_bits(value: i32) -> u32 {
@@ -40,7 +35,7 @@ fn a_clamp_holds_every_element_between_its_bounds() {
     // A ramp that starts below the low bound and ends above the high one, so all three arms of a
     // clamp are exercised in one dispatch — an input entirely inside the bounds would pass against
     // a kernel that did nothing at all.
-    let input: Vec<u32> = (0..count())
+    let input: Vec<u32> = (0..elements(limits.subgroup_size, 32))
         .map(|index| signed_bits(index as i32 - 16))
         .collect();
 
@@ -53,7 +48,7 @@ fn a_clamp_holds_every_element_between_its_bounds() {
         )
         .expect("dispatched");
 
-    let expected: Vec<i32> = (0..count())
+    let expected: Vec<i32> = (0..elements(limits.subgroup_size, 32))
         .map(|index| (index as i32 - 16).clamp(0, 20))
         .collect();
     let got: Vec<i32> = output.iter().copied().map(as_signed).collect();
@@ -70,7 +65,7 @@ fn a_magnitude_is_the_value_without_its_sign() {
     let Some(gpu) = device("abs") else { return };
     let limits = gpu.limits().clone();
 
-    let input: Vec<u32> = (0..count())
+    let input: Vec<u32> = (0..elements(limits.subgroup_size, 32))
         .map(|index| signed_bits(index as i32 - 32))
         .collect();
 
@@ -82,7 +77,7 @@ fn a_magnitude_is_the_value_without_its_sign() {
         )
         .expect("dispatched");
 
-    let expected: Vec<i32> = (0..count())
+    let expected: Vec<i32> = (0..elements(limits.subgroup_size, 32))
         .map(|index| (index as i32 - 32).abs())
         .collect();
     let got: Vec<i32> = output.iter().copied().map(as_signed).collect();
@@ -101,7 +96,7 @@ fn an_unsigned_maximum_is_not_a_signed_one() {
     };
     let limits = gpu.limits().clone();
 
-    let input: Vec<u32> = (0..count())
+    let input: Vec<u32> = (0..elements(limits.subgroup_size, 32))
         .map(|index| 0x8000_0000_u32 + index as u32)
         .collect();
 
@@ -128,7 +123,7 @@ fn an_unsigned_minimum_is_not_a_signed_one() {
     };
     let limits = gpu.limits().clone();
 
-    let input: Vec<u32> = (0..count())
+    let input: Vec<u32> = (0..elements(limits.subgroup_size, 32))
         .map(|index| 0x8000_0000_u32 + index as u32)
         .collect();
 
@@ -140,7 +135,7 @@ fn an_unsigned_minimum_is_not_a_signed_one() {
         )
         .expect("dispatched");
 
-    assert_eq!(output, vec![7; count()]);
+    assert_eq!(output, vec![7; elements(limits.subgroup_size, 32)]);
 }
 
 #[test]
@@ -152,7 +147,7 @@ fn a_signed_maximum_reads_the_same_bits_as_negative_numbers() {
     };
     let limits = gpu.limits().clone();
 
-    let input: Vec<u32> = (0..count())
+    let input: Vec<u32> = (0..elements(limits.subgroup_size, 32))
         .map(|index| 0x8000_0000_u32 + index as u32)
         .collect();
 
@@ -166,7 +161,7 @@ fn a_signed_maximum_reads_the_same_bits_as_negative_numbers() {
 
     assert_eq!(
         output,
-        vec![7; count()],
+        vec![7; elements(limits.subgroup_size, 32)],
         "read as signed, every element is negative, so 7 is the larger"
     );
 }
@@ -176,7 +171,9 @@ fn a_square_root_is_within_the_precision_vulkan_promises() {
     let Some(gpu) = device("sqrt") else { return };
     let limits = gpu.limits().clone();
 
-    let input: Vec<f32> = (0..count()).map(|index| index as f32).collect();
+    let input: Vec<f32> = (0..elements(limits.subgroup_size, 32))
+        .map(|index| index as f32)
+        .collect();
 
     let output = gpu
         .run(
@@ -211,7 +208,7 @@ fn a_fused_multiply_add_rounds_once_and_the_two_instruction_spelling_does_not() 
     // Values chosen so the intermediate product is *not* exact — with an exact product the two
     // spellings agree and the test would prove nothing. Which of them differ is worked out on the
     // CPU below rather than assumed.
-    let input: Vec<f32> = (0..count())
+    let input: Vec<f32> = (0..elements(limits.subgroup_size, 32))
         .map(|index| 1.0 + (index as f32) * 0.100_000_1)
         .collect();
 
@@ -275,7 +272,9 @@ fn an_extreme_containing_a_nan_is_observed_rather_than_asserted() {
     };
     let limits = gpu.limits().clone();
 
-    let mut with_nan: Vec<f32> = (0..count()).map(|index| index as f32).collect();
+    let mut with_nan: Vec<f32> = (0..elements(limits.subgroup_size, 32))
+        .map(|index| index as f32)
+        .collect();
     if let Some(slot) = with_nan.get_mut(3) {
         *slot = f32::NAN;
     }
@@ -290,7 +289,9 @@ fn an_extreme_containing_a_nan_is_observed_rather_than_asserted() {
         .expect("dispatched");
 
     // And here it is the second: every input is finite, the constant is the NaN.
-    let finite: Vec<f32> = (0..count()).map(|index| index as f32).collect();
+    let finite: Vec<f32> = (0..elements(limits.subgroup_size, 32))
+        .map(|index| index as f32)
+        .collect();
     let nan_second = gpu
         .run(
             &kernels::larger::<F32, 32>(limits.subgroup_size, f32::NAN.to_bits()).expect("built"),
@@ -334,7 +335,7 @@ fn a_strip_mined_clamp_bounds_every_strip_and_not_just_the_first() {
 
     // 128 lanes on a 32-wide subgroup: four strips, four `SClamp` instructions. A loop that
     // emitted one and copied the rest would be right in the first quarter of the buffer.
-    let elements = count() * 4;
+    let elements = elements(limits.subgroup_size, 32) * 4;
     let input: Vec<u32> = (0..elements)
         .map(|index| signed_bits(index as i32 - 64))
         .collect();

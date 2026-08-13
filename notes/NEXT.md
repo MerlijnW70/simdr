@@ -535,15 +535,23 @@ tests *cannot* reach it even in principle. Drivers are lenient about things the 
 `OpUDot` with a signed result type ran correctly on two devices for weeks and was invalid the whole
 time. That is the gap this leaves open, and it is the highest value per line on the list.
 
-**3. `dispatch::extent` cannot see strip-mining.** It reads the workgroup size and the element
-stride out of the module, so it catches a dispatch with too many workgroups. It does not catch a
-kernel that reads `LANES` elements per invocation — which is *exactly* the failure that made
-`kernels::scale` read eight times its buffer at width 4. The check documents the limit honestly and
-the limit still covers the bug that actually happened.
+**3. `dispatch::extent` cannot see strip-mining — done, and nothing had to be declared.** The plan
+was to carry the lane count out of `Kernel::finish` or decorate the module with it. Neither was
+needed: every access starts from `Kernel::run_start`, which emits `group × (workgroup × strips)`,
+and the workgroup size is already read from `LocalSize` — so dividing the constant by it gives the
+strip count back. A second copy of a number is a second thing to keep true, and there is no second
+copy.
 
-The emitter knows the lane count when it builds. Carrying elements-per-invocation out of
-`Kernel::finish`, or as a decoration on the module, would let the runner multiply by it and close
-the case.
+`kernels::lane_affine::<32>` at width 4 is eight elements per invocation and is now refused rather
+than run, which is the exact shape of the `kernels::scale` bug. What remains outside the check is a
+constant offset past the run — `load_offset` reading `in[i + half]` — and that direction
+under-counts, so it refuses less than it might and never more.
+
+**It found eleven tests reading past their input on the first run**, across five files, every one of
+them green at widths 4, 8 and 16 since those widths were added. `notes/FINDINGS.md` has the table
+and what it says about the width sweep: an out-of-bounds *read* is only an access violation when it
+crosses a page, so the sweep catches this class when it is unlucky and the bounds check catches it
+always.
 
 **4. No CI and no pinned toolchain.** Every layer is run by hand on one machine that happens to
 have two GPUs at two widths. `rust-version = "1.97"` is asserted in `Cargo.toml` and never tested
