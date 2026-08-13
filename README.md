@@ -110,6 +110,31 @@ let total = kernel.load_shared(shared, 0)?;
 `Gpu::sum` used to end with two floats coming home for the host to add, because there was no way
 to combine two subgroups on the device. It reads one number now.
 
+### The prefix sum, where the same handover gets harder
+
+A reduction throws away all but one number and a scan keeps them all, which makes the scan the
+stricter test of the two. A reduction sums the same set whatever order the lanes are in, so a
+mapping that pairs the wrong lanes still returns the right total; a scan gets a different number at
+almost every position and still ends on the same grand total — so `runner/tests/scan.rs` compares
+every element rather than the last.
+
+Which subgroups come "before mine" differs per lane, and the obvious spelling is a loop bounded by
+this lane's subgroup index — a loop that runs a different number of times per lane, which is the
+divergence DR-0003 refuses. It is a fixed number of `OpSelect` steps instead, one per subgroup in
+the workgroup, each adding that subgroup's total **or not**:
+
+```rust
+// 1 step at width 64, 15 at width 4 — fixed when the module is built, so every
+// invocation runs all of them and the select is what makes the answer differ.
+let after = kernel.module().binary(op::U_GREATER_THAN, boolean, slot, boundary)?;
+let with = kernel.module().binary(T::ADD, element, offset, theirs)?;
+offset = kernel.module().select(element, after, with, offset)?;
+```
+
+`kernels::scan::scan_workgroup` scans one workgroup — 64 elements — and says so in its name. A
+longer input needs its block totals scanned and added back, which is not built; a scan that
+silently restarted at each block boundary would return plausible numbers.
+
 ## Branches are uniform or they are refused
 
 A branch takes a `Uniform`, and only a vote produces one. A subgroup instruction inside a divergent

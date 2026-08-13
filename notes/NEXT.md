@@ -525,7 +525,16 @@ has no z field, so that dispatch cannot be written by accident.
 
 ## Kept in view
 
-- **`Gpu::run` still assumes input length equals output length.** `run_bound` and `Session` do not.
+- **A scan across more than one workgroup.** `kernels::scan::scan_workgroup` scans 64 elements and
+  says so in its name. A longer input needs its block totals scanned and added back, which is two
+  more dispatches and the same shape the reducer's chain already has — and it needs one thing the
+  emitter does not offer: a way for a kernel to write one value per *workgroup*, which is either
+  `WorkgroupId` wired into `Kernel` or a strided gather over the block ends.
+- **`Gpu::run`'s equal-length rule is now stated and checked** — `dispatch::extent` refuses a
+  dispatch that does not fit the buffer, reading the workgroup size and the element stride out of
+  the module. It is a floor, not a proof: it cannot see how many strips a load walks, so a lane
+  mapping that reads eight times its buffer still gets through. `run_bound` and `Session` size
+  their outputs separately and always did.
 - **`whole_subgroup!` is a macro in a codebase with no other macros.** It exists because the list
   of widths appeared in twelve places and a list in twelve places drifts. If a third width is ever
   added, that is the one line to change — which is the argument for it.
