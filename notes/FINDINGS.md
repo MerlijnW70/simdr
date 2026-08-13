@@ -2096,3 +2096,43 @@ buffer up would have fixed the over-read and left the test comparing two differe
 where one subgroup fills the workgroup and the two reductions cover the same lanes. The test now
 says which relationship it expects at which width, which is what it should have said in the first
 place.
+
+## A second binding costs about 330 µs, and the submission is a fifth of it
+
+`Gpu::run_bound` uploads each input through the shared staging buffer in turn, and each of those is
+a `Gpu::copy` — a whole command buffer, submission and fence. So `k` inputs cost `k + 2`
+submissions where a chain costs one. That is the shape that was worth 116 µs when it was fixed for
+the reduction, and `notes/NEXT.md` listed fixing it here as item 9, with measuring it first.
+
+`runner/examples/bindings.rs` measures it. `clipped_dot` reads its activations and weights from one
+buffer with the join as an offset; `clipped_dot_split` reads them from two, and
+`runner/tests/network.rs` asserts the two give the same answer — so the difference between them is
+the second binding and nothing else.
+
+| operands | one buffer | two buffers | difference |
+| --- | --- | --- | --- |
+| 512 | ~815 µs | ~1181 µs | **+367 µs** |
+| 4 096 | ~790 µs | ~1118 µs | **+329 µs** |
+
+**The difference is flat across an eight-fold change in data.** So it is not transfer, and it is not
+the copy: it is fixed setup — one more buffer allocated, one more descriptor in the set, one more
+submission. A submission on this device is 50–80 µs, which is a **fifth** of it.
+
+### So item 9 is not worth doing, and that is the third time
+
+Recording `run_bound`'s uploads inside one command buffer would recover the submission and leave the
+allocation and the descriptor set, which is most of the cost. And a caller who minds any of it has a
+better answer already: `Session` allocates once and holds it, and since `Buffer::shared` was
+introduced its writes go straight into the binding on a device that offers such memory — so a held
+session pays *no* upload submission at all, not a cheaper one.
+
+Making `run_bound` allocate shared buffers instead would be the other half of that, and it is
+already measured and refused: allocating out of a BAR window costs more than the copy it saves when
+the buffer is made per call, which cost `Gpu::sum` 62% when it was tried.
+
+The one-shot path is for a caller running a kernel once, and it builds a pipeline every time —
+5× the held path by this project's own measurement. Shaving 60 µs off a call that spends 800 is
+optimising the wrong thing.
+
+Left undone, deliberately, and this is the third item on that list to be refuted by its own
+measurement rather than by an argument.

@@ -615,9 +615,20 @@ believe it is the hard part rather than an oversight.
 
 ### Tier 3 — plumbing, and one measurement
 
-**9. `run_bound` pays a submission per input.** `k` inputs cost `k + 2` command buffers, each with
-its own fence. The chain was three submissions and is one; this is the same shape, unfixed. Nothing
-measures it yet, which is the first thing to do rather than the last.
+**9. `run_bound` pays a submission per input — measured, and not worth fixing.** The measurement
+was the first thing to do and it settled the item. A second binding costs about **330 µs** on an
+RTX 4080, and that figure is *flat* across an eight-fold change in data size — so it is fixed setup
+rather than transfer, and a submission at 50–80 µs is a fifth of it. The rest is one more buffer
+allocated and one more descriptor in the set.
+
+Recording the uploads in one command buffer would recover the fifth and leave the rest. A caller who
+minds has a better answer already: `Session` allocates once, and since `Buffer::shared` its writes
+land straight in the binding, so a held session pays no upload submission at all. Making `run_bound`
+allocate shared buffers is the other half of that and is already refused — per-call BAR allocation
+cost `Gpu::sum` 62%.
+
+`runner/examples/bindings.rs` prints the table; `notes/FINDINGS.md` has the argument. Third item on
+this list refuted by its own measurement.
 
 **10. The breakdown reads 123% of the call.** Its rows are timed in isolation and the call got a
 third shorter around them, so they no longer add up to anything. Device timestamps recorded
