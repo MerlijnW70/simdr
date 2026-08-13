@@ -194,12 +194,47 @@ impl Buffer {
     ///
     /// No dispatch may be reading the buffer at the time.
     pub(crate) unsafe fn write(&self, gpu: &Gpu, words: &[u32]) -> Result<(), Error> {
+        // SAFETY: `words` is a slice, so its pointer is valid for `words.len()` reads, and the
+        // caller's obligation about dispatches is passed straight through.
+        unsafe { self.write_words(gpu, words.as_ptr(), words.len()) }
+    }
+
+    /// The same, from a slice of `f32`.
+    ///
+    /// **Because the bits are already the right bits.** `Reducer::sum` takes `&[f32]` and the
+    /// buffer holds words, so it built a `Vec<u32>` of the whole input on every call — a four
+    /// megabyte allocation and copy to reinterpret bits that `f32::to_bits` is *defined* as
+    /// reinterpreting. `runner/examples/reducer.rs` costed that at **52%** of a reduction over 2²⁰
+    /// elements: the largest single item in the call, and it computed nothing.
+    ///
+    /// # Errors
+    ///
+    /// As [`Buffer::write`].
+    ///
+    /// # Safety
+    ///
+    /// As [`Buffer::write`]: no dispatch may be reading the buffer at the time.
+    pub(crate) unsafe fn write_floats(&self, gpu: &Gpu, values: &[f32]) -> Result<(), Error> {
+        // SAFETY: `f32` and `u32` have the same size and alignment, so a `*const f32` is a valid
+        // `*const u32` for the same count — and the bytes are *copied* rather than read as a
+        // number, which is exactly what `f32::to_bits` does one element at a time. The caller's
+        // obligation about dispatches is passed straight through.
+        unsafe { self.write_words(gpu, values.as_ptr().cast::<u32>(), values.len()) }
+    }
+
+    /// Map, copy `count` words from `source`, unmap.
+    ///
+    /// # Safety
+    ///
+    /// `source` must be valid for `count` reads of `u32`, and no dispatch may be reading the
+    /// buffer at the time.
+    unsafe fn write_words(&self, gpu: &Gpu, source: *const u32, count: usize) -> Result<(), Error> {
         if !self.mappable {
             return Err(Error::NotMappable);
         }
-        if words.len() > self.capacity() {
+        if count > self.capacity() {
             return Err(Error::TooLarge {
-                words: words.len(),
+                words: count,
                 capacity: self.capacity(),
             });
         }
@@ -210,7 +245,7 @@ impl Buffer {
 
         // SAFETY: the mapping covers `self.bytes` and the check above refused anything longer.
         unsafe {
-            std::ptr::copy_nonoverlapping(words.as_ptr(), mapped.cast::<u32>(), words.len());
+            std::ptr::copy_nonoverlapping(source, mapped.cast::<u32>(), count);
             device.unmap_memory(self.memory);
         }
         Ok(())

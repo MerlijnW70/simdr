@@ -1828,3 +1828,60 @@ The mutation gate found eight survivors in the new code. Six were straightforwar
 
 The lesson is the older one arriving again: when a comment argues that an unfalsifiable branch has
 to stay, it is usually arguing about the two shapes someone already tried.
+
+## The breakdown was half a breakdown, and the missing half was the biggest row — 2026-08-13
+
+A full mutation run over all 83 targets came back **419/419 killed, 0 survivors**, and the three
+entries in the ratchet floor — one of them naming `runner/src/reduction.rs`, a path that became
+`reduction/mod.rs` when the file was split — were all confirmed dead. The floor is empty now.
+
+Then the reduction breakdown was re-read, and it did not add up. Its rows came to about **half** of
+the `Reducer::sum` they were breaking down, and that gap had gone unremarked through three separate
+optimisations built on top of it.
+
+Two rows were missing, and both were things the *measurement* skipped rather than the call:
+
+- **The `f32` → `u32` copy.** `Reducer::sum` takes `&[f32]` and the buffer holds words, so it built
+  a `Vec<u32>` of the whole input on every call. The upload row hoisted that conversion out of its
+  timed loop — measuring a cost the real call does not have, and missing one it does.
+- **One submission and its fence.** The per-step row is a *difference* between a 61-pass chain and a
+  1-pass chain, so every cost paid once per call cancels out of it exactly.
+
+Measured, the conversion was **596 µs — 52% of the call**. The largest single item, larger than the
+fourteen chained dispatches and the upload together, and it computed nothing: `f32::to_bits` is
+*defined* as reinterpreting the bits, and the bits were already the right bits.
+
+### Removing it
+
+`Buffer::write_floats` copies the caller's slice straight into the mapping. `f32` and `u32` have the
+same size and alignment, and the bytes are copied rather than read as numbers, so the cast is one
+safety argument rather than a conversion.
+
+Paired against the previous build, alternating runs, 2²⁰ elements:
+
+| `Reducer::sum` | via `Vec<u32>` | direct | |
+| --- | --- | --- | --- |
+| RTX 4080 | ~1342 µs | ~524 µs | **2.6×** |
+| integrated Radeon | ~2543 µs | ~1749 µs | **1.5×** |
+
+Every round on both devices. Σ x² through `reducer_of` came down with it — 1390 → 735 µs on the
+4080 — and `Reducer::sum` against `Gpu::sum` went from 2.1× to **4.3×**.
+
+The breakdown now comes to 109% of the call rather than 52%. Over is the honest direction: the rows
+are measured separately and overlap, since the upload row maps and unmaps the staging buffer and so
+does the call.
+
+### What this is the fourth instance of
+
+Every performance item this week has been mismeasured in the same direction, and this one is the
+sharpest version of it:
+
+1. A probe that allocated two buffers per call and reported it as pipeline creation — wrong by 8×.
+2. A grid comparison that moved the occupancy and the address at once — 2× that was neither.
+3. A map-reduce comparison whose old route paid `gpu.run`'s setup — 2.9× that was 1.7×.
+4. **A breakdown that hoisted a per-call cost out of its own timed loop** — and so reported half a
+   call and left the largest row invisible for three optimisations.
+
+The first three flattered a change. This one hid one. The rule that would have caught all four is
+the same: **time the thing the caller actually pays, in the shape the caller actually pays it** —
+and when a breakdown does not come close to the whole, the gap is the finding.

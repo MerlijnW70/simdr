@@ -408,6 +408,34 @@ was a genuine equivalent mutant whose comment said the alternatives were worse a
 that had been tried. The third — compute the vote *inside the arm that reads it* — deletes the
 branch and shortens the file.
 
+### 20. The breakdown that came to half a call — **and the 52% row hiding in the gap**
+
+A full mutation run over all 83 targets: **419/419 killed, 0 survivors**, and the three entries in
+the ratchet floor confirmed dead — one of them naming a path that had not existed since a file was
+split. The floor is empty.
+
+Then the reduction breakdown was re-read and its rows came to about **half** the call they were
+breaking down. Two were missing, both skipped by the *measurement* rather than by the call: the
+`f32` → `u32` copy, which the upload row hoisted out of its own timed loop, and the fixed cost of
+one submission, which the per-step row cancels out by being a difference.
+
+The conversion was **596 µs, 52% of the call** — larger than the fourteen chained dispatches and
+the upload together, and it computed nothing. `Buffer::write_floats` copies the caller's slice
+straight into the mapping instead.
+
+| `Reducer::sum`, 2²⁰ | via `Vec<u32>` | direct | |
+| --- | --- | --- | --- |
+| RTX 4080 | ~1342 µs | ~524 µs | **2.6×** |
+| integrated Radeon | ~2543 µs | ~1749 µs | **1.5×** |
+
+**Fourth mismeasurement of the week, and the first that hid a win rather than flattering one.** The
+breakdown now comes to 109% instead of 52%; over is honest, since the rows overlap.
+
+**Left undone deliberately:** `Gpu::run` converts the same way. It also allocates three buffers and
+builds a pipeline per call, so the conversion is a small share of it — and it is the test-shaped
+API, where clarity is worth more than the microseconds. `Session` is what a caller in a loop should
+reach for, and it takes words already.
+
 ## 1. A buffer the caller already owns
 
 `reducer_of` covers Σ f(x). What it does not cover is a caller whose data was produced by some

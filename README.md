@@ -350,8 +350,7 @@ the integrated Radeon in the same machine. It does not make the kernel faster an
 remove the host copies — it removes the setup the measurement said was there to remove.
 
 A full-buffer reduction is a chain of a dozen pipelines rather than one, and `Gpu::reducer` is the
-same idea applied to all of them: **5.0×** over 8 192 elements, 2.2× over 2²⁰ where the setup is a
-smaller share of a larger call.
+same idea applied to all of them: **5.8×** over 8 192 elements and **4.3×** over 2²⁰.
 
 ```rust
 let mut reducer = gpu.reducer(8_192)?;   // every pipeline built once
@@ -369,10 +368,24 @@ Measured rather than argued, each row a difference between two calls that differ
 
 | | per call | share |
 | --- | --- | --- |
-| fourteen chained steps — one barrier each, nothing copied | 300 µs | 24% |
-| host upload of the input | 294 µs | 23% |
-| host download of the answer — one `f32` | 59 µs | 5% |
-| *(what a whole-buffer download would cost, and no longer does)* | *718 µs* | *56%* |
+| fourteen chained steps — one barrier each, nothing copied | 238 µs | 41% |
+| one submission and its fence | 61 µs | 10% |
+| host upload of the input | 288 µs | 49% |
+| host download of the answer — one `f32` | 55 µs | 9% |
+| **accounted for** | **643 µs** | **109%** |
+| *(a whole-buffer download, no longer paid)* | *723 µs* | *123%* |
+| *(an `f32` → `u32` copy of the input, no longer paid)* | *599 µs* | *102%* |
+
+**That table came to 52% of the call until recently**, and the gap went unremarked through three
+optimisations built on top of it. Two rows were missing, both skipped by the *measurement* rather
+than by the call: the upload row hoisted the `f32` → `u32` conversion out of its own timed loop, and
+the per-step row is a difference between two chains, so anything paid once per call cancels out of
+it. The conversion turned out to be the largest single item in the whole call — and it computed
+nothing, since `f32::to_bits` is defined as reinterpreting bits that were already the right bits.
+`Buffer::write_floats` copies the caller's slice straight into the mapping now: **2.6× on the
+4080**, 1.5× on the integrated Radeon.
+
+When a breakdown does not come close to the whole, the gap is the finding.
 
 That last row is where most of the work went, and it took three attempts to notice. Two changes
 shaved the device side — shortening the between-pass copies, then replacing them with a ping-pong
@@ -401,7 +414,7 @@ let mut reducer = gpu.reducer_of(1 << 20, &square)?;     // the map is the chain
 let norm = reducer.sum(&input)?.total;                   // Σ x², one crossing
 ```
 
-**1.7× on an RTX 4080 and 2.0× on the integrated Radeon**, over 2²⁰ elements, against the same
+**2.4× on an RTX 4080 and 2.6× on the integrated Radeon**, over 2²⁰ elements, against the same
 route with a held `Session` for the map and a held `Reducer` for the fold — so neither column pays
 for allocation or pipeline creation and the only difference is where the intermediate went. The
 993 µs saved is the 718 µs download plus the 294 µs upload measured separately in the same file.

@@ -194,6 +194,22 @@ fn mapped(gpu: &Gpu) -> Result<(), Box<dyn std::error::Error>> {
 ///   Both do nothing else, so the difference is one dispatch and the barrier before it.
 /// - **host upload / download** — `Session::write` and `Session::read` on a session that is already
 ///   built, so no allocation and no pipeline creation is in the number.
+/// - **the `f32` copy** and **one submission** — added because the rows above accounted for only
+///   about half the call and the rest was going somewhere unnamed. See below.
+///
+/// # The rows that were missing, and why a breakdown has to add up
+///
+/// With three rows this table came to roughly *half* of the `Reducer::sum` it was breaking down,
+/// and that gap went unremarked through three separate optimisations. A breakdown whose rows do not
+/// approach the whole is not a breakdown; it is a list of things that were easy to measure.
+///
+/// The two that were missing are both things the *measurement* skipped rather than the call:
+///
+/// - `Reducer::sum` takes `&[f32]` and the buffer holds words, so it builds a `Vec<u32>` of the
+///   whole input on every call. The upload row hoisted that conversion out of its timed loop —
+///   measuring a cost the real call does not have, and missing one it does.
+/// - The step row is a *difference* between two chains, so every fixed cost of submitting at all
+///   cancels out of it. One submission and its fence is paid once per call and appeared nowhere.
 ///
 /// `whole` is what `Reducer::sum` took at the same size in the table above, so the shares are
 /// against a number measured in this run rather than one copied from a previous one.
@@ -285,6 +301,25 @@ fn breakdown(gpu: &Gpu, whole: Duration) -> Result<(), Box<dyn std::error::Error
     }
     let download = started.elapsed() / REPEATS as u32;
 
+    // The `Vec<u32>` `Reducer::sum` builds from its `&[f32]` on every call. Pure host work: a
+    // four-megabyte allocation and a copy, to reinterpret bits that are already the right bits.
+    let floats: Vec<f32> = input.iter().map(|_| 1.0).collect();
+    let started = Instant::now();
+    for _ in 0..REPEATS {
+        let words: Vec<u32> = floats.iter().map(|value| value.to_bits()).collect();
+        std::hint::black_box(&words);
+    }
+    let conversion = started.elapsed() / REPEATS as u32;
+
+    // One submission and the fence it waits on, with nothing in it. Every chain pays this once,
+    // and the step row above cannot see it: that row is a *difference* between two chains, so
+    // anything paid once per call cancels out of it exactly.
+    let started = Instant::now();
+    for _ in 0..REPEATS {
+        session.dispatch(1, 1)?;
+    }
+    let submission = started.elapsed() / REPEATS as u32;
+
     println!(
         "{:>36} {:>12} {:>10}   (of {})",
         "",
@@ -292,11 +327,15 @@ fn breakdown(gpu: &Gpu, whole: Duration) -> Result<(), Box<dyn std::error::Error
         "share",
         micros(whole)
     );
+    let accounted = fourteen + upload + download + submission;
     for (name, taken) in [
         ("fourteen chained steps", fourteen),
+        ("one submission and its fence", submission),
         ("host upload of the input", upload),
         ("host download of the answer", download),
+        ("---- accounted for ----", accounted),
         ("(a whole-buffer download, unpaid)", whole_download),
+        ("(the f32 -> u32 copy, unpaid)", conversion),
     ] {
         let share = taken.as_secs_f64() / whole.as_secs_f64() * 100.0;
         println!("{name:>36} {:>12} {share:>9.0}%", micros(taken));
@@ -310,9 +349,13 @@ fn breakdown(gpu: &Gpu, whole: Duration) -> Result<(), Box<dyn std::error::Error
          or on lavapipe, and 5.5% on the integrated Radeon, where bandwidth is scarce enough for\n\
          4 MB of copying to show. notes/FINDINGS.md has the runs.\n\n\
        \x20 Shares are against the `Reducer::sum` time in the table above, same run, same device.\n\
-         The last row is what the download used to be: the whole buffer, copied home so that\n\
-         `.first()` could be called on it. It is one `f32` now, and the row above shows what\n\
-         that costs. The upload is what is left, and it is real — the data has to arrive."
+         The two bracketed rows are costs this call used to pay and does not: the whole buffer\n\
+         copied home so `.first()` could be called on it, and a `Vec<u32>` built from the\n\
+         caller's `&[f32]` to reinterpret bits that were already the right bits.\n\n\
+       \x20 `accounted for` comes to a little over the whole because the rows are measured\n\
+         separately and overlap — the upload row maps and unmaps the staging buffer, and so does\n\
+         the call. Over is the honest direction for that; it was 52% under before the two rows\n\
+         below the line were found, and that gap is what a breakdown is for."
     );
 
     Ok(())
