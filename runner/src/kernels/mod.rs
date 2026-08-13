@@ -20,6 +20,7 @@ pub mod network;
 pub mod occupancy;
 pub mod plane;
 pub mod reduce;
+pub mod scan;
 pub mod scatter;
 pub mod specialized;
 pub mod unrun;
