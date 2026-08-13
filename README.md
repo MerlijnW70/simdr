@@ -350,7 +350,7 @@ the integrated Radeon in the same machine. It does not make the kernel faster an
 remove the host copies — it removes the setup the measurement said was there to remove.
 
 A full-buffer reduction is a chain of a dozen pipelines rather than one, and `Gpu::reducer` is the
-same idea applied to all of them: **5.8×** over 8 192 elements and **4.3×** over 2²⁰.
+same idea applied to all of them: **11.2×** over 8 192 elements and **5.6×** over 2²⁰.
 
 ```rust
 let mut reducer = gpu.reducer(8_192)?;   // every pipeline built once
@@ -368,24 +368,34 @@ Measured rather than argued, each row a difference between two calls that differ
 
 | | per call | share |
 | --- | --- | --- |
-| fourteen chained steps — one barrier each, nothing copied | 238 µs | 41% |
-| one submission and its fence | 61 µs | 10% |
-| host upload of the input | 288 µs | 49% |
-| host download of the answer — one `f32` | 55 µs | 9% |
-| **accounted for** | **643 µs** | **109%** |
-| *(a whole-buffer download, no longer paid)* | *723 µs* | *123%* |
-| *(an `f32` → `u32` copy of the input, no longer paid)* | *599 µs* | *102%* |
+| fourteen chained steps — one barrier each, nothing copied | 237 µs | 56% |
+| the input's four megabytes | 201 µs | 47% |
+| one submission and its fence | 63 µs | 15% |
+| **accounted for** | **501 µs** | **118%** |
+| *(a second and third submission, no longer paid)* | *126 µs* | *30%* |
+| *(a whole-buffer download, no longer paid)* | *697 µs* | *164%* |
+| *(an `f32` → `u32` copy of the input, no longer paid)* | *583 µs* | *137%* |
 
-**That table came to 52% of the call until recently**, and the gap went unremarked through three
-optimisations built on top of it. Two rows were missing, both skipped by the *measurement* rather
-than by the call: the upload row hoisted the `f32` → `u32` conversion out of its own timed loop, and
-the per-step row is a difference between two chains, so anything paid once per call cancels out of
-it. The conversion turned out to be the largest single item in the whole call — and it computed
-nothing, since `f32::to_bits` is defined as reinterpreting bits that were already the right bits.
-`Buffer::write_floats` copies the caller's slice straight into the mapping now: **2.6× on the
-4080**, 1.5× on the integrated Radeon.
+**That table came to 52% of the call for weeks**, and every one of the three bracketed rows was
+hiding in the missing half. Two of its rows were absent because the *measurement* skipped them, not
+because the call did: the upload row hoisted the `f32` → `u32` conversion out of its own timed loop,
+and the per-step row is a difference between two chains, so anything paid once per call cancels out
+of it exactly.
 
-When a breakdown does not come close to the whole, the gap is the finding.
+Made to add up, it named three things in a row:
+
+| 2²⁰ elements | `Reducer::sum` |
+| --- | --- |
+| where the day started | ~1930 µs |
+| reading one word home instead of the whole buffer | ~1140 µs |
+| writing the caller's floats straight into the mapping | ~548 µs |
+| recording the copies inside the chain's submission, one instead of three | **~424 µs** |
+
+None of the three was an algorithm. A download sized to the buffer rather than the answer; a
+conversion of bits that were already the right bits; and two submissions that existed only to move
+bytes between buffers a third submission already touched.
+
+**When a breakdown does not come close to the whole, the gap is the finding.**
 
 That last row is where most of the work went, and it took three attempts to notice. Two changes
 shaved the device side — shortening the between-pass copies, then replacing them with a ping-pong

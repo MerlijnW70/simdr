@@ -29,7 +29,7 @@
 
 use super::Reduction;
 use crate::buffer::Buffer;
-use crate::dispatch::{Ends, Pipeline, answer_in_destination};
+use crate::dispatch::{Ends, Pipeline, Staged, answer_in_destination};
 use crate::{Error, Gpu};
 
 /// How much of the answer buffer comes home: one `f32`.
@@ -226,9 +226,6 @@ impl Reducer<'_> {
             // first — four megabytes allocated and copied per call to reinterpret bits that were
             // already the right bits, and **52%** of the call by measurement.
             staging.write_floats(self.gpu, input)?;
-            self.gpu.copy(staging, source, bytes)?;
-
-            self.gpu.replay(&self.pipelines, &self.workgroups)?;
 
             // The buffers alternate, so which one holds the answer depends on how many passes ran.
             // Reading the wrong one returns the *second to last* fold — a plausible number, and
@@ -239,11 +236,27 @@ impl Reducer<'_> {
                 source
             };
 
-            // **One word, not the buffer.** A reduction produces a single number and this read
-            // whole megabytes of it home to call `.first()`. `runner/examples/reducer.rs` costed
-            // the download at 37% of the call, which is what a 4 MB round trip for four bytes
-            // looks like from the outside.
-            self.gpu.copy(answer, staging, ANSWER_BYTES)?;
+            // **One submission, not three.** The upload and the answer used to be `Gpu::copy`
+            // calls either side of this, and a `copy` is a whole command buffer, submission and
+            // fence — about 65 µs each against a 540 µs call. Recorded inside the chain they cost
+            // a barrier apiece.
+            //
+            // The answer is **one word**, not the buffer: a reduction produces a single number and
+            // this used to bring whole megabytes home to call `.first()` on them.
+            self.gpu.replay(
+                &self.pipelines,
+                &self.workgroups,
+                Some(Staged {
+                    from: staging,
+                    to: source,
+                    bytes,
+                }),
+                Some(Staged {
+                    from: answer,
+                    to: staging,
+                    bytes: ANSWER_BYTES,
+                }),
+            )?;
             staging.read(self.gpu, 1)?
         };
 

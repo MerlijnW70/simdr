@@ -1885,3 +1885,57 @@ sharpest version of it:
 The first three flattered a change. This one hid one. The rule that would have caught all four is
 the same: **time the thing the caller actually pays, in the shape the caller actually pays it** —
 and when a breakdown does not come close to the whole, the gap is the finding.
+
+## A reduction submitted three times to do one thing — 2026-08-13
+
+With the breakdown finally adding up, the largest row it named was the upload at 287 µs. Splitting
+*that* — a full write against a one-word write, which pays the same map, unmap and submission and
+almost none of the copying — put **73 µs** of it in the fixed half. And the row beside it said a
+bare submit-and-fence costs **65 µs**.
+
+Which meant the fixed cost of the upload was not the mapping. It was a whole submission.
+
+`Reducer::sum` was three of them:
+
+```
+staging.write_floats(..)        // host memcpy, no submission
+gpu.copy(staging, source, ..)   // command buffer, submit, fence
+gpu.replay(..)                  // command buffer, submit, fence
+gpu.copy(answer, staging, 4)    // command buffer, submit, fence
+staging.read(.., 1)             // host read, no submission
+```
+
+Two of the three exist only to move bytes between buffers the third submission already touches.
+`Gpu::replay` takes an optional `before` and `after` copy now and records them into the chain's own
+command buffer, costing a pipeline barrier each instead of a submission each. `Gpu::run_chain` had
+the identical shape and got the same treatment.
+
+Paired against the previous build, alternating runs, 2²⁰ elements:
+
+| `Reducer::sum` | three submissions | one | |
+| --- | --- | --- | --- |
+| RTX 4080 | ~548 µs | ~424 µs | **1.29×** |
+| integrated Radeon | ~1751 µs | ~1045 µs | **1.68×** |
+
+The 4080 saved ~124 µs against a predicted 2 × 62. Prediction and observation agree, which is the
+only reason to believe either.
+
+### Where the reduction now stands
+
+Over 8 192 elements `Reducer::sum` is **11.2×** `Gpu::sum`, and over 2²⁰ it is **5.6×** — against
+2.1× at the start of the day. Three changes got it there, and the order they were found in is the
+whole lesson:
+
+| | 2²⁰, `Reducer::sum` |
+| --- | --- |
+| where the day started | ~1930 µs |
+| reading one word home instead of the buffer | ~1140 µs |
+| writing the caller's floats straight into the mapping | ~548 µs |
+| one submission instead of three | **~424 µs** |
+
+Not one of the three was an algorithm. Every one was a cost the *measurement* had been hiding: a
+download sized to the buffer instead of the answer, a conversion hoisted out of its own timed loop,
+and two submissions that a per-step row cancelled out by being a difference.
+
+**The breakdown found all three, and only once it was made to add up.** It read 52% of the call for
+weeks, and the missing 48% was where every one of them lived.

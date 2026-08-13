@@ -33,6 +33,7 @@ pub use session::Session;
 pub use specialization::Specialization;
 pub use step::Pass;
 
+pub(crate) use chain::Staged;
 pub(crate) use pipeline::Pipeline;
 pub(crate) use step::{Ends, answer_in_destination};
 

@@ -436,6 +436,30 @@ builds a pipeline per call, so the conversion is a small share of it — and it 
 API, where clarity is worth more than the microseconds. `Session` is what a caller in a loop should
 reach for, and it takes words already.
 
+### 21. Three submissions to do one thing — **now one**
+
+Splitting the upload row — a full write against a one-word write, which pays the same map, unmap
+and submission and almost none of the copying — showed its fixed half was **73 µs**, and the row
+beside it priced a bare submit-and-fence at **65**. So the fixed cost of an upload was not the
+mapping; it was a whole submission.
+
+`Reducer::sum` made three: one to move the input into place, one for the chain, one to bring the
+answer back. `Gpu::replay` takes an optional `before` and `after` copy now and records them inside
+the chain's own command buffer — a barrier each instead of a submission each. `Gpu::run_chain` had
+the same shape and got the same treatment.
+
+| `Reducer::sum`, 2²⁰ | three | one | |
+| --- | --- | --- | --- |
+| RTX 4080 | ~548 µs | ~424 µs | **1.29×** |
+| integrated Radeon | ~1751 µs | ~1045 µs | **1.68×** |
+
+~124 µs saved against a predicted 2 × 62.
+
+**Where the reduction stands:** 11.2× `Gpu::sum` over 8 192 elements and 5.6× over 2²⁰, against
+2.1× at the start of the day — and 2²⁰ went ~1930 → ~424 µs across three changes, none of which
+was an algorithm. Each was a cost the *measurement* had been hiding, and the breakdown found all
+three only once it was made to add up.
+
 ## 1. A buffer the caller already owns
 
 `reducer_of` covers Σ f(x). What it does not cover is a caller whose data was produced by some

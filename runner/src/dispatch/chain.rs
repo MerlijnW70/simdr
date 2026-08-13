@@ -128,29 +128,52 @@ impl Gpu {
             }
         }
 
-        unsafe { self.copy(staging, source, bytes) }?;
-
         let groups: Vec<u32> = passes.iter().map(|pass| pass.workgroups).collect();
-        let recorded = unsafe { self.replay(&pipelines, &groups) };
+        let answer = if answer_in_destination(passes.len()) {
+            destination
+        } else {
+            source
+        };
+        // Only what the caller asked for. `count` is words and the copy is bytes, and the
+        // difference between those two is exactly the mistake that made this read megabytes.
+        let home = (count.max(1) * size_of::<u32>()) as u64;
 
-        let output = recorded.and_then(|()| {
-            let answer = if answer_in_destination(passes.len()) {
-                destination
-            } else {
-                source
-            };
-            // Only what the caller asked for. `count` is words and the copy is bytes, and the
-            // difference between those two is exactly the mistake that made this read megabytes.
-            let home = (count.max(1) * size_of::<u32>()) as u64;
-            unsafe { self.copy(answer, staging, home.min(bytes)) }?;
-            unsafe { staging.read(self, count) }
-        });
+        // One submission for the upload, the chain and the answer together. These were three.
+        let recorded = unsafe {
+            self.replay(
+                &pipelines,
+                &groups,
+                Some(Staged {
+                    from: staging,
+                    to: source,
+                    bytes,
+                }),
+                Some(Staged {
+                    from: answer,
+                    to: staging,
+                    bytes: home.min(bytes),
+                }),
+            )
+        };
+
+        let output = recorded.and_then(|()| unsafe { staging.read(self, count) });
 
         for pipeline in pipelines {
             unsafe { pipeline.destroy(self) };
         }
         output
     }
+}
+
+/// One buffer-to-buffer copy, recorded inside a submission rather than being one.
+#[derive(Clone, Copy)]
+pub(crate) struct Staged<'a> {
+    /// Where the bytes come from.
+    pub(crate) from: &'a Buffer,
+    /// Where they go.
+    pub(crate) to: &'a Buffer,
+    /// How many.
+    pub(crate) bytes: u64,
 }
 
 impl Gpu {
@@ -164,20 +187,41 @@ impl Gpu {
     /// a pipeline is bound to — that was decided when it was built, and this only has to order the
     /// dispatches against each other.
     ///
+    /// # The copies belong in here
+    ///
+    /// `before` moves the host's data into the buffer the first pass reads, and `after` brings the
+    /// answer back out. Both used to be separate [`Gpu::copy`] calls around this one, and a `copy`
+    /// is a whole `record_and_wait` — its own command buffer, its own submission, its own fence.
+    ///
+    /// `runner/examples/reducer.rs` measured a bare submit-and-wait at **~65 µs**, so a reduction
+    /// that submitted three times spent about 195 µs of a 540 µs call doing nothing but starting
+    /// and stopping. Recorded here they cost two barriers instead.
+    ///
     /// # Safety
     ///
     /// The pipelines must be live, and their descriptor sets must name buffers that are — a set
-    /// built against freed ones would read freed memory.
+    /// built against freed ones would read freed memory. Every buffer named by `before` and
+    /// `after` must be live and large enough for its `bytes`.
     pub(crate) unsafe fn replay(
         &self,
         pipelines: &[Pipeline],
         workgroups: &[u32],
+        before: Option<Staged<'_>>,
+        after: Option<Staged<'_>>,
     ) -> Result<(), Error> {
         // The duration `record_and_wait` reports is the host's view of the whole submission, which
         // is not what a chain's caller wants — `Gpu::sum` reports dispatch *counts* and leaves
         // timing to the examples. Discarded here rather than threaded out to nobody.
         let recorded = unsafe {
             self.record_and_wait(|device, command| {
+                if let Some(upload) = before {
+                    // Nothing has run yet, so there is nothing to wait for — only to make visible.
+                    // The barrier after it is what the first dispatch needs.
+                    let region = [vk::BufferCopy::default().size(upload.bytes)];
+                    device.cmd_copy_buffer(command, upload.from.handle, upload.to.handle, &region);
+                    across(device, command, TRANSFER_TO_SHADER);
+                }
+
                 for (index, (pipeline, groups)) in pipelines.iter().zip(workgroups).enumerate() {
                     if index > 0 {
                         // This pass reads what the one before it wrote, and writes what the one
@@ -202,11 +246,68 @@ impl Gpu {
                     );
                     device.cmd_dispatch(command, (*groups).max(1), 1, 1);
                 }
+
+                if let Some(download) = after {
+                    across(device, command, SHADER_TO_TRANSFER);
+                    let region = [vk::BufferCopy::default().size(download.bytes)];
+                    device.cmd_copy_buffer(
+                        command,
+                        download.from.handle,
+                        download.to.handle,
+                        &region,
+                    );
+                }
                 Ok(())
             })
         };
 
         recorded.map(|_| ())
+    }
+}
+
+/// Which stages a barrier separates, and what it makes visible.
+type Stages = (
+    vk::PipelineStageFlags,
+    vk::PipelineStageFlags,
+    vk::AccessFlags,
+    vk::AccessFlags,
+);
+
+/// The first dispatch reads what the upload copy wrote.
+const TRANSFER_TO_SHADER: Stages = (
+    vk::PipelineStageFlags::TRANSFER,
+    vk::PipelineStageFlags::COMPUTE_SHADER,
+    vk::AccessFlags::TRANSFER_WRITE,
+    vk::AccessFlags::SHADER_READ,
+);
+
+/// The download copy reads what the last dispatch wrote.
+const SHADER_TO_TRANSFER: Stages = (
+    vk::PipelineStageFlags::COMPUTE_SHADER,
+    vk::PipelineStageFlags::TRANSFER,
+    vk::AccessFlags::SHADER_WRITE,
+    vk::AccessFlags::TRANSFER_READ,
+);
+
+/// Record a barrier between two differing stages.
+fn across(device: &ash::Device, command: vk::CommandBuffer, stages: Stages) {
+    let (from, to, written, read) = stages;
+    let memory = [vk::MemoryBarrier::default()
+        .src_access_mask(written)
+        .dst_access_mask(read)];
+
+    // SAFETY: the command buffer is recording, and a memory barrier names no resource that could
+    // have been destroyed.
+    unsafe {
+        device.cmd_pipeline_barrier(
+            command,
+            from,
+            to,
+            vk::DependencyFlags::empty(),
+            &memory,
+            &[],
+            &[],
+        );
     }
 }
 
