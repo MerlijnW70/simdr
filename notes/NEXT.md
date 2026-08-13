@@ -567,16 +567,16 @@ behavioural test can see the difference between doing it and not. It is still on
 one select the module should not contain, so the test counts them: every subgroup's slot is read
 for the total, and one fewer select is emitted than there are subgroups.
 
-**6. A scan across more than one workgroup — the arithmetic works, the wrapper does not exist.**
-Three dispatches do it: `scan_blocks` leaves each block scanned from its own start,
-`scan_workgroup_exclusive` over the block totals says what each block owes the ones before it, and
-`add_offsets` pays it. `runner/tests/scan.rs` composes them by hand and matches the CPU element for
-element up to 4 096 elements on all five widths.
+**6. A scan across more than one workgroup — done.** `Gpu::scanner` holds a buffer and a pipeline
+per level and runs the whole thing in one submission: `2 × levels + 1` dispatches, up one side and
+down the other. 2²⁰ elements is three levels and seven dispatches, and it matches the CPU element
+for element on all five widths.
 
-What is left is the **recursion and the object**. One workgroup scans at most 64 block totals, so
-4 096 is where the middle step runs out; past it the totals need the same three steps again, one
-level up — three for 2²⁰. That is a `Scanner` holding a buffer and a pipeline per level, which is
-`Reducer` with a descent phase, and it is the next thing to build.
+`scan/plan.rs` decides the levels and is inside the gate; `scan/held.rs` owns the Vulkan objects and
+is not — the fourth time that seam has been worth cutting. The two derivations of the dispatch
+count are made to agree at build time rather than trusted: the plan says `2 × levels + 1` and the
+recording loop emits them one at a time, and a disagreement would otherwise show up as a wrong
+answer at some depth instead of a failure where the mistake is.
 
 Item 7 turned out to be a prerequisite rather than a nicety: see below.
 

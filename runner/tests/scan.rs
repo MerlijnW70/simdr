@@ -274,3 +274,107 @@ fn a_long_scan_of_uneven_values_matches_the_cpu_element_for_element() {
         assert_eq!(got, want, "element {index} of {elements} at width {width}");
     }
 }
+
+#[test]
+fn a_held_scanner_matches_the_cpu_at_every_depth_of_recursion() {
+    // **The recursion, at each of its depths.** 4 096 elements is one level and the three
+    // dispatches composed by hand above; 262 144 is two; 2²⁰ is three. The interesting boundary is
+    // between them — a `Scanner` that handled one level and quietly dropped the rest would be
+    // right at 4 096 and wrong by whole blocks at 262 144.
+    let Some(gpu) = device("scanner") else { return };
+    eprintln!("device: {}", gpu.limits().name);
+
+    let block = WORKGROUP_SIZE as usize;
+    for (elements, levels) in [
+        (block, 1_usize),
+        (block * 2, 1),
+        (block * block, 1),
+        (block * block * 2, 2),
+        (1 << 20, 3),
+    ] {
+        let mut scanner = gpu.scanner(elements).expect("built");
+        assert_eq!(scanner.elements(), elements);
+        assert_eq!(
+            scanner.dispatches(),
+            2 * levels + 1,
+            "{elements} elements should need {levels} levels"
+        );
+
+        // Ones, so the answer is 1, 2, 3, … and a block that took the wrong offset is visibly out
+        // of step rather than wrong in the last digit. Exact in `f32` to 2²⁴, which 2²⁰ is inside.
+        let input = vec![1.0_f32; elements];
+        let output = scanner.scan(&input).expect("scanned");
+
+        let expected: Vec<f32> = (1..=elements).map(|index| index as f32).collect();
+        assert_eq!(output.len(), expected.len());
+        for (index, (got, want)) in output.iter().zip(&expected).enumerate() {
+            assert_eq!(got, want, "element {index} of {elements}");
+        }
+    }
+}
+
+#[test]
+fn a_held_scanner_agrees_with_the_cpu_on_values_that_differ_everywhere() {
+    // Ones make a misplaced offset obvious and also make every block's total identical, so a
+    // scanner that mixed two blocks' totals up would still be right. These do not.
+    let Some(gpu) = device("scanner uneven") else {
+        return;
+    };
+
+    let block = WORKGROUP_SIZE as usize;
+    let elements = block * block * 3;
+    let mut scanner = gpu.scanner(elements).expect("built");
+
+    let input: Vec<f32> = (0..elements).map(|index| (index % 13) as f32).collect();
+    let output = scanner.scan(&input).expect("scanned");
+
+    let expected = inclusive(&input);
+    for (index, (got, want)) in output.iter().zip(&expected).enumerate() {
+        assert_eq!(got, want, "element {index} of {elements}");
+    }
+}
+
+#[test]
+fn a_scanner_is_reusable_and_refuses_a_length_it_was_not_built_for() {
+    // The point of holding one. A second call must not see the first's data — the buffers are
+    // reused, so a scan that read past its input would find the previous answer sitting there.
+    let Some(gpu) = device("scanner reuse") else {
+        return;
+    };
+
+    let elements = WORKGROUP_SIZE as usize * 4;
+    let mut scanner = gpu.scanner(elements).expect("built");
+
+    let ones = vec![1.0_f32; elements];
+    let twos = vec![2.0_f32; elements];
+
+    let first = scanner.scan(&ones).expect("scanned");
+    let second = scanner.scan(&twos).expect("scanned");
+    let third = scanner.scan(&ones).expect("scanned");
+
+    assert_eq!(first, inclusive(&ones));
+    assert_eq!(second, inclusive(&twos));
+    assert_eq!(
+        third, first,
+        "the third call must not have kept the second's"
+    );
+
+    assert!(matches!(
+        scanner.scan(&ones[..elements - 1]),
+        Err(runner::Error::TooLarge { .. })
+    ));
+}
+
+#[test]
+fn a_length_that_is_not_a_whole_number_of_workgroups_is_refused_before_anything_is_built() {
+    let Some(gpu) = device("scanner length") else {
+        return;
+    };
+
+    for elements in [0_usize, 1, 63, 65, 100] {
+        assert!(
+            matches!(gpu.scanner(elements), Err(runner::Error::BadLength(_))),
+            "{elements} was accepted"
+        );
+    }
+}

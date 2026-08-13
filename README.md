@@ -131,9 +131,21 @@ let with = kernel.module().binary(T::ADD, element, offset, theirs)?;
 offset = kernel.module().select(element, after, with, offset)?;
 ```
 
-`kernels::scan::scan_workgroup` scans one workgroup — 64 elements — and says so in its name. A
-longer input needs its block totals scanned and added back, which is not built; a scan that
-silently restarted at each block boundary would return plausible numbers.
+`kernels::scan::scan_workgroup` scans one workgroup — 64 elements. Longer than that is
+`Gpu::scanner`, which is the same idea applied to itself: cut the input into blocks, scan each,
+scan the block totals to find what each block owes the ones before it, and pay it. The block totals
+are themselves an array needing a scan, so past 64 blocks the same three steps run again one level
+up.
+
+```rust
+let mut scanner = gpu.scanner(1 << 20)?;   // three levels, seven dispatches
+let running = scanner.scan(&input)?;       // one submission
+```
+
+**2²⁰ elements is three levels**, and the count is decided in one place and cross-checked against
+the dispatches actually recorded. The offsets a block owes are an *exclusive* scan — SPIR-V has the
+operation, and computing it as `inclusive - own` instead would lose precisely the low bits the scan
+had just accumulated.
 
 ## Branches are uniform or they are refused
 

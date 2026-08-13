@@ -46,6 +46,7 @@ mod dispatch;
 pub mod fuzz;
 pub mod kernels;
 pub mod reduction;
+pub mod scan;
 pub mod timing;
 
 use ash::vk;
@@ -54,6 +55,7 @@ use std::fmt;
 pub use device::{Limits, Narrow};
 pub use dispatch::{Grid, MemoryType, Pass, Placement, Session, Specialization};
 pub use reduction::{BadLength, Reducer, Reduction};
+pub use scan::Scanner;
 pub use timing::Timing;
 
 /// Something that stopped a kernel running.
