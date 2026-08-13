@@ -121,6 +121,31 @@ impl<T: Element> Kernel<T> {
         Ok(self.module().store(pointer, value)?)
     }
 
+    /// Read one element of buffer `binding` at `index`, which is decided while the kernel runs.
+    ///
+    /// The reading counterpart to [`Kernel::store_at`], and it exists for the same reason: a value
+    /// held **per workgroup** rather than per invocation. The second half of a long scan adds each
+    /// block's offset to every element of that block, and the offset lives at
+    /// [`Kernel::workgroup_index`] of a buffer — one number that all 64 invocations read.
+    ///
+    /// **The bound is not checked and cannot be.** A constant index is compared against the buffer
+    /// when the kernel is built; an id is a number this function never sees. Reading past the end
+    /// of a storage buffer is undefined rather than zero, so the caller owes an argument that
+    /// `index` is inside it — usually because it came from `workgroup_index` and the buffer was
+    /// sized to the dispatch.
+    ///
+    /// Every invocation reading the same slot is the normal case here and costs nothing to say:
+    /// concurrent *reads* need no ordering.
+    ///
+    /// # Errors
+    ///
+    /// [`LaneError::NoSuchBuffer`] if `binding` was not bound.
+    pub fn load_at(&mut self, binding: u32, index: Id) -> Result<Id, LaneError> {
+        let pointer = self.element_pointer_to(binding, index)?;
+        let element = self.element();
+        Ok(self.module().load(element, pointer)?)
+    }
+
     /// Write a whole vector to buffer `index`, one element per strip.
     ///
     /// # Errors
@@ -291,6 +316,49 @@ mod tests {
             chain.get(4).copied(),
             Some(slot.word()),
             "the index is not the slot the caller named"
+        );
+    }
+
+    #[test]
+    fn a_load_at_reads_once_from_where_it_was_pointed() {
+        // One load from the buffer, at the caller's index. The hazard it guards against is the
+        // same as `store_at`'s: falling back to invocation-derived addressing gives every lane a
+        // different element of a buffer holding one value per workgroup.
+        let mut kernel = Kernel::<F32>::new(Shape::new(32, 64, 3)).expect("built");
+        let slot = kernel.workgroup_index();
+        kernel.load_at(2, slot).expect("loaded");
+
+        let words = kernel.finish().expect("finished");
+
+        // Against a kernel that did nothing, because the prologue loads the two built-in vectors
+        // and those are `OpLoad`s too. The difference is the one this call added.
+        let bare = Kernel::<F32>::new(Shape::new(32, 64, 3))
+            .expect("built")
+            .finish()
+            .expect("finished");
+        assert_eq!(
+            count(&words, op::LOAD),
+            count(&bare, op::LOAD) + 1,
+            "one load, and no address to build"
+        );
+
+        let chains: Vec<Vec<u32>> = decode::body(&words)
+            .filter(|instruction| instruction.opcode() == op::ACCESS_CHAIN)
+            .map(|instruction| instruction.operands().to_vec())
+            .collect();
+        let chain = chains.last().expect("an access chain");
+
+        assert_eq!(chain.get(4).copied(), Some(slot.word()));
+    }
+
+    #[test]
+    fn reading_from_a_buffer_that_was_never_bound_is_refused() {
+        let mut kernel = Kernel::<F32>::new(Shape::new(32, 64, 2)).expect("built");
+        let slot = kernel.workgroup_index();
+
+        assert_eq!(
+            kernel.load_at(2, slot).err(),
+            Some(LaneError::NoSuchBuffer { index: 2, bound: 2 })
         );
     }
 

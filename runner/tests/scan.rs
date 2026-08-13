@@ -165,3 +165,112 @@ fn bits(values: &[f32]) -> Vec<u32> {
 fn floats(words: &[u32]) -> Vec<f32> {
     words.iter().map(|word| f32::from_bits(*word)).collect()
 }
+
+#[test]
+fn three_dispatches_scan_further_than_one_workgroup_reaches() {
+    // **The composition, by hand.** `scan_blocks` leaves each block scanned from its own start;
+    // the block totals scanned exclusively say what each block owes the blocks before it; and
+    // `add_offsets` pays it. Three dispatches over four buffers, which is what a held `Scanner`
+    // will do for a caller — this is the arithmetic being shown to work before anything wraps it.
+    //
+    // The middle step is one workgroup, so this reaches 64 blocks: 4096 elements. Beyond that the
+    // totals need scanning by the same three steps again, one level up.
+    let Some(gpu) = device("scan long") else {
+        return;
+    };
+    eprintln!("device: {}", gpu.limits().name);
+
+    let width = gpu.limits().subgroup_size;
+    let block = WORKGROUP_SIZE as usize;
+
+    let first = kernels::scan::scan_blocks::<simdr::lanes::F32>(width).expect("built");
+    let middle =
+        kernels::scan::scan_workgroup_exclusive::<simdr::lanes::F32>(width).expect("built");
+    let last = kernels::scan::add_offsets::<simdr::lanes::F32>(width).expect("built");
+
+    for blocks in [2_usize, 3, 8, 64] {
+        let elements = blocks * block;
+        // Values that make a misplaced offset obvious: every element is 1, so the answer is
+        // 1, 2, 3, … all the way across and any block starting from the wrong offset is visibly
+        // out of step rather than merely wrong in the last digit.
+        let input = vec![1.0_f32; elements];
+
+        // Blocks scanned, and each block's total.
+        let mut scan = gpu
+            .session(&first, &[elements, elements, blocks])
+            .expect("session");
+        scan.write(0, &bits(&input)).expect("uploaded");
+        scan.dispatch(blocks as u32, 1).expect("dispatched");
+        let scanned = scan.read(1, elements).expect("read");
+        let totals = scan.read(2, blocks).expect("read");
+
+        // The totals, scanned exclusively: what each block owes the ones before it.
+        let mut offsets = gpu.session(&middle, &[block, block]).expect("session");
+        offsets.write(0, &totals).expect("uploaded");
+        offsets.dispatch(1, 1).expect("dispatched");
+        let owed = offsets.read(1, blocks).expect("read");
+
+        // Paid.
+        let mut add = gpu
+            .session(&last, &[elements, blocks, elements])
+            .expect("session");
+        add.write(0, &scanned).expect("uploaded");
+        add.write(1, &owed).expect("uploaded");
+        add.dispatch(blocks as u32, 1).expect("dispatched");
+        let output = floats(&add.read(2, elements).expect("read"));
+
+        assert_eq!(
+            output,
+            inclusive(&input),
+            "{blocks} blocks ({elements} elements) at width {width}"
+        );
+    }
+}
+
+#[test]
+fn a_long_scan_of_uneven_values_matches_the_cpu_element_for_element() {
+    // The same composition over values that differ everywhere, so a block that took the wrong
+    // offset cannot coincidentally agree. Kept inside 2^24 so the float sums stay exact and the
+    // comparison can be equality rather than a tolerance.
+    let Some(gpu) = device("scan long uneven") else {
+        return;
+    };
+
+    let width = gpu.limits().subgroup_size;
+    let block = WORKGROUP_SIZE as usize;
+    let blocks = 16_usize;
+    let elements = blocks * block;
+
+    let first = kernels::scan::scan_blocks::<simdr::lanes::F32>(width).expect("built");
+    let middle =
+        kernels::scan::scan_workgroup_exclusive::<simdr::lanes::F32>(width).expect("built");
+    let last = kernels::scan::add_offsets::<simdr::lanes::F32>(width).expect("built");
+
+    let input: Vec<f32> = (0..elements).map(|index| (index % 7) as f32).collect();
+
+    let mut scan = gpu
+        .session(&first, &[elements, elements, blocks])
+        .expect("session");
+    scan.write(0, &bits(&input)).expect("uploaded");
+    scan.dispatch(blocks as u32, 1).expect("dispatched");
+    let scanned = scan.read(1, elements).expect("read");
+    let totals = scan.read(2, blocks).expect("read");
+
+    let mut offsets = gpu.session(&middle, &[block, block]).expect("session");
+    offsets.write(0, &totals).expect("uploaded");
+    offsets.dispatch(1, 1).expect("dispatched");
+    let owed = offsets.read(1, blocks).expect("read");
+
+    let mut add = gpu
+        .session(&last, &[elements, blocks, elements])
+        .expect("session");
+    add.write(0, &scanned).expect("uploaded");
+    add.write(1, &owed).expect("uploaded");
+    add.dispatch(blocks as u32, 1).expect("dispatched");
+    let output = floats(&add.read(2, elements).expect("read"));
+
+    let expected = inclusive(&input);
+    for (index, (got, want)) in output.iter().zip(&expected).enumerate() {
+        assert_eq!(got, want, "element {index} of {elements} at width {width}");
+    }
+}

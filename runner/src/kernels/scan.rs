@@ -53,6 +53,19 @@ use simdr::kernel::{Kernel, Shape};
 use simdr::lanes::{Element, LaneError};
 use simdr::module::{Id, op};
 
+/// Which of the two scans a kernel is built for.
+///
+/// They differ in one literal — the group operation — and in nothing else, which is why they share
+/// a builder. What they are *for* differs completely: the inclusive form is the answer a caller
+/// asked for, and the exclusive form is what a block owes the blocks before it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scan {
+    /// Element `i` includes element `i`.
+    Inclusive,
+    /// Element `i` includes everything before `i` and not `i` itself, so element 0 is zero.
+    Exclusive,
+}
+
 /// `out[i] = in[0] + in[1] + … + in[i]`, within one workgroup.
 ///
 /// Inclusive: element `i` of the output includes element `i` of the input. The exclusive form is
@@ -93,11 +106,104 @@ pub fn scan_blocks<T: Element>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
     whole_subgroup_of!(T, subgroup, scan_blocks_at)
 }
 
+/// The exclusive scan of one workgroup — `out[i] = in[0] + … + in[i-1]`, and `out[0] = 0`.
+///
+/// The top of a long scan. Once the block totals have been reduced to no more than
+/// [`super::WORKGROUP_SIZE`] of them, one workgroup scans them and the recursion stops; what comes
+/// out is the offset each block at the level below owes.
+///
+/// # Errors
+///
+/// As [`scan_workgroup`].
+pub fn scan_workgroup_exclusive<T: Element>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup_of!(T, subgroup, scan_workgroup_exclusive_at)
+}
+
+/// The builder for [`scan_workgroup_exclusive`].
+fn scan_workgroup_exclusive_at<T: Element, const LANES: u32>(
+    subgroup: u32,
+) -> Result<Vec<u32>, LaneError> {
+    let mut kernel = Kernel::<T>::new(shape(subgroup))?;
+    let (scanned, _) = scanned_at::<T, LANES>(&mut kernel, subgroup, Scan::Exclusive, false)?;
+
+    kernel.store_scalar(1, scanned)?;
+    kernel.finish()
+}
+
+/// The **exclusive** scan within each block, and each block's total to binding 2.
+///
+/// What the levels above the first need. A long scan works by scanning each block, scanning the
+/// block totals, and adding each block its offset — and the offset a block owes is the total of
+/// every block *before* it, which is an exclusive scan. Running the upper levels inclusively and
+/// shifting by one afterwards would need either a read at `block - 1`, which underflows at block
+/// zero, or a subtraction that in floating point does not give back the number it took away.
+///
+/// The block totals are the same either way: a total is a total whichever scan reported the
+/// running sums, and it comes from a reduce rather than from the scan — see [`scanned_at`].
+///
+/// # Errors
+///
+/// As [`scan_workgroup`].
+pub fn scan_blocks_exclusive<T: Element>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup_of!(T, subgroup, scan_blocks_exclusive_at)
+}
+
+/// The builder for [`scan_blocks_exclusive`].
+fn scan_blocks_exclusive_at<T: Element, const LANES: u32>(
+    subgroup: u32,
+) -> Result<Vec<u32>, LaneError> {
+    blocks_at::<T, LANES>(subgroup, Scan::Exclusive)
+}
+
+/// `out[i] = in[i] + offsets[the workgroup i belongs to]`.
+///
+/// The second half of a long scan. Every block has been scanned from its own start, so each is
+/// short by the total of the blocks before it; that number is one element of binding 1, read once
+/// per invocation at [`simdr::kernel::Kernel::workgroup_index`], and added.
+///
+/// **One value per workgroup, read by all 64 of its invocations.** Concurrent reads need no
+/// ordering, which is what makes this a plain load and the whole pass branch-free.
+///
+/// # Errors
+///
+/// As [`scan_workgroup`].
+pub fn add_offsets<T: Element>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup_of!(T, subgroup, add_offsets_at)
+}
+
+/// The builder for [`add_offsets`].
+fn add_offsets_at<T: Element, const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    // Binding 0 the scanned values, 1 the per-block offsets, 2 the output. Three buffers rather
+    // than adding in place, because a kernel that reads and writes one binding is a kernel whose
+    // correctness depends on no other workgroup having reached it yet.
+    let mut kernel = Kernel::<T>::new(Shape::new(subgroup, super::WORKGROUP_SIZE, 3))?;
+
+    let value = kernel.load::<LANES>(0)?;
+    let block = kernel.workgroup_index();
+    let offset = kernel.load_at(1, block)?;
+
+    let element = kernel.element();
+    let raised = kernel
+        .module()
+        .binary(T::ADD, element, value.id(), offset)?;
+
+    kernel.store_scalar(2, raised)?;
+    kernel.finish()
+}
+
 /// The builder for [`scan_blocks`].
 fn scan_blocks_at<T: Element, const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    blocks_at::<T, LANES>(subgroup, Scan::Inclusive)
+}
+
+/// Both block-scanning kernels, which differ only in which scan they run.
+fn blocks_at<T: Element, const LANES: u32>(
+    subgroup: u32,
+    kind: Scan,
+) -> Result<Vec<u32>, LaneError> {
     // Three buffers rather than two: the block totals need one of their own.
     let mut kernel = Kernel::<T>::new(Shape::new(subgroup, super::WORKGROUP_SIZE, 3))?;
-    let (scanned, total) = scanned_at::<T, LANES>(&mut kernel, subgroup, true)?;
+    let (scanned, total) = scanned_at::<T, LANES>(&mut kernel, subgroup, kind, true)?;
 
     kernel.store_scalar(1, scanned)?;
 
@@ -120,7 +226,7 @@ fn scan_blocks_at<T: Element, const LANES: u32>(subgroup: u32) -> Result<Vec<u32
 /// with `LANES` equal to `subgroup`, which is what [`whole_subgroup_of`] arranges.
 fn scan_workgroup_at<T: Element, const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
     let mut kernel = Kernel::<T>::new(shape(subgroup))?;
-    let (scanned, _) = scanned_at::<T, LANES>(&mut kernel, subgroup, false)?;
+    let (scanned, _) = scanned_at::<T, LANES>(&mut kernel, subgroup, Scan::Inclusive, false)?;
 
     kernel.store_scalar(1, scanned)?;
     kernel.finish()
@@ -139,6 +245,7 @@ fn scan_workgroup_at<T: Element, const LANES: u32>(subgroup: u32) -> Result<Vec<
 fn scanned_at<T: Element, const LANES: u32>(
     kernel: &mut Kernel<T>,
     subgroup: u32,
+    kind: Scan,
     want_total: bool,
 ) -> Result<(Id, Option<Id>), LaneError> {
     let workgroup = super::WORKGROUP_SIZE;
@@ -155,7 +262,13 @@ fn scanned_at<T: Element, const LANES: u32>(
     // The two subgroup instructions, from the same input. `prefix_sum` gives each lane its running
     // total within the subgroup; `reduce_sum` gives every lane of that subgroup the whole of it,
     // which is what the *next* subgroup needs and what goes into shared memory.
-    let running = kernel.lanes()?.prefix_sum(value)?;
+    let running = match kind {
+        Scan::Inclusive => kernel.lanes()?.prefix_sum(value)?,
+        Scan::Exclusive => kernel.lanes()?.prefix_sum_exclusive(value)?,
+    };
+    // **The subgroup's total comes from a reduce either way.** An exclusive scan does not hand any
+    // lane the whole subgroup's sum — that is the one value it leaves out — so it cannot be read
+    // off the scan, and taking the last lane's exclusive result would be short by that lane.
     let total = kernel.lanes()?.reduce_sum(value)?;
 
     let shared = kernel.shared(workgroup)?;
@@ -225,10 +338,14 @@ mod tests {
     // A test may panic — that is how it reports.
     #![allow(clippy::expect_used)]
 
-    use super::{scan_blocks, scan_workgroup, scan_workgroup_at};
+    use super::{
+        scan_blocks, scan_blocks_exclusive, scan_workgroup, scan_workgroup_at,
+        scan_workgroup_exclusive,
+    };
     use simdr::decode;
     use simdr::lanes::{F32, LaneError};
     use simdr::module::op;
+    use simdr::spec::GroupOperation;
     use simdr::spec::StorageClass;
     use std::collections::HashMap;
 
@@ -405,19 +522,76 @@ mod tests {
     }
 
     #[test]
-    fn the_plain_scan_reads_one_slot_fewer_than_the_block_scan() {
-        // The other half of the same claim. `scan_workgroup` has nowhere to put a block total, so
-        // it must not compute one — and the difference between the two kernels is exactly the one
-        // shared read the total needs.
+    fn a_scan_with_nowhere_to_put_a_block_total_does_not_compute_one() {
+        // The other half of the same claim, for **both** kernels that have no totals binding. A
+        // block total costs one shared read and one addition per subgroup, and a kernel that
+        // computed one and stored it nowhere would return the right answer from a module saying
+        // it did more work than it does. The gate finds exactly that by flipping the flag, so the
+        // difference has to be visible here.
         for width in [4_u32, 8, 16, 32] {
-            let plain = shared_slots_read(&scan_workgroup::<F32>(width).expect("built"));
-            let blocks = shared_slots_read(&scan_blocks::<F32>(width).expect("built"));
+            let with_totals = shared_slots_read(&scan_blocks::<F32>(width).expect("built"));
 
-            assert_eq!(
-                plain.len() + 1,
-                blocks.len(),
-                "at width {width}: {plain:?} against {blocks:?}"
-            );
+            for (name, words) in [
+                ("inclusive", scan_workgroup::<F32>(width).expect("built")),
+                (
+                    "exclusive",
+                    scan_workgroup_exclusive::<F32>(width).expect("built"),
+                ),
+            ] {
+                let plain = shared_slots_read(&words);
+                assert_eq!(
+                    plain.len() + 1,
+                    with_totals.len(),
+                    "the {name} scan at width {width}: {plain:?} against {with_totals:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_exclusive_kernels_name_the_exclusive_group_operation() {
+        // What distinguishes the pairs. Both members of each pair emit the same instructions in
+        // the same order, so the only thing saying which scan a module runs is this literal — and
+        // a builder that ignored its `Scan` argument would pass every other test in this file.
+        for width in [4_u32, 32, 64] {
+            for (words, wanted) in [
+                (
+                    scan_workgroup::<F32>(width).expect("built"),
+                    GroupOperation::InclusiveScan,
+                ),
+                (
+                    scan_workgroup_exclusive::<F32>(width).expect("built"),
+                    GroupOperation::ExclusiveScan,
+                ),
+                (
+                    scan_blocks::<F32>(width).expect("built"),
+                    GroupOperation::InclusiveScan,
+                ),
+                (
+                    scan_blocks_exclusive::<F32>(width).expect("built"),
+                    GroupOperation::ExclusiveScan,
+                ),
+            ] {
+                // The scan is the first of the two group instructions; the second is the reduce
+                // that produces the subgroup's total, and it is `Reduce` in every one of them.
+                let operations: Vec<u32> = decode::body(&words)
+                    .filter(|instruction| instruction.opcode() == op::GROUP_NON_UNIFORM_F_ADD)
+                    .filter_map(|instruction| instruction.operands().get(3).copied())
+                    .collect();
+
+                assert_eq!(
+                    operations.first().copied(),
+                    Some(wanted.word()),
+                    "at width {width}"
+                );
+                assert!(
+                    operations
+                        .iter()
+                        .skip(1)
+                        .all(|&operation| operation == GroupOperation::Reduce.word()),
+                    "the total comes from a reduce, at width {width}"
+                );
+            }
         }
     }
 

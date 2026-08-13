@@ -567,12 +567,27 @@ behavioural test can see the difference between doing it and not. It is still on
 one select the module should not contain, so the test counts them: every subgroup's slot is read
 for the total, and one fewer select is emitted than there are subgroups.
 
-**6. A scan across more than one workgroup.** Block totals scanned and added back: two more
-dispatches, the same chain shape `Reducer` already has. Needs 5.
+**6. A scan across more than one workgroup — the arithmetic works, the wrapper does not exist.**
+Three dispatches do it: `scan_blocks` leaves each block scanned from its own start,
+`scan_workgroup_exclusive` over the block totals says what each block owes the ones before it, and
+`add_offsets` pays it. `runner/tests/scan.rs` composes them by hand and matches the CPU element for
+element up to 4 096 elements on all five widths.
 
-**7. The exclusive scan.** `scan_workgroup`'s doc says a caller who wants it can subtract their own
-element, which is true and is not the same as it existing. Cheap once the inclusive form is there,
-and a promise in a doc comment is worth making true.
+What is left is the **recursion and the object**. One workgroup scans at most 64 block totals, so
+4 096 is where the middle step runs out; past it the totals need the same three steps again, one
+level up — three for 2²⁰. That is a `Scanner` holding a buffer and a pipeline per level, which is
+`Reducer` with a descent phase, and it is the next thing to build.
+
+Item 7 turned out to be a prerequisite rather than a nicety: see below.
+
+**7. The exclusive scan — done, and it was load-bearing.** The doc used to say a caller who wants
+it can subtract their own element. That is true of integers and **false of floats**: subtracting a
+large running total back off itself loses precisely the low bits the scan just accumulated. A long
+scan needs the exclusive form for its block offsets, so this stopped being a nicety.
+
+`GroupOperation::ExclusiveScan` had been sitting in `spec::group` since the beginning with nothing
+ever emitting one. `Lanes::prefix_sum_exclusive` asks for it, and the two scans now share a builder
+and differ in one literal.
 
 **8. A strip-mined and clustered scan.** `Lanes::prefix_sum` refuses every mapping but
 `WholeSubgroup` — *"a strip-mined scan must carry a running total between strips, which is not

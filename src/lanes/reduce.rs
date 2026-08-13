@@ -42,20 +42,52 @@ impl Lanes<'_> {
         &mut self,
         vector: Vector<T, LANES>,
     ) -> Result<Vector<T, LANES>, LaneError> {
+        self.scan_with::<T, LANES>(Reduction::InclusiveScan, "prefix_sum", vector)
+    }
+
+    /// The same, with each lane's own element left out: lane 0 receives the additive identity.
+    ///
+    /// **The form a multi-block scan needs, and the reason it is a separate instruction rather than
+    /// a subtraction.** Block `b` of a long scan owes the total of every block before it and not
+    /// its own, which is an exclusive scan of the block totals. Computing it as `inclusive - own`
+    /// costs an operation and, in floating point, is not the same number — subtracting a large
+    /// running total back off itself loses precisely the low bits the scan just accumulated.
+    ///
+    /// SPIR-V has the operation, so this asks for it. `GroupOperation::ExclusiveScan` was in
+    /// `spec::group` from the beginning and nothing had ever emitted one.
+    ///
+    /// # Errors
+    ///
+    /// As [`Lanes::prefix_sum`].
+    pub fn prefix_sum_exclusive<T: Element, const LANES: u32>(
+        &mut self,
+        vector: Vector<T, LANES>,
+    ) -> Result<Vector<T, LANES>, LaneError> {
+        self.scan_with::<T, LANES>(Reduction::ExclusiveScan, "prefix_sum_exclusive", vector)
+    }
+
+    /// Both scans, which differ only in the group operation they name.
+    ///
+    /// `operation` is carried through to the error rather than hard-coded, so a caller told why its
+    /// vector has no scan is told which scan it asked for.
+    fn scan_with<T: Element, const LANES: u32>(
+        &mut self,
+        reduction: Reduction,
+        operation: &'static str,
+        vector: Vector<T, LANES>,
+    ) -> Result<Vector<T, LANES>, LaneError> {
         match self.mapping::<LANES>()? {
             Mapping::WholeSubgroup => {}
             Mapping::Clusters { .. } => {
                 return Err(LaneError::NoSuchForm {
-                    operation: "prefix_sum",
-                    because: "SPIR-V's clustered form is a reduce, so a scan would run across \
-                              lanes belonging to a different vector",
+                    operation,
+                    because: "SPIR-V's clustered form is a reduce, so a scan would run across                               lanes belonging to a different vector",
                 });
             }
             Mapping::Strips { .. } => {
                 return Err(LaneError::NoSuchForm {
-                    operation: "prefix_sum",
-                    because: "a strip-mined scan must carry a running total between strips, \
-                              which is not built",
+                    operation,
+                    because: "a strip-mined scan must carry a running total between strips,                               which is not built",
                 });
             }
         }
@@ -67,13 +99,9 @@ impl Lanes<'_> {
         self.module()
             .require_capability(Capability::GroupNonUniformArithmetic)?;
 
-        let id = self.module().subgroup_reduce(
-            T::GROUP_ADD,
-            element,
-            scope,
-            Reduction::InclusiveScan,
-            vector.id(),
-        )?;
+        let id =
+            self.module()
+                .subgroup_reduce(T::GROUP_ADD, element, scope, reduction, vector.id())?;
         self.from_lane_value(id)
     }
 
@@ -306,6 +334,84 @@ mod tests {
             .to_vec();
 
         assert_eq!(operands[3], GroupOperation::InclusiveScan.word());
+    }
+
+    #[test]
+    fn an_exclusive_prefix_sum_names_the_other_group_operation() {
+        // The whole difference between the two scans is this one literal. Both emit the same
+        // opcode with the same operands otherwise, so a version that ignored the argument and
+        // always scanned inclusively would look right everywhere except here — and would give a
+        // multi-block scan every block its own total twice over.
+        let mut module = Module::new(Version::V1_3);
+        let mut lanes = Lanes::new(&mut module, 32).expect("built");
+        let value = lanes
+            .splat_bits::<F32, 32>(1.0_f32.to_bits())
+            .expect("splat");
+
+        lanes.prefix_sum_exclusive(value).expect("scanned");
+
+        let words = module.finish();
+        let operands = decode::body(&words)
+            .find(|instruction| instruction.opcode() == op::GROUP_NON_UNIFORM_F_ADD)
+            .expect("emitted")
+            .operands()
+            .to_vec();
+
+        assert_eq!(operands[3], GroupOperation::ExclusiveScan.word());
+        assert_ne!(operands[3], GroupOperation::InclusiveScan.word());
+    }
+
+    #[test]
+    fn the_two_scans_differ_in_nothing_but_that_literal() {
+        // They share a builder, and this is what says the sharing did not quietly make them the
+        // same instruction — or leave one of them declaring a capability the other does not.
+        let scan = |exclusive: bool| {
+            let mut module = Module::new(Version::V1_3);
+            let mut lanes = Lanes::new(&mut module, 32).expect("built");
+            let value = lanes
+                .splat_bits::<F32, 32>(1.0_f32.to_bits())
+                .expect("splat");
+            if exclusive {
+                lanes.prefix_sum_exclusive(value).expect("scanned");
+            } else {
+                lanes.prefix_sum(value).expect("scanned");
+            }
+            module.finish()
+        };
+
+        let inclusive = scan(false);
+        let exclusive = scan(true);
+
+        assert_eq!(inclusive.len(), exclusive.len(), "same instruction count");
+        assert_eq!(
+            decode::opcodes(&inclusive),
+            decode::opcodes(&exclusive),
+            "same instructions, in the same order"
+        );
+        assert_ne!(inclusive, exclusive, "and not the same words");
+    }
+
+    #[test]
+    fn the_exclusive_scan_is_refused_for_the_same_shapes_as_the_inclusive_one() {
+        // Both go through one builder, so a caller must not find that one of them accepts a shape
+        // the other refuses — and the error must name the operation the caller actually asked for.
+        let mut module = Module::new(Version::V1_3);
+        let mut lanes = Lanes::new(&mut module, 32).expect("built");
+        let narrow = lanes.splat_bits::<F32, 8>(0).expect("splat");
+        let wide = lanes.splat_bits::<F32, 64>(0).expect("splat");
+
+        for refused in [
+            lanes.prefix_sum_exclusive(narrow).err(),
+            lanes.prefix_sum_exclusive(wide).err(),
+        ] {
+            assert!(matches!(
+                refused,
+                Some(LaneError::NoSuchForm {
+                    operation: "prefix_sum_exclusive",
+                    ..
+                })
+            ));
+        }
     }
 
     #[test]

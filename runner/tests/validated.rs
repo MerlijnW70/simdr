@@ -141,6 +141,22 @@ fn the_scan_is_valid_at_every_width() {
             "scan_blocks",
             width,
         );
+        valid_at(
+            kernels::scan::scan_blocks_exclusive::<F32>(width),
+            "scan_blocks_exclusive",
+            width,
+        );
+        valid_at(
+            kernels::scan::scan_workgroup_exclusive::<F32>(width),
+            "scan_workgroup_exclusive",
+            width,
+        );
+        // The only kernel that *reads* a storage buffer at a runtime index.
+        valid_at(
+            kernels::scan::add_offsets::<F32>(width),
+            "add_offsets",
+            width,
+        );
     }
 }
 
