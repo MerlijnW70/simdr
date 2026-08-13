@@ -553,8 +553,19 @@ and that is worth saying out loud rather than leaving as an assumption about who
 
 ### Tier 2 — the scan, and what it needs
 
-**5. `WorkgroupId` wired into `Kernel`.** A kernel cannot write one value per workgroup at all
-today. That is what blocks 6, and it is a small thing on its own.
+**5. `WorkgroupId` wired into `Kernel` — done, and it was smaller than it looked.** The built-in
+had been loaded since the beginning and used internally to work out where a workgroup's run starts;
+nothing exposed it. `Kernel::workgroup_index` returns it and `Kernel::store_at` writes at a slot the
+caller names, which together are the "one value per workgroup" that was missing.
+
+`kernels::scan::scan_blocks` is the first user: the same scan with each block's total written to a
+third binding. It is what item 6 needs and is worth having on its own.
+
+The gate found the interesting part. Skipping the offset work on the final subgroup cannot change
+the answer — the boundary would be `workgroup - 1` and no lane's index exceeds it — so no
+behavioural test can see the difference between doing it and not. It is still one comparison and
+one select the module should not contain, so the test counts them: every subgroup's slot is read
+for the total, and one fewer select is emitted than there are subgroups.
 
 **6. A scan across more than one workgroup.** Block totals scanned and added back: two more
 dispatches, the same chain shape `Reducer` already has. Needs 5.

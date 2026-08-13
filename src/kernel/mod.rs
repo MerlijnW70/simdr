@@ -168,6 +168,25 @@ impl<T: Element> Kernel<T> {
         self.local
     }
 
+    /// Which workgroup this invocation is in — the dispatch's x index.
+    ///
+    /// **The slot a per-block result belongs at.** Everything else in this interface addresses by
+    /// *invocation*: [`Kernel::store_scalar`] writes one value per invocation, and a workgroup of
+    /// 64 therefore writes 64 of them. A chained algorithm often wants one value per *workgroup* —
+    /// a block's total, its maximum, how many elements it kept — and there was no way to say where
+    /// that goes, because the only index available counted invocations.
+    ///
+    /// It was loaded all along and used internally to work out where a workgroup's run begins; this
+    /// exposes the number rather than computing anything new.
+    ///
+    /// The x index and not a vector of three. `decisions/DR-0006` allows two dispatch axes, and the
+    /// y one is [`Kernel::row`] — which is a different question with a different answer, so they
+    /// are different functions rather than components of one.
+    #[must_use]
+    pub const fn workgroup_index(&self) -> Id {
+        self.group
+    }
+
     /// The type this kernel's addresses are computed in — a 32-bit *unsigned* integer.
     ///
     /// What a caller building an offset needs. [`Kernel::load_offset_by`] and
@@ -242,7 +261,7 @@ mod tests {
     use crate::decode;
     use crate::lanes::{F32, U32};
     use crate::module::op;
-    use crate::spec::Capability;
+    use crate::spec::{Capability, Decoration};
 
     fn count(words: &[u32], opcode: u16) -> usize {
         decode::body(words)
@@ -351,6 +370,71 @@ mod tests {
                 workgroup: 0,
                 buffers: 2
             })
+        );
+    }
+
+    #[test]
+    fn the_workgroup_index_is_the_workgroup_built_in_and_not_the_invocation_one() {
+        // Two accessors returning ids of the same type, one of which is a plausible wrong answer
+        // for the other. Swapping them compiles, validates, and puts every block's result in the
+        // slot belonging to a lane — so the assertion traces the id back to the decoration.
+        use crate::spec::BuiltIn;
+
+        let kernel = Kernel::<F32>::new(Shape::new(32, 64, 2)).expect("built");
+        let group = kernel.workgroup_index();
+        let local = kernel.local_index();
+        assert_ne!(group, local, "the two positions are not the same value");
+
+        let words = kernel.finish().expect("finished");
+
+        // Which variable each built-in decorates.
+        let decorated = |wanted: u32| {
+            decode::body(&words)
+                .filter(|instruction| instruction.opcode() == op::DECORATE)
+                .find_map(|instruction| match instruction.operands() {
+                    [target, decoration, built_in]
+                        if *decoration == Decoration::BuiltIn.word() && *built_in == wanted =>
+                    {
+                        Some(*target)
+                    }
+                    _ => None,
+                })
+        };
+
+        // `group` is a component extracted from the loaded vector, so the chain to follow is
+        // extract <- load <- variable. Both are traced the same way, and only the built-in differs.
+        let source_of = |value: Id| {
+            let extracted = decode::body(&words)
+                .filter(|instruction| instruction.opcode() == op::COMPOSITE_EXTRACT)
+                .find_map(|instruction| match instruction.operands() {
+                    [_type, id, composite, ..] if *id == value.word() => Some(*composite),
+                    _ => None,
+                })?;
+            decode::body(&words)
+                .filter(|instruction| instruction.opcode() == op::LOAD)
+                .find_map(|instruction| match instruction.operands() {
+                    [_type, id, pointer] if *id == extracted => Some(*pointer),
+                    _ => None,
+                })
+        };
+
+        // Both sides found, before they are compared. Two `None`s are equal, and a version of
+        // this test that skipped this would pass for a module containing neither built-in.
+        let from_group = source_of(group).expect("workgroup_index traces back to a variable");
+        let from_local = source_of(local).expect("local_index traces back to a variable");
+        let workgroup_id =
+            decorated(BuiltIn::WorkgroupId.word()).expect("WorkgroupId decorates something");
+        let local_id = decorated(BuiltIn::LocalInvocationId.word())
+            .expect("LocalInvocationId decorates something");
+        assert_ne!(workgroup_id, local_id, "two built-ins, two variables");
+
+        assert_eq!(
+            from_group, workgroup_id,
+            "workgroup_index does not come from WorkgroupId"
+        );
+        assert_eq!(
+            from_local, local_id,
+            "local_index does not come from LocalInvocationId"
         );
     }
 

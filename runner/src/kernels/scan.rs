@@ -49,9 +49,9 @@
 //! scan that silently restarted at every block boundary would return plausible numbers.
 
 use super::{shape, whole_subgroup_of};
-use simdr::kernel::Kernel;
+use simdr::kernel::{Kernel, Shape};
 use simdr::lanes::{Element, LaneError};
-use simdr::module::op;
+use simdr::module::{Id, op};
 
 /// `out[i] = in[0] + in[1] + … + in[i]`, within one workgroup.
 ///
@@ -67,12 +67,80 @@ pub fn scan_workgroup<T: Element>(subgroup: u32) -> Result<Vec<u32>, LaneError> 
     whole_subgroup_of!(T, subgroup, scan_workgroup_at)
 }
 
+/// `out[i] = in[0] + … + in[i]` within each block, **and** each block's total to binding 2.
+///
+/// The same scan as [`scan_workgroup`] with one instruction more: the last thing every invocation
+/// holds is its subgroup's running total plus the offset of the subgroups before it, so the *last*
+/// subgroup's lanes are holding the block's whole total. That value goes to
+/// [`simdr::kernel::Kernel::workgroup_index`] of binding 2.
+///
+/// **This is what a scan longer than one workgroup needs.** With block totals in a buffer of their
+/// own, scanning *those* and adding the result back to each block turns 64 elements into 64 × 64,
+/// and again for as many levels as the length needs. Nothing here does that yet; this is the pass
+/// that makes it possible, and it is useful on its own to anyone who wants per-block sums.
+///
+/// # Every invocation writes the block total, and they all write the same one
+///
+/// The whole workgroup runs the store, so binding 2's slot is written 64 times. That is the case
+/// [`simdr::kernel::Kernel::store_at`] documents as its own: identical values to one address, where
+/// the order they land in cannot change the answer. Electing one lane to write instead would need a
+/// branch that some invocations do not take, which `decisions/DR-0003` refuses.
+///
+/// # Errors
+///
+/// As [`scan_workgroup`].
+pub fn scan_blocks<T: Element>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup_of!(T, subgroup, scan_blocks_at)
+}
+
+/// The builder for [`scan_blocks`].
+fn scan_blocks_at<T: Element, const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    // Three buffers rather than two: the block totals need one of their own.
+    let mut kernel = Kernel::<T>::new(Shape::new(subgroup, super::WORKGROUP_SIZE, 3))?;
+    let (scanned, total) = scanned_at::<T, LANES>(&mut kernel, subgroup, true)?;
+
+    kernel.store_scalar(1, scanned)?;
+
+    let Some(total) = total else {
+        return Err(LaneError::BadShape {
+            workgroup: super::WORKGROUP_SIZE,
+            buffers: subgroup,
+        });
+    };
+    let block = kernel.workgroup_index();
+    kernel.store_at(2, block, total)?;
+
+    kernel.finish()
+}
+
 /// The builder, at a lane count that has to equal the subgroup width.
 ///
 /// `prefix_sum` refuses any mapping but the whole subgroup — a strip-mined scan would have to
 /// carry a running total between strips, which is not built — so this is only ever instantiated
 /// with `LANES` equal to `subgroup`, which is what [`whole_subgroup_of`] arranges.
 fn scan_workgroup_at<T: Element, const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    let mut kernel = Kernel::<T>::new(shape(subgroup))?;
+    let (scanned, _) = scanned_at::<T, LANES>(&mut kernel, subgroup, false)?;
+
+    kernel.store_scalar(1, scanned)?;
+    kernel.finish()
+}
+
+/// The scan itself: this invocation's running total, and the block's whole total if asked for.
+///
+/// **One copy of the arithmetic, used by both kernels.** Writing it twice would be two things to
+/// keep in step, and the one that got less attention would be the one nobody had run at width 4 —
+/// where the cross-subgroup combine is fifteen steps rather than none.
+///
+/// `want_total` rather than always computing it, because the block total costs one addition per
+/// subgroup and [`scan_workgroup`] has nowhere to put it. Emitting instructions whose result is
+/// discarded would make the module say something the kernel does not do; a driver would remove
+/// them, and the module is what this project checks.
+fn scanned_at<T: Element, const LANES: u32>(
+    kernel: &mut Kernel<T>,
+    subgroup: u32,
+    want_total: bool,
+) -> Result<(Id, Option<Id>), LaneError> {
     let workgroup = super::WORKGROUP_SIZE;
     if subgroup == 0 || !workgroup.is_multiple_of(subgroup) {
         return Err(LaneError::BadShape {
@@ -82,7 +150,6 @@ fn scan_workgroup_at<T: Element, const LANES: u32>(subgroup: u32) -> Result<Vec<
     }
     let subgroups = workgroup / subgroup;
 
-    let mut kernel = Kernel::<T>::new(shape(subgroup))?;
     let value = kernel.load::<LANES>(0)?;
 
     // The two subgroup instructions, from the same input. `prefix_sum` gives each lane its running
@@ -99,15 +166,37 @@ fn scan_workgroup_at<T: Element, const LANES: u32>(subgroup: u32) -> Result<Vec<
     let element = kernel.element();
     // Zero of whatever `T` is, by bit pattern: `0` is `0.0` as an `f32` and zero as either
     // integer. The additive identity is the right starting offset for the first subgroup, which
-    // has nothing before it.
-    let mut offset = kernel.module().constant_scalar(element, 0)?;
+    // has nothing before it, and the right start for a sum.
+    let zero = kernel.module().constant_scalar(element, 0)?;
+    let mut offset = zero;
+    let mut block = want_total.then_some(zero);
 
-    for earlier in 0..subgroups.saturating_sub(1) {
+    // **The last subgroup is read only if the block total wants it.** It is nobody's predecessor,
+    // so it contributes no offset to anyone; loading it regardless left `scan_workgroup` with one
+    // shared read whose result went nowhere, which the tests below caught by counting the slots.
+    let steps = if want_total {
+        subgroups
+    } else {
+        subgroups.saturating_sub(1)
+    };
+
+    for earlier in 0..steps {
         // Slot `k * width` is where subgroup `k` wrote its total. Every lane of that subgroup
         // wrote the same value to a different slot, so any one of them will do and this takes the
         // first — a constant index, which is what makes the read the same instruction in every
         // invocation.
         let theirs = kernel.load_shared(shared, earlier * subgroup)?;
+
+        // **The block total takes every subgroup, the offset only the earlier ones.** That is the
+        // whole difference between the two numbers, and it is why the block total is not simply
+        // the last lane's `offset`: no lane's offset includes its own subgroup.
+        if let Some(sum) = block {
+            block = Some(kernel.module().binary(T::ADD, element, sum, theirs)?);
+        }
+
+        if earlier + 1 == subgroups {
+            continue;
+        }
 
         // The last lane of subgroup `k`. An invocation past it belongs to a later subgroup and
         // owes this total; one at or before it does not. Written as `>` against the last index
@@ -128,8 +217,7 @@ fn scan_workgroup_at<T: Element, const LANES: u32>(subgroup: u32) -> Result<Vec<
     let scanned = kernel
         .module()
         .binary(T::ADD, element, running.id(), offset)?;
-    kernel.store_scalar(1, scanned)?;
-    kernel.finish()
+    Ok((scanned, block))
 }
 
 #[cfg(test)]
@@ -137,7 +225,7 @@ mod tests {
     // A test may panic — that is how it reports.
     #![allow(clippy::expect_used)]
 
-    use super::{scan_workgroup, scan_workgroup_at};
+    use super::{scan_blocks, scan_workgroup, scan_workgroup_at};
     use simdr::decode;
     use simdr::lanes::{F32, LaneError};
     use simdr::module::op;
@@ -285,6 +373,73 @@ mod tests {
             scan_workgroup_at::<F32, 32>(0),
             Err(LaneError::BadShape { .. })
         ));
+    }
+
+    #[test]
+    fn the_block_scan_reads_every_subgroups_total_and_selects_on_all_but_the_last() {
+        // Two counts that pull in opposite directions, which is what makes the loop's shape
+        // testable at all. The block total needs **every** subgroup's slot; the offset needs a
+        // select for every subgroup **but the last**, because the last one is nobody's
+        // predecessor.
+        //
+        // The gate found this: skipping the offset work on the final iteration is invisible in the
+        // *answer* — the boundary would be `workgroup - 1` and no lane's index exceeds it, so the
+        // select would pick the unchanged offset every time — but it is one comparison and one
+        // select the module should not contain. A behavioural test cannot see it. This can.
+        for width in [4_u32, 8, 16, 32, 64] {
+            let words = scan_blocks::<F32>(width).expect("built");
+            let subgroups = super::super::WORKGROUP_SIZE / width;
+
+            let expected: Vec<u32> = (0..subgroups).map(|step| step * width).collect();
+            assert_eq!(
+                shared_slots_read(&words),
+                expected,
+                "the block total needs every subgroup, at width {width}"
+            );
+            assert_eq!(
+                count(&words, op::SELECT),
+                subgroups as usize - 1,
+                "the last subgroup is nobody's predecessor, at width {width}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_plain_scan_reads_one_slot_fewer_than_the_block_scan() {
+        // The other half of the same claim. `scan_workgroup` has nowhere to put a block total, so
+        // it must not compute one — and the difference between the two kernels is exactly the one
+        // shared read the total needs.
+        for width in [4_u32, 8, 16, 32] {
+            let plain = shared_slots_read(&scan_workgroup::<F32>(width).expect("built"));
+            let blocks = shared_slots_read(&scan_blocks::<F32>(width).expect("built"));
+
+            assert_eq!(
+                plain.len() + 1,
+                blocks.len(),
+                "at width {width}: {plain:?} against {blocks:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_block_scan_writes_one_more_time_than_the_plain_one() {
+        // The store at a runtime index is the point of the pass. A kernel that dropped it would
+        // still scan correctly and leave the totals buffer holding whatever was in it.
+        //
+        // Two and three rather than one and two: the handover into shared memory is an `OpStore`
+        // as well, and it is the first of them in both kernels.
+        for width in [4_u32, 32, 64] {
+            assert_eq!(
+                count(&scan_workgroup::<F32>(width).expect("built"), op::STORE),
+                2,
+                "shared, then the scanned value"
+            );
+            assert_eq!(
+                count(&scan_blocks::<F32>(width).expect("built"), op::STORE),
+                3,
+                "shared, the scanned value, then the block total"
+            );
+        }
     }
 
     #[test]

@@ -112,3 +112,56 @@ fn a_scan_of_zeros_stays_zero_and_a_scan_of_one_element_is_that_element() {
         "one non-zero at the front should carry all the way across: {output:?}"
     );
 }
+
+#[test]
+fn each_block_writes_its_own_total_to_its_own_slot() {
+    // **What `Kernel::workgroup_index` and `Kernel::store_at` were added for.** Checked on a device
+    // and across several workgroups, because the ways this goes wrong all look plausible with one:
+    // every block writing to slot zero, or to a lane-derived slot, is correct at one workgroup and
+    // wrong at two.
+    //
+    // Three bindings, so this goes through a `Session` rather than `Gpu::run` — the one-shot path
+    // binds two and writes the last, and this kernel writes two of the three.
+    let Some(gpu) = device("scan blocks") else {
+        return;
+    };
+    eprintln!("device: {}", gpu.limits().name);
+
+    let width = gpu.limits().subgroup_size;
+    let spirv = kernels::scan::scan_blocks::<simdr::lanes::F32>(width).expect("built");
+    let block = WORKGROUP_SIZE as usize;
+
+    for blocks in [1_usize, 2, 5] {
+        // Block `b` holds `b + 1` in every slot, so its total is `(b + 1) * 64` and no two blocks
+        // agree — a total written to the wrong slot is a wrong number rather than a coincidence.
+        let input: Vec<f32> = (0..blocks * block)
+            .map(|index| (index / block + 1) as f32)
+            .collect();
+
+        let mut session = gpu
+            .session(&spirv, &[input.len(), input.len(), blocks])
+            .expect("session");
+        session.write(0, &bits(&input)).expect("uploaded");
+        session.dispatch(blocks as u32, 1).expect("dispatched");
+
+        let scanned = floats(&session.read(1, input.len()).expect("read scan"));
+        let totals = floats(&session.read(2, blocks).expect("read totals"));
+
+        // Each block scans from its own start, not from the start of the buffer.
+        let expected: Vec<f32> = input.chunks(block).flat_map(inclusive).collect();
+        assert_eq!(scanned, expected, "{blocks} blocks at width {width}");
+
+        let wanted: Vec<f32> = (0..blocks).map(|b| ((b + 1) * block) as f32).collect();
+        assert_eq!(totals, wanted, "{blocks} block totals at width {width}");
+    }
+}
+
+/// A slice of floats as the words a buffer holds.
+fn bits(values: &[f32]) -> Vec<u32> {
+    values.iter().map(|value| value.to_bits()).collect()
+}
+
+/// The other way round.
+fn floats(words: &[u32]) -> Vec<f32> {
+    words.iter().map(|word| f32::from_bits(*word)).collect()
+}

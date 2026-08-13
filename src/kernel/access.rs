@@ -95,6 +95,32 @@ impl<T: Element> Kernel<T> {
         Ok(self.module().store(pointer, value)?)
     }
 
+    /// Write `value` to buffer `binding` at `index`, which is decided while the kernel runs.
+    ///
+    /// The counterpart to [`Kernel::store_scalar`], which writes at this *invocation's* slot. Here
+    /// the caller names the slot, and the reason to want that is a per-workgroup result:
+    /// [`Kernel::workgroup_index`] is the index a block's total belongs at, and no
+    /// invocation-derived address reaches it.
+    ///
+    /// # Several invocations may name the same slot
+    ///
+    /// **Then they must be writing the same value.** The whole workgroup runs this, so a block
+    /// total written at `workgroup_index` is written 64 times to one address. Identical writes to
+    /// one location are the case this is for, and the reason it is a plain store: the value does
+    /// not depend on the order they land in, so there is nothing for an atomic to order.
+    ///
+    /// Writing *different* values to one slot from several invocations is a race whatever this
+    /// returns, and the last writer is not defined. [`Kernel::atomic_add_at`] is for the case where
+    /// each invocation has something of its own to contribute.
+    ///
+    /// # Errors
+    ///
+    /// [`LaneError::NoSuchBuffer`] if `binding` was not bound.
+    pub fn store_at(&mut self, binding: u32, index: Id, value: Id) -> Result<(), LaneError> {
+        let pointer = self.element_pointer_to(binding, index)?;
+        Ok(self.module().store(pointer, value)?)
+    }
+
     /// Write a whole vector to buffer `index`, one element per strip.
     ///
     /// # Errors
@@ -239,6 +265,70 @@ mod tests {
         decode::body(words)
             .filter(|instruction| instruction.opcode() == opcode)
             .count()
+    }
+
+    #[test]
+    fn a_store_at_writes_once_wherever_it_was_pointed() {
+        // One store, and its address comes from the caller's id rather than from this invocation.
+        // A version that fell back to `store_scalar`'s addressing would write 64 different slots
+        // instead of one, which is a plausible-looking module and the wrong answer.
+        let mut kernel = Kernel::<F32>::new(Shape::new(32, 64, 3)).expect("built");
+        let slot = kernel.workgroup_index();
+        let value = kernel.local_index();
+        kernel.store_at(2, slot, value).expect("stored");
+
+        let words = kernel.finish().expect("finished");
+        assert_eq!(count(&words, op::STORE), 1);
+
+        let chains: Vec<Vec<u32>> = decode::body(&words)
+            .filter(|instruction| instruction.opcode() == op::ACCESS_CHAIN)
+            .map(|instruction| instruction.operands().to_vec())
+            .collect();
+        let chain = chains.last().expect("an access chain");
+
+        // result type, result id, base, then the struct member and the element index.
+        assert_eq!(
+            chain.get(4).copied(),
+            Some(slot.word()),
+            "the index is not the slot the caller named"
+        );
+    }
+
+    #[test]
+    fn store_at_and_store_scalar_reach_different_addresses() {
+        // The distinction the pair exists for. `store_scalar` derives its slot from the invocation
+        // and so has arithmetic behind it; `store_at` has none, because the caller did it. If the
+        // two ever emit the same instruction count, one of them has stopped being itself.
+        let scalar = {
+            let mut kernel = Kernel::<F32>::new(Shape::new(32, 64, 3)).expect("built");
+            let value = kernel.local_index();
+            kernel.store_scalar(2, value).expect("stored");
+            kernel.finish().expect("finished")
+        };
+        let at = {
+            let mut kernel = Kernel::<F32>::new(Shape::new(32, 64, 3)).expect("built");
+            let slot = kernel.workgroup_index();
+            let value = kernel.local_index();
+            kernel.store_at(2, slot, value).expect("stored");
+            kernel.finish().expect("finished")
+        };
+
+        assert_eq!(count(&scalar, op::STORE), count(&at, op::STORE));
+        assert!(
+            count(&scalar, op::I_ADD) > count(&at, op::I_ADD),
+            "store_at should compute no address of its own"
+        );
+    }
+
+    #[test]
+    fn storing_into_a_buffer_that_was_never_bound_is_refused() {
+        let mut kernel = Kernel::<F32>::new(Shape::new(32, 64, 2)).expect("built");
+        let slot = kernel.workgroup_index();
+
+        assert_eq!(
+            kernel.store_at(2, slot, slot).err(),
+            Some(LaneError::NoSuchBuffer { index: 2, bound: 2 })
+        );
     }
 
     #[test]

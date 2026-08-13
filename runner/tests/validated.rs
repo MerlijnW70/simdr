@@ -133,6 +133,14 @@ fn the_scan_is_valid_at_every_width() {
             "scan_workgroup",
             width,
         );
+        // Three bindings and a store at a runtime index, neither of which any other kernel here
+        // has — `OpAccessChain` into a storage buffer with a non-constant index is exactly the
+        // shape a validator has rules about.
+        valid_at(
+            kernels::scan::scan_blocks::<F32>(width),
+            "scan_blocks",
+            width,
+        );
     }
 }
 
