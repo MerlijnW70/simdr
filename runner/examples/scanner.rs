@@ -71,7 +71,86 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    in_place(&gpu)?;
     mapped(&gpu)?;
+    Ok(())
+}
+
+/// Where the deepest chain here spends its device time, pass by pass.
+///
+/// Three kinds of pass, which is what makes this worth printing rather than a reduction's: block
+/// scans on the way **up**, one workgroup at the **top**, and offset additions on the way **down**
+/// reading what the way up wrote. The shape of the profile says which of the three the length is
+/// actually paying for.
+fn in_place(gpu: &Gpu) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(&(elements, _)) = SIZES.last() else {
+        return Ok(());
+    };
+
+    let mut scanner = gpu.scanner(elements)?;
+    let input: Vec<f32> = (0..elements).map(|index| (index % 3) as f32).collect();
+
+    scanner.scan_timed(&input)?;
+    let started = Instant::now();
+    let (_, spans) = scanner.scan_timed(&input)?;
+    let wall = started.elapsed();
+
+    println!(
+        "
+{} elements, timed from inside the chain:
+",
+        thousands(elements)
+    );
+    if spans.is_empty() {
+        println!(
+            "  this device reports no usable timestamp queries — `timestampValidBits` is zero on
+             some queues and the feature is optional, so there is nothing to say rather than a
+             zero to print."
+        );
+        return Ok(());
+    }
+
+    // `2 * levels + 1`: the first pass and then a pair per level, up and down.
+    let levels = (spans.len() - 1) / 2;
+    let total: Duration = spans.iter().sum();
+
+    println!("{:>22} {:>12} {:>10}", "pass", "on device", "share");
+    for (index, taken) in spans.iter().enumerate() {
+        let name = if index == 0 {
+            "up: the input".to_owned()
+        } else if index < levels {
+            format!("up: level {index}")
+        } else if index == levels {
+            "top: one workgroup".to_owned()
+        } else {
+            format!("down: level {}", spans.len() - 1 - index)
+        };
+
+        let share = taken.as_secs_f64() / total.as_secs_f64() * 100.0;
+        println!("{name:>22} {:>12} {share:>9.0}%", micros(*taken));
+    }
+    println!("{:>22} {:>12}", "---- the dispatches ----", micros(total));
+
+    println!(
+        "
+  **The two ends are the scan and the depth is nearly free.** The first pass reads the
+         whole input and the last writes the whole answer; everything between them works on the
+         block totals, which are a sixty-fourth of the buffer and then a sixty-fourth of that. On
+         an RTX 4080 the five middle passes come to about 10 us against 21 for the two ends, and on
+         the integrated Radeon to about 14 against 402.
+
+         So a longer input costs two more dispatches and almost no more device time, and making
+         a scan faster means making those two traversals faster rather than shortening the
+         recursion.
+
+         And the dispatches are not the call. Against the {} above, this device spends {} of it
+         on the chain — the rest is the host writing its input and waiting for one submission,
+         neither of which is inside the command buffer. `runner/examples/reducer.rs` reaches the
+         same conclusion for the reduction and measures the upload directly.",
+        micros(wall),
+        micros(total),
+    );
+
     Ok(())
 }
 

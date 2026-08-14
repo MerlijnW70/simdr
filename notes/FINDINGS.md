@@ -2244,3 +2244,39 @@ Sixteen times the elements between the first two rows and about a third more tim
 dispatches are most of what changed. Sixteen times again and it is nine times slower — by then the
 buffer is 4 MB and the host write is back to being the largest single row, which is what
 `runner/examples/reducer.rs` measures directly for the reduction.
+
+## A scan's depth is nearly free; its two ends are the whole cost
+
+`Scanner::scan_timed` writes a timestamp into the chain's own command buffer after every dispatch,
+so a scan over 2²⁰ reports where its seven passes went. Three kinds of pass — block scans on the
+way up, one workgroup at the top, offset additions on the way down — and the answer is that only
+two of the seven matter.
+
+| pass | RTX 4080 | integrated Radeon |
+| --- | --- | --- |
+| up: the input | 11.0 µs — 35% | 244.1 µs — 59% |
+| up: level 1 | 2.2 µs | 5.4 µs |
+| up: level 2 | 2.0 µs | 2.8 µs |
+| top: one workgroup | 1.9 µs | 1.4 µs |
+| down: level 2 | 2.0 µs | 1.4 µs |
+| down: level 1 | 2.0 µs | 2.7 µs |
+| down: level 0 | 10.2 µs — 33% | 158.0 µs — 38% |
+| all seven | **31.5 µs** | **415.6 µs** |
+
+The first pass reads the whole input and the last writes the whole answer. Everything between them
+works on block totals — a sixty-fourth of the buffer, then a sixty-fourth of that — so the five
+middle passes come to about 10 µs against 21 for the two ends on the 4080, and about 14 against 402
+on the Radeon.
+
+**Two consequences, and the second is the useful one.** A longer input costs two more dispatches
+and almost no more device time, so the recursion is not what to worry about. And making a scan
+faster means making those two full-buffer traversals faster — shortening the middle would recover
+single microseconds.
+
+### And the dispatches are 3% of the call
+
+31.5 µs of device time against ~995 µs of wall clock on the 4080. The rest is the host writing its
+input and waiting for one submission, neither of which is inside the command buffer — the same
+conclusion `runner/examples/reducer.rs` reaches for the reduction, arrived at independently and by
+a different route. On this hardware, at this size, **the arithmetic is not the cost of either
+algorithm.**

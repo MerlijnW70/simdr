@@ -775,8 +775,13 @@ map into the chain's first pass, and it is worth **2.0–3.0×** depending on th
 device: two crossings of the buffer removed, against a scan that grows faster than they do.
 `runner/examples/scanner.rs` prints the table and `notes/FINDINGS.md` records it.
 
-`scan_timed` is still missing. Seven dispatches over three levels is the one place a per-pass
-profile would say something the reduction's could not.
+`scan_timed` is built too, and it did say something the reduction's could not: **the depth is
+nearly free and the two ends are the whole cost.** The five middle passes of a 2²⁰ scan come to
+about 10 µs against 21 for the first and last on an RTX 4080, because everything between them works
+on block totals rather than the buffer. A longer input costs two more dispatches and almost no more
+device time.
+
+And the seven dispatches together are 3% of the call. `notes/FINDINGS.md` has both tables.
 
 **4. There is no one-shot `Gpu::scan`.** `Gpu::sum` exists and is what every test of the reduction
 starts from. Scanning needs a `Scanner` built first, which is right for a caller that scans

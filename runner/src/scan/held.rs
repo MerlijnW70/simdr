@@ -22,6 +22,7 @@ use crate::dispatch::{Pipeline, Staged, deliver_floats};
 use crate::kernels::{self, WORKGROUP_SIZE};
 use crate::{Error, Gpu};
 use simdr::lanes::F32;
+use std::time::Duration;
 
 /// A prefix sum over a fixed number of elements, with its pipelines already built.
 pub struct Scanner<'gpu> {
@@ -546,6 +547,34 @@ impl Scanner<'_> {
     /// [`Error::TooLarge`] if `input` is not the length this was built for, otherwise as
     /// [`Gpu::run`].
     pub fn scan(&mut self, input: &[f32]) -> Result<Vec<f32>, Error> {
+        self.run(input).map(|(answer, _)| answer)
+    }
+
+    /// The same scan, reporting how long each pass took on the device's own clock.
+    ///
+    /// **The deepest chain here, and the only one where a per-pass profile can say something a
+    /// reduction's could not.** A reduction's passes shrink by a fixed factor and all do the same
+    /// kind of work; a scan's do three different kinds — block scans on the way up, one workgroup
+    /// at the top, offset additions on the way down — and the way down reads buffers the way up
+    /// wrote.
+    ///
+    /// One timestamp per dispatch, written into the chain's own command buffer, so each pass is
+    /// measured beside the passes it actually runs beside. `runner/examples/reducer.rs` records
+    /// what that correction was worth for the reduction: a probe had the step cost five times too
+    /// high.
+    ///
+    /// The vector is empty on a device with no usable timestamp queries, which is a thing to
+    /// report rather than a zero to print.
+    ///
+    /// # Errors
+    ///
+    /// As [`Scanner::scan`].
+    pub fn scan_timed(&mut self, input: &[f32]) -> Result<(Vec<f32>, Vec<Duration>), Error> {
+        self.run(input)
+    }
+
+    /// Both of the above: the answer, and where the time went.
+    fn run(&mut self, input: &[f32]) -> Result<(Vec<f32>, Vec<Duration>), Error> {
         if input.len() != self.elements {
             return Err(Error::TooLarge {
                 words: input.len(),
@@ -564,10 +593,10 @@ impl Scanner<'_> {
 
         // SAFETY: every buffer and pipeline here is owned by `self` and outlives the call, and the
         // submission waits on a fence before returning.
-        let output = unsafe {
+        let (output, spans) = unsafe {
             let upload = deliver_floats(self.gpu, input, staging, source)?;
 
-            self.gpu.replay(
+            let spans = self.gpu.replay_timed(
                 &self.pipelines,
                 &self.workgroups,
                 upload,
@@ -577,10 +606,10 @@ impl Scanner<'_> {
                     bytes,
                 }),
             )?;
-            staging.read(self.gpu, self.elements)?
+            (staging.read(self.gpu, self.elements)?, spans)
         };
 
-        Ok(output.into_iter().map(f32::from_bits).collect())
+        Ok((output.into_iter().map(f32::from_bits).collect(), spans))
     }
 }
 
