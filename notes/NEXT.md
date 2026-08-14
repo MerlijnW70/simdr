@@ -981,6 +981,17 @@ and "something looked and it was right", and only one of those is a claim.
 The audit also found `Limits` reporting `subgroup_ballot` and no `subgroup_vote` while three kernels
 used votes — right on every device here because no implementation offers one without the other.
 
+**Pulling that thread found a second missing bit and a wrong tool.** Laying all seven capabilities
+this emitter can declare beside the feature bits the runner reports: `BASIC` was missing, which
+every lane kernel declares, and `SHUFFLE_RELATIVE` was missing, which the whole scan rests on. The
+gates named the arbitrary shuffle instead. And `simdr probe` — the command that exists so nobody has
+to guess — listed `any, all` under *ballot* and `shift_up, shift_down` under *shuffle*.
+
+The fix is a mapping rather than four more gates: `Limits::supports(Capability)` writes the
+correspondence down once and `Limits::unsupported_in(&spirv)` reads the requirement out of the
+module's own `OpCapability` instructions, so a kernel that needs something new brings its own gate.
+`notes/FINDINGS.md` has the table.
+
 ### What it leaves open
 
 **9. `Lanes` had no elementwise equality — done, and the strip-mined vote came with it.**

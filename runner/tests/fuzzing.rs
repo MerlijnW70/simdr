@@ -221,7 +221,7 @@ fn generated_integer_programs_agree_with_the_cpu_reference() {
     };
     let limits = gpu.limits().clone();
 
-    if !limits.subgroup_arithmetic || !limits.subgroup_clustered || !limits.subgroup_shuffle {
+    if !limits.subgroup_surface() {
         eprintln!("SKIPPED fuzz-u32: the device lacks part of the subgroup surface");
         return;
     }
@@ -245,7 +245,7 @@ fn generated_float_programs_agree_with_the_cpu_reference() {
     };
     let limits = gpu.limits().clone();
 
-    if !limits.subgroup_arithmetic || !limits.subgroup_clustered || !limits.subgroup_shuffle {
+    if !limits.subgroup_surface() {
         eprintln!("SKIPPED fuzz-f32: the device lacks part of the subgroup surface");
         return;
     }
@@ -269,7 +269,7 @@ fn generated_signed_programs_agree_with_the_cpu_reference() {
     };
     let limits = gpu.limits().clone();
 
-    if !limits.subgroup_arithmetic || !limits.subgroup_clustered || !limits.subgroup_shuffle {
+    if !limits.subgroup_surface() {
         eprintln!("SKIPPED fuzz-i32: the device lacks part of the subgroup surface");
         return;
     }
@@ -304,7 +304,7 @@ fn generated_narrow_programs_agree_with_the_cpu_reference() {
     };
     let limits = gpu.limits().clone();
 
-    if !limits.subgroup_arithmetic || !limits.subgroup_clustered || !limits.subgroup_shuffle {
+    if !limits.subgroup_surface() {
         eprintln!("SKIPPED fuzz-narrow: the device lacks part of the subgroup surface");
         return;
     }
@@ -349,7 +349,7 @@ fn strip_mined_programs_agree_in_every_domain() {
     };
     let limits = gpu.limits().clone();
 
-    if !limits.subgroup_arithmetic || !limits.subgroup_shuffle {
+    if !limits.subgroup_surface() {
         eprintln!("SKIPPED fuzz-strips: the device lacks part of the subgroup surface");
         return;
     }
@@ -417,7 +417,7 @@ fn clustered_programs_agree_in_every_domain() {
     };
     let limits = gpu.limits().clone();
 
-    if !limits.subgroup_arithmetic || !limits.subgroup_shuffle {
+    if !limits.subgroup_surface() {
         eprintln!("SKIPPED fuzz-clusters: the device lacks part of the subgroup surface");
         return;
     }

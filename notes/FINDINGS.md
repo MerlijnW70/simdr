@@ -2454,3 +2454,47 @@ the ballot instead. `VK_SUBGROUP_FEATURE_VOTE_BIT` and `..._BALLOT_BIT` are diff
 `GroupNonUniformVote` and `GroupNonUniformBallot` are different capabilities. Every device here
 offers both, so the gate was right by luck on all three — the same shape as a test that takes a
 width parameter and then ignores it.
+
+## The feature bits, laid beside the capabilities — 2026-08-14
+
+The audit that found four unreachable functions also found a limit reporting the wrong feature:
+`Limits` had `subgroup_ballot` and no `subgroup_vote`, while three kernels used votes and their
+tests gated on the ballot. Asking the question properly — *every capability this emitter can
+declare, against every feature bit the runner reports* — turns up more of the same.
+
+| capability | Vulkan bit | reported before |
+| --- | --- | --- |
+| `GroupNonUniform` | `BASIC` | **no** — and every lane kernel in the library declares it |
+| `GroupNonUniformVote` | `VOTE` | no, added earlier the same day |
+| `GroupNonUniformArithmetic` | `ARITHMETIC` | yes |
+| `GroupNonUniformBallot` | `BALLOT` | yes |
+| `GroupNonUniformShuffle` | `SHUFFLE` | yes |
+| `GroupNonUniformShuffleRelative` | `SHUFFLE_RELATIVE` | **no** — and the whole scan rests on it |
+| `GroupNonUniformClustered` | `CLUSTERED` | yes |
+
+Two of seven, and the second is not a nicety: the clustered ladder is `log2(cluster)` `ShuffleUp`s
+and `Lanes::shift_up`/`shift_down` are nothing else, so every scan kernel in the library declares
+`GroupNonUniformShuffleRelative` — while the tests that run them checked the *arbitrary* shuffle.
+
+**Every one of these was right on all three devices**, because no implementation offers one of these
+without the others. That is the same shape as a test that takes a width parameter and then ignores
+it: correct until the day it is not, and nothing in the codebase can tell the difference.
+
+### The fix is a mapping rather than four more gates
+
+`Limits::supports(Capability)` writes the correspondence down once, and
+`Limits::unsupported_in(&spirv)` reads the requirement out of the **module's own** `OpCapability`
+instructions — so a kernel that starts needing something new brings its own gate with it instead of
+waiting for a test author to remember. That needed one thing from the emitter: `Capability::ALL` and
+`Capability::from_word`, the inverse of the encoder, with a round-trip test that is total.
+
+`runner/tests/execution.rs` now checks the kernels it runs against the device that runs them, and
+the fuzzer's gate is `Limits::subgroup_surface()` — the five bits a generated program can reach,
+named once, where it used to name three of them at six call sites.
+
+### And `simdr probe` was telling a caller the wrong thing
+
+The tool that exists so nobody has to guess listed four features, two of them under the wrong
+heading: `any, all` sat under **ballot** and `shift_up, shift_down` under **shuffle**. It lists
+seven now, each naming what that bit actually permits — which is the point of the command, and it
+had been wrong since the day the shifts were written.

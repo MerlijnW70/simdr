@@ -63,6 +63,40 @@ pub enum Capability {
 }
 
 impl Capability {
+    /// Every capability this crate can declare.
+    ///
+    /// Here rather than only in the tests because a consumer needs it: `runner` reads the
+    /// `OpCapability` instructions back out of a finished module and asks the device whether it
+    /// offers each one, which is a loop over this list — and a capability added to the enum and
+    /// not to it would be a module requirement nothing checks.
+    pub const ALL: [Self; 15] = [
+        Self::Shader,
+        Self::GroupNonUniform,
+        Self::GroupNonUniformVote,
+        Self::GroupNonUniformArithmetic,
+        Self::GroupNonUniformBallot,
+        Self::GroupNonUniformShuffle,
+        Self::GroupNonUniformShuffleRelative,
+        Self::GroupNonUniformClustered,
+        Self::Int8,
+        Self::Int16,
+        Self::Float16,
+        Self::StorageBuffer8BitAccess,
+        Self::StorageBuffer16BitAccess,
+        Self::DotProduct,
+        Self::DotProductInput4x8BitPacked,
+    ];
+
+    /// The capability a word names, or `None` for one this crate does not know.
+    ///
+    /// The inverse of [`Capability::word`], and the reason a module can be read back: a device
+    /// refuses a pipeline whose module declares something it does not offer, with a message that
+    /// names neither. Decoding the declaration is how a caller can be told which one.
+    #[must_use]
+    pub fn from_word(word: Word) -> Option<Self> {
+        Self::ALL.into_iter().find(|known| known.word() == word)
+    }
+
     /// The word this encodes to.
     #[must_use]
     pub const fn word(self) -> Word {
@@ -108,7 +142,13 @@ impl Capability {
 mod tests {
     use super::*;
 
-    const ALL: [Capability; 15] = [
+    const ALL: [Capability; 15] = Capability::ALL;
+
+    #[allow(
+        dead_code,
+        reason = "kept as the list the round-trip below is written against"
+    )]
+    const SPELLED_OUT: [Capability; 15] = [
         Capability::DotProduct,
         Capability::DotProductInput4x8BitPacked,
         Capability::Shader,
@@ -125,6 +165,30 @@ mod tests {
         Capability::StorageBuffer8BitAccess,
         Capability::StorageBuffer16BitAccess,
     ];
+
+    #[test]
+    fn every_capability_is_named_by_its_own_word() {
+        // The inverse a consumer reads a module back with. A capability missing from `ALL` would
+        // decode to `None` and be reported as a module requirement nobody can name — which is the
+        // failure this exists to prevent, so the check is that the round trip is total.
+        for capability in Capability::ALL {
+            assert_eq!(
+                Capability::from_word(capability.word()),
+                Some(capability),
+                "{capability:?} does not decode back to itself"
+            );
+        }
+        assert_eq!(
+            Capability::ALL.len(),
+            SPELLED_OUT.len(),
+            "a capability was added to the enum and not to `ALL`"
+        );
+        assert_eq!(
+            Capability::from_word(0xFFFF),
+            None,
+            "and a word nobody claims is nobody's"
+        );
+    }
 
     #[test]
     fn every_capability_matches_the_khronos_grammar() {

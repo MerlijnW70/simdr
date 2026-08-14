@@ -19,7 +19,11 @@ fn ready(label: &'static str) -> Option<(Gpu, u32)> {
     let gpu = device(label)?;
     let limits = gpu.limits().clone();
 
-    if !limits.subgroup_arithmetic || !limits.subgroup_shuffle || !limits.subgroup_ballot {
+    // Every feature the kernels in this file reach for, and it used to be three of the five: the
+    // shifts declare `GroupNonUniformShuffleRelative` and the votes declare `GroupNonUniformVote`,
+    // and neither was named here. Both are offered by every device that offers the other three, so
+    // the gate was right by luck — `Limits::subgroup_surface` is the same list written once.
+    if !limits.subgroup_surface() || !limits.subgroup_ballot {
         eprintln!("SKIPPED {label}: the device lacks part of the subgroup surface");
         return None;
     }

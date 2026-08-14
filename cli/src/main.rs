@@ -155,8 +155,17 @@ fn probe() -> ExitCode {
         }
     );
 
+    // **Seven rows, and it was four — two of them naming operations they do not permit.** The
+    // votes sat under `ballot` and the shifts under `shuffle`; both are separate feature bits and
+    // separate capabilities, and this is the tool a caller asks *before* writing a kernel. It was
+    // right on every device here, because no implementation offers one of these without the others.
     println!("\n  subgroup features");
     for (name, present, needed_for) in [
+        (
+            "basic",
+            limits.subgroup_basic,
+            "any lane operation at all — every row below needs it too",
+        ),
         (
             "arithmetic",
             limits.subgroup_arithmetic,
@@ -167,15 +176,17 @@ fn probe() -> ExitCode {
             limits.subgroup_clustered,
             "vectors narrower than the subgroup",
         ),
+        ("shuffle", limits.subgroup_shuffle, "butterfly, broadcast"),
         (
-            "shuffle",
-            limits.subgroup_shuffle,
-            "butterfly, broadcast, shift_up, shift_down",
+            "shuffle relative",
+            limits.subgroup_shuffle_relative,
+            "shift_up, shift_down — and the clustered scan's ladder",
         ),
-        ("ballot", limits.subgroup_ballot, "any, all, ballot"),
+        ("vote", limits.subgroup_vote, "any, all, all_equal"),
+        ("ballot", limits.subgroup_ballot, "ballot"),
     ] {
         println!(
-            "    {:<12} {:<5}  {needed_for}",
+            "    {:<17} {:<5}  {needed_for}",
             name,
             if present { "yes" } else { "NO" }
         );

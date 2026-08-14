@@ -208,3 +208,53 @@ fn a_dispatch_that_fills_its_buffer_exactly_is_not_refused() {
         assert_eq!(output, expected, "{workgroups} workgroups");
     }
 }
+
+#[test]
+fn a_kernels_declared_capabilities_are_checked_against_the_device_that_runs_it() {
+    // **The check that replaces remembering.** Every gate in this suite used to name a feature bit
+    // by hand — and three of them named the wrong one, because a kernel using votes was gated on
+    // the ballot and every kernel at all declares `GroupNonUniform`, which nothing reported.
+    //
+    // `Limits::unsupported_in` reads the requirement out of the module's own `OpCapability`
+    // instructions, so a kernel that starts needing something new brings its own gate with it.
+    let Some(gpu) = device("capability-check") else {
+        return;
+    };
+    let limits = gpu.limits().clone();
+
+    // Every kernel this suite runs, and the device that is about to run them.
+    let width = limits.subgroup_size;
+    let kernels: Vec<(&str, Vec<u32>)> = vec![
+        ("scale", kernels::scale(width, 2.0).expect("built")),
+        (
+            "lane_sum",
+            kernels::reduce::lane_sum_whole::<simdr::lanes::F32>(width).expect("built"),
+        ),
+        (
+            "scan_clusters",
+            kernels::scan::scan_clusters(width, 2).unwrap_or_default(),
+        ),
+        (
+            "subgroup_agrees",
+            kernels::subgroup_agrees(width).expect("built"),
+        ),
+    ];
+
+    for (name, spirv) in &kernels {
+        let missing = limits.unsupported_in(spirv);
+        assert!(
+            missing.is_empty(),
+            "{name} declares {missing:?}, which this device does not offer — and it ran anyway"
+        );
+    }
+
+    // And the check has teeth: a capability the device *does* offer is reported when the mapping
+    // says otherwise, so the assertion above is not vacuous. `Shader` is offered by every device
+    // that can run compute, and a module declaring nothing else must come back empty.
+    let empty = kernels::empty(width).expect("built");
+    assert!(limits.unsupported_in(&empty).is_empty());
+    assert!(
+        limits.supports(simdr::spec::Capability::Shader),
+        "a device running compute offers Shader"
+    );
+}

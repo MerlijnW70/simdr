@@ -10,6 +10,7 @@ use self::narrow::{
 };
 use crate::{Error, Gpu};
 use ash::vk;
+use simdr::spec::Capability;
 use std::ffi::{CStr, c_char};
 
 /// What a device reports about itself.
@@ -24,12 +25,25 @@ pub struct Limits {
     pub name: String,
     /// How many invocations a subgroup holds.
     pub subgroup_size: u32,
+    /// Whether the subgroup instructions exist at all — `GroupNonUniform`, Vulkan's `BASIC` bit.
+    ///
+    /// **Every kernel here that touches a lane declares this capability**, and nothing reported it
+    /// until the capabilities and the feature bits were laid side by side. It is offered by every
+    /// device that offers any of the others, which is exactly why it went unnoticed.
+    pub subgroup_basic: bool,
     /// Whether `GroupNonUniformArithmetic` — reductions and scans — is usable in compute.
     pub subgroup_arithmetic: bool,
     /// Whether clustered reductions are usable.
     pub subgroup_clustered: bool,
-    /// Whether the shuffles are usable.
+    /// Whether the arbitrary shuffles are usable — `OpGroupNonUniformShuffle` and `ShuffleXor`.
     pub subgroup_shuffle: bool,
+    /// Whether the **relative** shuffles are usable — up and down by a delta.
+    ///
+    /// A separate feature bit and a separate capability, and the one the whole scan rests on: the
+    /// clustered ladder is `log2(cluster)` `ShuffleUp`s, and `Lanes::shift_up`/`shift_down` are
+    /// nothing else. This was missing while every one of those kernels declared
+    /// `GroupNonUniformShuffleRelative` and their tests gated on the *arbitrary* shuffle.
+    pub subgroup_shuffle_relative: bool,
     /// Whether `ballot` is usable.
     ///
     /// A kernel using it declares `GroupNonUniformBallot`, and a *surplus* capability declaration
@@ -58,6 +72,88 @@ pub struct Limits {
     /// host observed between a submit and a fence. The difference between the two is scheduling
     /// this harness has no view of, and at a few microseconds of work it dominates.
     pub timestamp_period_ns: f32,
+}
+
+impl Limits {
+    /// Whether this device offers what `capability` needs.
+    ///
+    /// **The correspondence, written down once.** A module declares capabilities; a device offers
+    /// feature bits; and until this existed the two were matched by whoever wrote each test —
+    /// which is how three kernels using votes came to be gated on the *ballot*, and how every
+    /// kernel in the library declared `GroupNonUniform` while nothing reported whether the device
+    /// had it. Both were right on all three devices here, because no implementation offers one of
+    /// these without the others. Being right by luck is what the audit was looking for.
+    #[must_use]
+    pub const fn supports(&self, capability: Capability) -> bool {
+        match capability {
+            // Any device that runs compute at all.
+            Capability::Shader => true,
+            Capability::GroupNonUniform => self.subgroup_basic,
+            Capability::GroupNonUniformVote => self.subgroup_vote,
+            Capability::GroupNonUniformArithmetic => self.subgroup_arithmetic,
+            Capability::GroupNonUniformBallot => self.subgroup_ballot,
+            Capability::GroupNonUniformShuffle => self.subgroup_shuffle,
+            Capability::GroupNonUniformShuffleRelative => self.subgroup_shuffle_relative,
+            Capability::GroupNonUniformClustered => self.subgroup_clustered,
+            Capability::Int8 => self.narrow.int8,
+            Capability::Int16 => self.narrow.int16,
+            Capability::Float16 => self.narrow.float16,
+            Capability::StorageBuffer8BitAccess => self.narrow.storage8,
+            Capability::StorageBuffer16BitAccess => self.narrow.storage16,
+            Capability::DotProduct | Capability::DotProductInput4x8BitPacked => {
+                self.narrow.integer_dot_product
+            }
+        }
+    }
+
+    /// Whether this device offers every subgroup feature the generated programs can reach.
+    ///
+    /// **The gate the fuzzer needs, and the one it was writing by hand.** A generated program may
+    /// end in a reduction (`Arithmetic`), fold a cluster (`Clustered`), butterfly (`Shuffle`),
+    /// shift (`ShuffleRelative`) or vote (`Vote`) — and the gate named the first three. The two it
+    /// left out are offered by every device here, which is why nothing noticed; naming them is the
+    /// difference between a gate that is right and one that is lucky.
+    #[must_use]
+    pub const fn subgroup_surface(&self) -> bool {
+        self.subgroup_basic
+            && self.subgroup_arithmetic
+            && self.subgroup_clustered
+            && self.subgroup_shuffle
+            && self.subgroup_shuffle_relative
+            && self.subgroup_vote
+    }
+
+    /// What `spirv` declares that this device does not offer.
+    ///
+    /// Read out of the module rather than out of the caller's memory: `OpCapability` is the
+    /// module's own statement of what it needs, and a pipeline built from a module the device
+    /// cannot satisfy fails with a message naming neither the capability nor the kernel.
+    ///
+    /// Empty means every declared capability is offered — *not* that the dispatch will work, since
+    /// a feature can be present and the module still wrong. It is the necessary half of the
+    /// condition, and the half a test can check before it decides to skip.
+    ///
+    /// A capability this crate does not know is ignored rather than reported: it cannot have been
+    /// declared by this emitter, so it came from somewhere with its own reasons.
+    #[must_use]
+    pub fn unsupported_in(&self, spirv: &[u32]) -> Vec<Capability> {
+        let mut missing = Vec::new();
+        for instruction in simdr::decode::body(spirv) {
+            if instruction.opcode() != simdr::module::op::CAPABILITY {
+                continue;
+            }
+            let Some(&word) = instruction.operands().first() else {
+                continue;
+            };
+            let Some(capability) = Capability::from_word(word) else {
+                continue;
+            };
+            if !self.supports(capability) && !missing.contains(&capability) {
+                missing.push(capability);
+            }
+        }
+        missing
+    }
 }
 
 impl Gpu {
@@ -398,9 +494,11 @@ unsafe fn describe(
     Limits {
         name,
         subgroup_size: subgroup.subgroup_size,
+        subgroup_basic: has(vk::SubgroupFeatureFlags::BASIC),
         subgroup_arithmetic: has(vk::SubgroupFeatureFlags::ARITHMETIC),
         subgroup_clustered: has(vk::SubgroupFeatureFlags::CLUSTERED),
         subgroup_shuffle: has(vk::SubgroupFeatureFlags::SHUFFLE),
+        subgroup_shuffle_relative: has(vk::SubgroupFeatureFlags::SHUFFLE_RELATIVE),
         subgroup_ballot: has(vk::SubgroupFeatureFlags::BALLOT),
         subgroup_vote: has(vk::SubgroupFeatureFlags::VOTE),
         narrow,
