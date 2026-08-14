@@ -81,11 +81,31 @@ jobs:
       - name: install lavapipe and spirv-tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y mesa-vulkan-drivers vulkan-tools spirv-tools
+          sudo apt-get install -y mesa-vulkan-drivers libvulkan1 vulkan-tools spirv-tools
+
+      # **Discovered, not assumed, and this is why.** The first version of this workflow pointed
+      # `VK_ICD_FILENAMES` at a hard-coded path and every lavapipe job died on
+      # `ERROR_INCOMPATIBLE_DRIVER` — which is what `vkCreateInstance` returns when the loader can
+      # see no ICD at all, including when the file it was told to use is not there.
+      #
+      # Failing here is deliberate. `common::device` skips loudly when no device opens, so a
+      # missing driver would leave every test below reporting green over nothing.
+      - name: find the software driver
+        run: |
+          echo "ICDs installed:"
+          ls -la /usr/share/vulkan/icd.d/ || true
+          icd=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json 2>/dev/null | head -n1)
+          if [ -z "$icd" ]; then
+            echo "::error::no lavapipe ICD found — the tests below would skip and pass over nothing"
+            exit 1
+          fi
+          echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
+          echo "using $icd"
+
+      - name: what the driver reports
+        run: vulkaninfo --summary || true
 
       - name: which device
-        env:
-          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
         run: cargo run -p simdr-cli -- list
 
       # `--test-threads=1` is not optional at 128 or 512: lavapipe is unstable there under
@@ -93,7 +113,6 @@ jobs:
       # reproduce. See README.
       - name: runner tests at subgroup ${{ matrix.width }}
         env:
-          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
           LP_NATIVE_VECTOR_WIDTH: ${{ matrix.vector }}
           SPIRV_VAL: /usr/bin/spirv-val
         run: cargo test -p runner -- --test-threads=1
