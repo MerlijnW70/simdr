@@ -2498,3 +2498,34 @@ The tool that exists so nobody has to guess listed four features, two of them un
 heading: `any, all` sat under **ballot** and `shift_up, shift_down` under **shuffle**. It lists
 seven now, each naming what that bit actually permits — which is the point of the command, and it
 had been wrong since the day the shifts were written.
+
+## A corpus built to expose wrong answers made one operation unobservable — 2026-08-15
+
+The gate over the day's work came back **27 of 32, five survivors**, and none of them was wrong
+code. Two were claims nothing checked; the third is worth keeping.
+
+`fuzz::corpus` makes every element **distinct**, and says why: a wrong lane mapping shows up
+immediately when no two lanes hold the same number. That property is the whole reason the
+differential fuzzer catches mapping bugs — and it is exactly the property that makes a vote *about
+agreement* never pass.
+
+So `Op::AddIfAllEqual` was generated in hundreds of rounds and did nothing in every one of them. The
+mutation gate said so precisely: flipping the reference's `if agreed` to `false` changed no sweep's
+answer. A step that cannot pass is a step nobody is checking, and it looks identical in the counts
+to a step that always agrees.
+
+**The general shape:** a corpus is a hypothesis about what makes failures visible, and every
+hypothesis excludes something. This one excludes uniformity, which is the input class three of this
+crate's operations exist for — the vote about a value, `if_uniform`, and the fast path a kernel
+takes when its subgroup wants the same thing.
+
+The fix is not a different corpus — the distinctness is load-bearing — but a second one, used where
+the first cannot see: a uniform input, plus the same input with a single lane changed, which is what
+separates a per-subgroup vote from a per-dispatch one.
+
+`Domain::equals` was the same shape one layer down. All three mutants of its `is_float()` branch
+survived, because on small positive integers a numeric comparison and a bitwise one agree
+everywhere. Its two real cases — `+0.0` equals `-0.0`; a NaN equals nothing, and the same bits as an
+*integer* equal themselves — are now stated where no generated round has to reach them.
+
+**Re-run after the fixes: 32 of 32 killed, no survivors, over 968 lines.**

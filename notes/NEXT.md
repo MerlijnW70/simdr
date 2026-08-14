@@ -965,6 +965,11 @@ it cannot say that a module contains instructions computing an answer that was a
 - `broadcast_in_cluster` covered clusters 2 to 16, leaving out the one-lane case and the 32-lane one
   that only a 64-wide device has.
 
+**The day after, over 968 lines of new work: 27 of 32, five survivors, then 32 of 32.** None of the
+five was wrong code — two were claims nothing checked, and the third was an operation that could not
+pass on the fuzzer's own corpus. `notes/FINDINGS.md` has that one; it is the sharpest thing the gate
+has said here.
+
 **And the gate was run again over the fixes themselves** — 86 changed lines, **8 of 8 killed, no
 survivors**. That is the part which makes the item closed rather than moved: the first run said the
 clustered scan was 94.3% covered and named what was missing, and the second says the code written to
