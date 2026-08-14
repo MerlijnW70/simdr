@@ -2394,3 +2394,14 @@ kernel does not do — a shape no mutation expresses:
 - **Two hand-emitted `OpEntryPoint`s remained.** Harmless today and a trap tomorrow: a module built
   that way plus any lane operation that declares a built-in is invalid, and every driver here runs
   it. Both go through `Module::entry_point` now.
+
+### And over the fixes: 8 of 8, no survivors
+
+The gate was pointed at the commit that answered it — 86 changed lines, **8 viable mutants, all
+killed**. The `if size == 1` short-circuits are the interesting ones, because both directions of
+that branch are guarded by different tests: flipped one way a one-lane cluster emits the ladder
+again and the new unit tests see the instructions appear; flipped the other, every cluster returns
+early and the step-count tests see them vanish.
+
+Two runs, and the second is the one that closes the item. A fix that arrives with no mutant of its
+own is a fix nobody has checked.

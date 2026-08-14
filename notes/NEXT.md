@@ -950,6 +950,11 @@ it cannot say that a module contains instructions computing an answer that was a
 - `broadcast_in_cluster` covered clusters 2 to 16, leaving out the one-lane case and the 32-lane one
   that only a 64-wide device has.
 
+**And the gate was run again over the fixes themselves** — 86 changed lines, **8 of 8 killed, no
+survivors**. That is the part which makes the item closed rather than moved: the first run said the
+clustered scan was 94.3% covered and named what was missing, and the second says the code written to
+answer it is covered too. A fix that arrives with no mutant of its own is a fix nobody has checked.
+
 ### Tier 4 — carried over, unchanged
 
 **7. A buffer the caller already owns.** Still no caller in this repository wants it.
