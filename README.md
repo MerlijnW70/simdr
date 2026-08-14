@@ -85,16 +85,24 @@ choice of *shape*. `decisions/DR-0005` records the experiment; DR-0002 carries t
 | `N` vs width | mapping | a reduction | a scan |
 | --- | --- | --- | --- |
 | equal | `WholeSubgroup` | one subgroup instruction | one subgroup instruction |
-| a divisor | `Clusters` | one clustered instruction, several vectors at once | **refused** |
+| a divisor | `Clusters` | one clustered instruction, several vectors at once | a `log2(N)`-step ladder |
 | a multiple | `Strips` | `strips - 1` scalar ops, then one subgroup instruction | one scan per strip, carrying a running total |
 
 Anything else — 12 lanes on a 32-wide subgroup — has no mapping and is refused by name.
 
-**The one gap is a clustered scan, and it is SPIR-V's rather than this project's.** There is a
-`ClusteredReduce` and no `ClusteredInclusiveScan`, so a scan of a vector *narrower* than the
-subgroup would have to be a subgroup-wide scan minus each cluster's own starting offset — and
-reading that offset needs a shuffle from a lane that differs per lane, which `Lanes` does not
-expose. It is refused by name rather than approximated.
+**All three scan, and the clustered one is the expensive row.** SPIR-V has a `ClusteredReduce` and
+no clustered scan, so `kernels::scan::scan_clusters` builds a Hillis-Steele ladder instead:
+`log2(N)` steps of shuffle, compare and select, against one instruction for the other two rows.
+
+The cheap alternative is a subgroup-wide scan minus each cluster's starting offset — three
+instructions rather than a dozen — and it is not taken, because in floating point it subtracts a
+large running total back off itself and loses exactly the low bits the scan just accumulated. Same
+reason the exclusive scan is its own group operation and not `inclusive - own`.
+
+That ladder lives in `runner::kernels` rather than in `Lanes::prefix_sum`, and the reason is worth
+saying: the mask needs the invocation's position inside its cluster, and `Lanes` has no way to
+reach one — it is handed a module and a width, not an invocation. `notes/NEXT.md` has what moving
+it would take.
 
 ## Crossing between subgroups
 

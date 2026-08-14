@@ -437,3 +437,55 @@ fn a_strip_mined_scan_scans_each_subgroups_own_vector() {
         );
     }
 }
+
+#[test]
+fn a_clustered_scan_scans_each_cluster_independently() {
+    // **The third mapping, and the one SPIR-V has no instruction for.** A vector narrower than the
+    // subgroup packs several of them into it — `Simd<f32, 8>` on a 32-wide subgroup is four
+    // independent vectors — and a scan has to stop at each one's edge.
+    //
+    // The failure this guards against is a scan that ran across the whole subgroup: it agrees with
+    // the answer in the first cluster of every subgroup and is wrong in all the others, which is
+    // exactly the shape a single `InclusiveScan` would give.
+    let Some(gpu) = device("scan clusters") else {
+        return;
+    };
+    eprintln!("device: {}", gpu.limits().name);
+
+    let width = gpu.limits().subgroup_size as usize;
+    let workgroup = WORKGROUP_SIZE as usize;
+    let input: Vec<f32> = (0..workgroup)
+        .map(|index| (index % 5) as f32 + 1.0)
+        .collect();
+
+    for cluster in [2_usize, 4, 8] {
+        if cluster >= width {
+            eprintln!("SKIPPED clusters of {cluster}: not narrower than a {width}-wide subgroup");
+            continue;
+        }
+
+        let spirv = kernels::scan::scan_clusters(gpu.limits().subgroup_size, cluster as u32)
+            .expect("built");
+
+        let output = gpu.run(&spirv, &input, 1).expect("dispatched");
+
+        // Each cluster of `cluster` consecutive invocations scans its own run, and nothing crosses
+        // between them.
+        let expected: Vec<f32> = input
+            .chunks(cluster)
+            .flat_map(|chunk| {
+                chunk.iter().scan(0.0_f32, |running, value| {
+                    *running += value;
+                    Some(*running)
+                })
+            })
+            .collect();
+
+        for (index, (got, want)) in output.iter().zip(&expected).enumerate() {
+            assert_eq!(
+                got, want,
+                "element {index} of {workgroup}, clusters of {cluster} at width {width}"
+            );
+        }
+    }
+}

@@ -164,6 +164,15 @@ fn the_scan_is_valid_at_every_width() {
             "scan_strips-128",
             width,
         );
+        // The clustered ladder: a shuffle, a comparison and a select per step, and the only
+        // kernel here whose instruction count depends on an argument rather than the width.
+        for cluster in [2_u32, 4, 8, 16] {
+            valid_at(
+                kernels::scan::scan_clusters(width, cluster),
+                &format!("scan_clusters-{cluster}"),
+                width,
+            );
+        }
         // The only kernel that *reads* a storage buffer at a runtime index.
         valid_at(
             kernels::scan::add_offsets::<F32>(width),

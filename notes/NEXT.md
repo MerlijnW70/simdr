@@ -633,12 +633,35 @@ The carry is a `Reduce` and not the last lane of the scan, which matters only in
 — an exclusive scan hands no lane the strip's whole total, so reading the carry off it would be
 short by exactly one lane's element.
 
-**Clusters stay refused, and the reason is Khronos'.** There is a `ClusteredReduce` and no
-`ClusteredInclusiveScan`. A scan of a vector narrower than the subgroup would have to be a
-subgroup-wide scan minus each cluster's starting offset, and reading that offset needs a shuffle
-from a lane that differs per lane — `OpGroupNonUniformShuffle` exists as an opcode and `Lanes`
-exposes only the fixed-pattern shuffles. That is the next piece if anyone wants it, and it is one
-primitive rather than an algorithm.
+**And the clustered scan is built too, as a kernel.** The sentence that used to be here said it
+needed a shuffle from a lane that differs per lane. That was wrong, and finding out how wrong is
+the useful part:
+
+* It needs **no dynamic shuffle**. A Hillis-Steele ladder over subgroup lanes does it —
+  `log2(cluster)` steps of shift, compare and select — and the mask is what keeps each cluster's
+  scan inside itself.
+* It needs **no subtraction**, which is the cheap alternative and the wrong one: taking a large
+  running total back off itself loses precisely the low bits the scan just accumulated.
+* It does need `OpBitwiseAnd`, which was not in `module::op`. Read out of Khronos' assembler rather
+  than a table — `spirv-as` was given a module containing one and the emitted word carried 199.
+  DR-0001 says the number comes from the authority; the authority answers questions as well as
+  publishing them, and the grammar JSON is not installed on this machine while the tool that
+  consumes it is.
+
+`kernels::scan::scan_clusters` runs it, correct at clusters of 2, 4 and 8 on every width wide
+enough to hold them.
+
+**What is left is where it lives, not whether it works.** `Lanes::prefix_sum` still refuses a
+clustered vector, because the mask needs the invocation's position inside its cluster and `Lanes`
+is handed a module and a width — not an invocation. Moving it there means one of:
+
+* threading a lane index into `Lanes::new`, which `Kernel::lanes` could supply and a direct caller
+  could not;
+* or declaring `SubgroupLocalInvocationId` in `kernel::binding`, which costs every kernel an
+  `Input` variable and — the real objection — the `GroupNonUniform` capability, which a kernel that
+  only scales currently does not declare and a test asserts it does not.
+
+Neither is hard and neither is obviously right, so it is written down rather than guessed at.
 
 ### Tier 3 — plumbing, and one measurement
 

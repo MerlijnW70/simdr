@@ -123,6 +123,13 @@ pub const SHIFT_RIGHT_LOGICAL: u16 = 194;
 pub const SHIFT_RIGHT_ARITHMETIC: u16 = 195;
 /// `OpShiftLeftLogical` — shift left.
 pub const SHIFT_LEFT_LOGICAL: u16 = 196;
+/// `OpBitwiseAnd` — bitwise and of two integers.
+///
+/// Read out of Khronos' own assembler rather than a table: `spirv-as` was given a module
+/// containing `OpBitwiseAnd` and the emitted word carried 199. DR-0001 says the number comes from
+/// the authority and not from memory, and the authority answers questions as well as publishing
+/// them — the grammar JSON is not installed here and the tool that consumes it is.
+pub const BITWISE_AND: u16 = 199;
 /// `OpLogicalOr` — boolean or.
 pub const LOGICAL_OR: u16 = 166;
 /// `OpLogicalAnd` — boolean and.
