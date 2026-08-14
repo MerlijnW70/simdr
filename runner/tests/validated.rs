@@ -555,4 +555,17 @@ fn all_three_lane_mappings_are_valid_at_every_width() {
     for width in WIDTHS {
         mappings_at!(width, 2, 4, 8, 16, 32, 64, 128);
     }
+
+    // And the two shuffles a clustered vector is allowed, whose operands the mapping changes: the
+    // broadcast's lane is computed rather than named, which is the one place a shuffle in this
+    // library takes a non-constant id.
+    for width in WIDTHS {
+        for cluster in [2_u32, 4, 8, 16] {
+            valid_at(
+                kernels::broadcast_in_cluster::<F32>(width, cluster, 1),
+                &format!("broadcast_in_cluster-{cluster}"),
+                width,
+            );
+        }
+    }
 }

@@ -890,15 +890,19 @@ fold `log2(width)` times instead of `log2(cluster)` — the plausible wrong kern
 subgroup's total in every lane. It does not return anything: the first mask that reaches outside the
 cluster is refused at build time, by name.
 
-**4. `Lanes::broadcast` refuses one too, and could now be built.** Broadcasting lane `source` of a
-clustered vector means reading subgroup lane `(l & !(LANES - 1)) + source`, which differs per lane
-— and `OpGroupNonUniformShuffle` takes a **dynamic** id, so that is one `OpBitwiseAnd`, one
-`OpIAdd` and the instruction. It needs the invocation's own lane, which `Lanes` has had since
-`decisions/DR-0007` and did not when this was refused.
+**4. `Lanes::broadcast` refused one too — done.** Broadcasting position `source` of a clustered
+vector means reading subgroup lane `(l & !(LANES - 1)) + source`, which differs per lane — and
+`OpGroupNonUniformShuffle` takes a **dynamic** id, so it is one `OpBitwiseAnd`, one `OpIAdd` and the
+instruction that was already being emitted. It needs the invocation's own lane, which `Lanes` has
+had since `decisions/DR-0007` and did not when this was refused.
 
-Worth doing after 3, and worth measuring against the alternative: a clustered `Reduce` already
-delivers a total to every lane of the cluster, so the broadcast is only interesting for values a
-reduction does not produce.
+`OpGroupNonUniformBroadcast` is the one that would not do: its id must be *dynamically uniform*,
+which is exactly what this is not. That the lane API had always emitted a shuffle instead turned out
+to be what made this three lines.
+
+`kernels::broadcast_in_cluster` runs it: four vectors, each reading its own position 3 — subgroup
+lanes 3, 11, 19 and 27. The wrong implementation reads `source` as a subgroup lane, and agrees with
+this one for the first cluster of every subgroup.
 
 **5. The shifts are the two that genuinely cross, and the question is what a cluster's edge means.**
 `shift_up`/`shift_down` really do read a neighbouring vector's lanes, and the clustered ladder shows

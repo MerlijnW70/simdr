@@ -8,19 +8,24 @@
 //! `OpGroupNonUniformShuffle` reads a lane of the *subgroup*. For a vector as wide as the
 //! subgroup those are the same thing. For a narrower one they are not — a `Simd<f32, 8>` on a
 //! 32-lane machine has four vectors sharing the lanes, and lane 9 belongs to the second of them.
-//! There is no clustered shuffle, so [`Lanes::shift_down`] and [`Lanes::broadcast`] refuse a
-//! clustered mapping rather than reading a neighbour's data.
+//! There is no clustered shuffle, and what follows from that is **not** that a narrower vector
+//! cannot be shuffled. It is that each of these four has to be asked separately.
 //!
-//! [`Lanes::butterfly`] is the exception, and it is arithmetic rather than a special case: a
-//! cluster is an aligned run of `LANES` lanes, `LANES` is a power of two, and `l ^ mask` for
-//! `mask < LANES` cannot leave it. The refusal used to cover this too, which made the one shuffle
-//! a clustered vector can have unreachable — and a hand-rolled tree inside a cluster is built from
-//! butterflies.
+//! | | a clustered vector | why |
+//! | --- | --- | --- |
+//! | [`Lanes::butterfly`] | yes, for `mask < LANES` | a cluster is an aligned run of a power-of-two size, so `l ^ mask` cannot leave it |
+//! | [`Lanes::broadcast`] | yes, for `source < LANES` | the lane to read is `(l & !(LANES - 1)) + source`, and `OpGroupNonUniformShuffle` takes a dynamic id |
+//! | [`Lanes::shift_up`] | no | it really does read the vector next door, and what belongs at a cluster's edge is a question this API has not answered |
+//! | [`Lanes::shift_down`] | no | the same |
+//!
+//! The first two were refused as well until the refusal was read rather than trusted, which left
+//! the mapping that exists to run four small vectors at once unable to swizzle any of them.
 //!
 //! Strip-mined vectors are fine: every strip is a full subgroup's worth, and shuffling each one
 //! separately is exactly right.
 
 use super::{Element, LaneError, Lanes, Mapping, Vector};
+use crate::module::op;
 use crate::spec::Capability;
 
 impl Lanes<'_> {
@@ -113,20 +118,71 @@ impl Lanes<'_> {
 
     /// Give every lane the value held by lane `source`.
     ///
+    /// **A clustered vector is allowed, and costs two instructions for it.** `source` is a position
+    /// in the *vector*, so for a narrower one the subgroup lane to read differs per invocation:
+    /// this cluster's first lane, plus `source`. `OpGroupNonUniformShuffle` takes a **dynamic** id
+    /// — unlike `OpGroupNonUniformBroadcast`, which requires a dynamically uniform one and is why
+    /// this was ever emitted as a shuffle — so the whole difference is an `OpBitwiseAnd` to round
+    /// the lane down to its cluster and an `OpIAdd`.
+    ///
     /// # Errors
     ///
-    /// As [`Lanes::shift_down`].
+    /// [`LaneError::NoSuchForm`] if `source` is outside a clustered vector, otherwise as
+    /// [`Lanes::shift_down`].
     pub fn broadcast<T: Element, const LANES: u32>(
         &mut self,
         vector: Vector<T, LANES>,
         source: u32,
     ) -> Result<Vector<T, LANES>, LaneError> {
+        if let Mapping::Clusters { size } = self.mapping::<LANES>()? {
+            return self.broadcast_within_cluster::<T, LANES>(vector, size, source);
+        }
+
         let source = self.module().constant_u32(source)?;
         self.exchange::<T, LANES>(
             "broadcast",
             vector,
             Exchange::Index,
             source,
+            Capability::GroupNonUniformShuffle,
+        )
+    }
+
+    /// [`Lanes::broadcast`] for a vector narrower than the subgroup.
+    ///
+    /// The lane read is `(lane & !(size - 1)) + source` — this cluster's first lane plus the
+    /// position asked for. `size` is a power of two, which is what makes the rounding a mask.
+    ///
+    /// A `size` of one is not a special case: the mask is then `!0`, the first lane of the cluster
+    /// is the lane itself, and the only `source` this accepts is 0 — which is the right answer for
+    /// a vector of one element.
+    fn broadcast_within_cluster<T: Element, const LANES: u32>(
+        &mut self,
+        vector: Vector<T, LANES>,
+        size: u32,
+        source: u32,
+    ) -> Result<Vector<T, LANES>, LaneError> {
+        if source >= size {
+            return Err(LaneError::NoSuchForm {
+                operation: "broadcast",
+                because: "the lane named is past the end of this vector, and holds an element of \
+                          the next one along",
+            });
+        }
+
+        let lane = self.lane_index()?;
+        let uint = self.module().type_int(32, false)?;
+        let round_down = self.module().constant_u32(!size.wrapping_sub(1))?;
+        let first = self
+            .module()
+            .binary(op::BITWISE_AND, uint, lane, round_down)?;
+        let offset = self.module().constant_u32(source)?;
+        let read = self.module().i_add(uint, first, offset)?;
+
+        self.shuffle::<T, LANES>(
+            vector,
+            Exchange::Index,
+            read,
             Capability::GroupNonUniformShuffle,
         )
     }
@@ -289,6 +345,8 @@ mod tests {
 
     #[test]
     fn a_clustered_shift_is_refused_because_the_lanes_belong_to_other_vectors() {
+        // The two that genuinely cross. Both were once four, and reading the refusal rather than
+        // trusting it is what left these two here.
         let mut module = Module::new(Version::V1_3);
         let mut lanes = Lanes::new(&mut module, 32).expect("built");
         let value = lanes
@@ -303,10 +361,72 @@ mod tests {
             lanes.shift_up(value, 1).err(),
             Some(LaneError::NoSuchForm { .. })
         ));
+    }
+
+    #[test]
+    fn a_clustered_broadcast_reads_a_lane_of_its_own_cluster() {
+        // `source` names a position in the *vector*, so the subgroup lane to read differs per
+        // invocation: this cluster's first, plus the source. That is one mask and one add more
+        // than the full-width form, and the id operand is no longer a constant.
+        let mut module = Module::new(Version::V1_3);
+        let mut lanes = Lanes::new(&mut module, 32).expect("built");
+        let value = lanes
+            .splat_bits::<F32, 8>(1.0_f32.to_bits())
+            .expect("splat");
+
+        lanes.broadcast(value, 3).expect("broadcast");
+
+        let words = module.finish();
+        assert_eq!(count(&words, op::GROUP_NON_UNIFORM_SHUFFLE), 1);
+        assert_eq!(count(&words, op::BITWISE_AND), 1, "rounded to the cluster");
+        assert_eq!(count(&words, op::I_ADD), 1, "plus the source's position");
+
+        // The mask is `!(8 - 1)`, which is the whole of the "clusters are aligned" argument. A
+        // version that masked with `size - 1` instead would read the *offset* within the cluster
+        // and broadcast a different lane to every one of them.
+        let constants: Vec<u32> = decode::body(&words)
+            .filter(|instruction| instruction.opcode() == op::CONSTANT)
+            .filter_map(|instruction| instruction.operands().get(2).copied())
+            .collect();
+        assert!(
+            constants.contains(&!7_u32),
+            "the rounding mask is missing: {constants:?}"
+        );
+    }
+
+    #[test]
+    fn a_clustered_broadcast_of_a_lane_outside_the_vector_is_refused() {
+        let mut module = Module::new(Version::V1_3);
+        let mut lanes = Lanes::new(&mut module, 32).expect("built");
+        let value = lanes
+            .splat_bits::<F32, 8>(1.0_f32.to_bits())
+            .expect("splat");
+
+        assert!(lanes.broadcast(value, 7).is_ok(), "the last lane is inside");
         assert!(matches!(
-            lanes.broadcast(value, 0).err(),
-            Some(LaneError::NoSuchForm { .. })
+            lanes.broadcast(value, 8).err(),
+            Some(LaneError::NoSuchForm {
+                operation: "broadcast",
+                ..
+            })
         ));
+    }
+
+    #[test]
+    fn a_full_width_broadcast_still_names_a_constant_lane() {
+        // The clustered form costs two instructions, and the full-width one must not pay them.
+        let mut module = Module::new(Version::V1_3);
+        let mut lanes = Lanes::new(&mut module, 32).expect("built");
+        let value = lanes
+            .splat_bits::<F32, 32>(1.0_f32.to_bits())
+            .expect("splat");
+
+        lanes.broadcast(value, 3).expect("broadcast");
+
+        let words = module.finish();
+        assert_eq!(count(&words, op::GROUP_NON_UNIFORM_SHUFFLE), 1);
+        assert_eq!(count(&words, op::BITWISE_AND), 0);
+        assert_eq!(count(&words, op::I_ADD), 0);
     }
 
     #[test]

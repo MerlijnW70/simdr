@@ -199,6 +199,36 @@ pub fn broadcast<T: Element>(subgroup: u32, source: u32) -> Result<Vec<u32>, Lan
     whole_subgroup_of!(T, subgroup, broadcast_at, source)
 }
 
+/// The same, over a vector *narrower* than the subgroup — one broadcast per cluster.
+///
+/// **The lane read differs per invocation, which is what makes this worth running.** `source` is a
+/// position in the vector, so on a 32-wide device a `Simd<f32, 8>` broadcasting lane 3 has four
+/// vectors each reading their own lane 3 — subgroup lanes 3, 11, 19 and 27. A version that took
+/// `source` as a subgroup lane would put one value in all thirty-two, and would agree with this
+/// one for the first cluster.
+///
+/// # Errors
+///
+/// [`LaneError::NoMapping`] if `cluster` is not a power of two that divides the subgroup,
+/// [`LaneError::NoSuchForm`] if `source` is outside the vector, otherwise if the module cannot be
+/// built.
+pub fn broadcast_in_cluster<T: Element>(
+    subgroup: u32,
+    cluster: u32,
+    source: u32,
+) -> Result<Vec<u32>, LaneError> {
+    match cluster {
+        2 => broadcast_at::<T, 2>(subgroup, source),
+        4 => broadcast_at::<T, 4>(subgroup, source),
+        8 => broadcast_at::<T, 8>(subgroup, source),
+        16 => broadcast_at::<T, 16>(subgroup, source),
+        lanes => Err(LaneError::NoMapping {
+            lanes,
+            width: subgroup,
+        }),
+    }
+}
+
 /// `shift_down_at` over a vector as wide as this device's subgroup.
 ///
 /// # Errors

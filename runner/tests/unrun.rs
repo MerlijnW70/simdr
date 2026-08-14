@@ -102,6 +102,47 @@ fn a_broadcast_hands_every_lane_the_source_lanes_value() {
 }
 
 #[test]
+fn a_clustered_broadcast_hands_each_vector_its_own_source_lane() {
+    // **The lane read differs per invocation**, which is the whole of what this checks. A
+    // `Simd<u32, 8>` on a 32-wide subgroup is four vectors, and broadcasting position 3 means
+    // subgroup lanes 3, 11, 19 and 27 — each to its own seven neighbours.
+    //
+    // The wrong implementation is the one that treats `source` as a subgroup lane: it agrees here
+    // for the first cluster of every subgroup and is wrong in the other three, which is the same
+    // shape of failure a clustered scan would have.
+    let Some((gpu, width)) = ready("broadcast-cluster") else {
+        return;
+    };
+
+    let count = WORKGROUP_SIZE as usize;
+    let input = ramp(count);
+
+    for (cluster, source) in [(2_u32, 1_u32), (4, 0), (4, 3), (8, 3), (16, 9)] {
+        if cluster >= width {
+            continue;
+        }
+
+        let output = gpu
+            .run_u32(
+                &kernels::broadcast_in_cluster::<U32>(width, cluster, source).expect("built"),
+                &input,
+                1,
+            )
+            .expect("dispatched");
+
+        let size = cluster as usize;
+        let expected: Vec<u32> = (0..count)
+            .map(|lane| (lane / size * size + source as usize) as u32 + 1)
+            .collect();
+
+        assert_eq!(
+            output, expected,
+            "broadcasting position {source} of every {cluster}-lane vector"
+        );
+    }
+}
+
+#[test]
 fn a_shift_moves_values_by_the_delta_where_the_source_lane_exists() {
     let Some((gpu, width)) = ready("shift") else {
         return;

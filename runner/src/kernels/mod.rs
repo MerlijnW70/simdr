@@ -46,7 +46,10 @@ pub use scatter::{claim_slots, histogram, histogram_incrementing};
 pub use specialized::{
     specialized_add, specialized_affine, specialized_cluster, specialized_derived,
 };
-pub use unrun::{all_above, ballot_above, broadcast, lane_min, prefix_sum, shift_down, shift_up};
+pub use unrun::{
+    all_above, ballot_above, broadcast, broadcast_in_cluster, lane_min, prefix_sum, shift_down,
+    shift_up,
+};
 
 use simdr::kernel::{Kernel, Shape};
 use simdr::lanes::LaneError;

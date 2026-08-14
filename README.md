@@ -82,13 +82,22 @@ pipeline creation — a specialization constant is a constant instruction, the v
 there and an RTX 4080 runs it at 4, 8 and 16 from a single module. What cannot be deferred is the
 choice of *shape*. `decisions/DR-0005` records the experiment; DR-0002 carries the correction.
 
-| `N` vs width | mapping | a reduction | a scan |
-| --- | --- | --- | --- |
-| equal | `WholeSubgroup` | one subgroup instruction | one subgroup instruction |
-| a divisor | `Clusters` | one clustered instruction, several vectors at once | a `log2(N)`-step ladder |
-| a multiple | `Strips` | `strips - 1` scalar ops, then one subgroup instruction | one scan per strip, carrying a running total |
+| `N` vs width | mapping | a reduction | a scan | a shuffle |
+| --- | --- | --- | --- | --- |
+| equal | `WholeSubgroup` | one subgroup instruction | one subgroup instruction | one instruction |
+| a divisor | `Clusters` | one clustered instruction, several vectors at once | a `log2(N)`-step ladder | a butterfly or a broadcast, inside the vector |
+| a multiple | `Strips` | `strips - 1` scalar ops, then one subgroup instruction | one scan per strip, carrying a running total | one instruction per strip |
 
 Anything else — 12 lanes on a 32-wide subgroup — has no mapping and is refused by name.
+
+**The clustered row's last column was empty until it was read rather than trusted.** All four
+shuffles refused a vector narrower than the subgroup, on the grounds that its lanes are shared with
+other vectors. That is true of the two *shifts* and false of the other two: a butterfly with
+`mask < N` cannot leave an aligned run of `N` lanes, and a broadcast reads
+`(lane & !(N - 1)) + source`, which `OpGroupNonUniformShuffle` will take because its id may differ
+per invocation. So the mapping that exists to run four small vectors at once can now swizzle them,
+and `kernels::butterfly_cluster_sum` — four independent trees, checked against the one
+`ClusteredReduce` that computes the same thing — is what that buys.
 
 **All three scan, and the clustered one is the expensive row.** SPIR-V has a `ClusteredReduce` and
 no clustered scan, so `Lanes::prefix_sum` builds a Hillis-Steele ladder instead: `log2(N)` steps of
