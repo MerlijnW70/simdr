@@ -233,13 +233,19 @@ impl<'module> Lanes<'module> {
     /// not, or it stops running on devices that would have run it. Asking twice yields one
     /// variable and two loads; the second is `OpLoad` of a value the driver has in a register.
     ///
+    /// The type is [`U32`]'s rather than a `type_int(32, false)` written here. The mutation gate
+    /// found the `false`: flipping it changes the module and nothing observable, because SPIR-V's
+    /// signedness is not what decides how `OpBitwiseAnd` or `OpUGreaterThan` behave. `Kernel` has
+    /// the same note over `index_type` for the same reason — a decision written down twice, where
+    /// only one copy can ever be load-bearing. This is the lane API's `u32`, so it says so.
+    ///
     /// # Errors
     ///
     /// [`LaneError::Build`] if the variable or the load cannot be emitted.
     fn lane_index(&mut self) -> Result<Id, LaneError> {
         self.module()
             .require_capability(Capability::GroupNonUniform)?;
-        let uint = self.module().type_int(32, false)?;
+        let uint = self.type_of::<U32>()?;
         let variable = self
             .module()
             .builtin_input(BuiltIn::SubgroupLocalInvocationId, uint)?;

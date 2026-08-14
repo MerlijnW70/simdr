@@ -913,14 +913,42 @@ Written down rather than guessed at, exactly as item 5 of the second list was.
 
 ### Tier 3 — verification debt
 
-**6. The mutation gate has not run over the clustered scan.** Every other item of the last two lists
-records what the gate found; this one cannot yet, because a diff-scoped run over a thousand changed
-lines runs the whole GPU suite per mutant and takes hours. What stands in for it so far is four
-deliberate breakages — the mask dropped, the exclusive answer replaced by the inclusive one, the
-interface entry removed, and the reference's group width set back to the subgroup — each caught,
-three of them at seed 0 or 1.
+**6. The mutation gate had not run over the clustered scan — it has now.** 1 138 changed lines
+scoped, **33 of 35 viable mutants killed, 94.3%**, and the two survivors were the same mutation in
+two places:
 
-That is not the same claim and should not be written as though it were.
+```
+src/lanes/mod.rs:242     [false→true]  let uint = self.module().type_int(32, false)?;
+src/lanes/reduce.rs:214  [false→true]  let uint = self.module().type_int(32, false)?;
+```
+
+**The identical survivor this project has already recorded once.** `Kernel::index_type` carries the
+note: flipping that `false` changes the module and nothing observable, because SPIR-V's signedness
+is not what decides how `OpIAdd` — or here `OpBitwiseAnd` and `OpUGreaterThan` — behave. The fix
+then was "not a test for it but not writing it down twice", and it is the same fix now: both sites
+say `self.type_of::<U32>()`, which is the lane API's own `u32`, declared once in `element.rs` where
+the signedness *is* load-bearing and mutants there do die.
+
+A third copy in `broadcast_within_cluster` went the same way, before the gate could be pointed at
+it.
+
+**And the review pass beside it found four things the gate could not.** A mutation survives or dies;
+it cannot say that a module contains instructions computing an answer that was already known:
+
+- A **one-lane cluster** — `Simd<T, 1>`, which the mapping accepts — went through the whole ladder:
+  a built-in, a load, a mask, a shuffle and a select, to compute the element itself. Both scans and
+  the clustered broadcast answer it before emitting anything now, which is the rule the workgroup
+  scan already followed for its final subgroup's offset.
+- The clustered broadcast's **device test ran at one width**, because it sat behind a helper that
+  refuses anything but 32 lanes. Its expectation has no width in it, and the two devices that found
+  this project's last ten bugs were skipping it.
+- Two **hand-emitted `OpEntryPoint`s** were left in `examples/emit_minimal.rs` and
+  `tests/validated.rs` — the pattern that is now a trap, since a module built that way plus any lane
+  operation that declares a built-in is invalid with no diagnostic. Both go through
+  `Module::entry_point`; the one that remains is the unit test asserting an exact word stream, which
+  is hand-built on purpose.
+- `broadcast_in_cluster` covered clusters 2 to 16, leaving out the one-lane case and the 32-lane one
+  that only a 64-wide device has.
 
 ### Tier 4 — carried over, unchanged
 

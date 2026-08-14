@@ -2352,3 +2352,45 @@ The filter took three widenings, and each one was it being too clever: "8-bit an
 then every 8-bit program (a `MinConstant(0)` faulted), then every narrow one (a 16-bit program
 disagreed), then the ladder itself (an `f32` program faulted). Each attempt was an instruction in
 front of the same tail, which is what said the tail was the part that was broken.
+
+## The gate over the clustered scan, and the survivor this project had already met — 2026-08-14
+
+1 138 changed lines scoped against `HEAD~2`: **33 of 35 viable mutants killed, 94.3%**, two
+survivors, and they were one mutation in two files.
+
+```
+src/lanes/mod.rs:242     [false→true]  let uint = self.module().type_int(32, false)?;
+src/lanes/reduce.rs:214  [false→true]  let uint = self.module().type_int(32, false)?;
+```
+
+Flipping the signedness of the integer type the lane index is loaded and masked in changes the
+module and nothing else. `OpBitwiseAnd` is sign-agnostic; so is `OpUGreaterThan` as far as the
+*type* is concerned, because SPIR-V's `OpTypeInt` signedness is not what selects the comparison —
+the opcode is. `spirv-val` accepts either and all three devices return the same numbers.
+
+**`Kernel::index_type` carries this exact note already**, from a survivor in
+`runner/src/kernels/reduce.rs` on 2026-08-12: *"the sign was untestable because it was never
+load-bearing, and the honest fix is not a test for it but not writing it down twice."* The same fix
+applies: both sites now ask for `type_of::<U32>()`, the lane API's own `u32`. It is declared once,
+in `element.rs`, where the signedness decides which comparison and which extreme an element reaches
+— and mutants there die.
+
+That makes three copies removed in two days by the same argument, which is worth more than the
+score: **a constant that no test can pin is a constant that should have one home.**
+
+### What the gate could not have found
+
+Run beside it as a review of the same diff, and every one of these is a module saying something the
+kernel does not do — a shape no mutation expresses:
+
+- **A one-lane cluster went through the whole ladder.** `Simd<T, 1>` maps to `Clusters { size: 1 }`,
+  which is a case rather than an impossibility, and the mask is then `lane & 0` — so the shuffle's
+  result is selected away in every lane and the answer was right all along. Five instructions, an
+  `Input` variable and a `GroupNonUniform` capability to compute the element itself. The same was
+  true of the clustered broadcast, where every lane read its own value through a mask and an add.
+- **The clustered broadcast's device test ran at 32 lanes only**, behind a helper that refuses other
+  widths because the *other* tests in that file bake 32 into their expectations. This one's
+  expectation has no width in it.
+- **Two hand-emitted `OpEntryPoint`s remained.** Harmless today and a trap tomorrow: a module built
+  that way plus any lane operation that declares a built-in is invalid, and every driver here runs
+  it. Both go through `Module::entry_point` now.

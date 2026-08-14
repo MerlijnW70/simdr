@@ -14,7 +14,6 @@ mod common;
 use common::{
     VULKAN_1_0, VULKAN_1_1, compute_skeleton, expect_valid, finish_empty_body, validate, validator,
 };
-use simdr::encode;
 use simdr::module::{Module, Section, Version, op};
 use simdr::spec::{
     AddressingModel, Capability, ExecutionModel, FunctionControl, MemoryModel, StorageClass,
@@ -140,10 +139,8 @@ fn a_compute_entry_point_without_a_workgroup_size_is_refused() {
         )
         .expect("fits");
 
-    let mut entry = vec![ExecutionModel::GlCompute.word(), main.word()];
-    encode::literal_string(&mut entry, "main");
     module
-        .emit(Section::EntryPoint, op::ENTRY_POINT, &entry)
+        .entry_point(ExecutionModel::GlCompute, main, "main")
         .expect("fits");
 
     // The OpExecutionMode that would go here is deliberately absent.

@@ -218,10 +218,12 @@ pub fn broadcast_in_cluster<T: Element>(
     source: u32,
 ) -> Result<Vec<u32>, LaneError> {
     match cluster {
+        1 => broadcast_at::<T, 1>(subgroup, source),
         2 => broadcast_at::<T, 2>(subgroup, source),
         4 => broadcast_at::<T, 4>(subgroup, source),
         8 => broadcast_at::<T, 8>(subgroup, source),
         16 => broadcast_at::<T, 16>(subgroup, source),
+        32 => broadcast_at::<T, 32>(subgroup, source),
         lanes => Err(LaneError::NoMapping {
             lanes,
             width: subgroup,

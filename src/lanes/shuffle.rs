@@ -24,7 +24,7 @@
 //! Strip-mined vectors are fine: every strip is a full subgroup's worth, and shuffling each one
 //! separately is exactly right.
 
-use super::{Element, LaneError, Lanes, Mapping, Vector};
+use super::{Element, LaneError, Lanes, Mapping, U32, Vector};
 use crate::module::op;
 use crate::spec::Capability;
 
@@ -153,9 +153,10 @@ impl Lanes<'_> {
     /// The lane read is `(lane & !(size - 1)) + source` — this cluster's first lane plus the
     /// position asked for. `size` is a power of two, which is what makes the rounding a mask.
     ///
-    /// A `size` of one is not a special case: the mask is then `!0`, the first lane of the cluster
-    /// is the lane itself, and the only `source` this accepts is 0 — which is the right answer for
-    /// a vector of one element.
+    /// **A `size` of one is answered without emitting any of that.** The only `source` it accepts
+    /// is 0, so every lane would read itself — three instructions computing the value they were
+    /// given. The right answer is the vector, and a module that says so is the module that matches
+    /// the kernel.
     fn broadcast_within_cluster<T: Element, const LANES: u32>(
         &mut self,
         vector: Vector<T, LANES>,
@@ -169,9 +170,13 @@ impl Lanes<'_> {
                           the next one along",
             });
         }
+        if size == 1 {
+            return Ok(vector);
+        }
 
         let lane = self.lane_index()?;
-        let uint = self.module().type_int(32, false)?;
+        // [`U32`]'s type rather than a second `type_int(32, false)`; see [`Lanes::lane_index`].
+        let uint = self.type_of::<U32>()?;
         let round_down = self.module().constant_u32(!size.wrapping_sub(1))?;
         let first = self
             .module()
@@ -392,6 +397,26 @@ mod tests {
             constants.contains(&!7_u32),
             "the rounding mask is missing: {constants:?}"
         );
+    }
+
+    #[test]
+    fn a_broadcast_within_a_one_lane_vector_emits_nothing() {
+        // Every lane would read itself: a mask, an add and a shuffle computing the value they were
+        // handed. The answer is the vector, and the module should say that by containing none of
+        // them — the same call the clustered scan makes at the same width.
+        let mut module = Module::new(Version::V1_3);
+        let mut lanes = Lanes::new(&mut module, 32).expect("built");
+        let value = lanes
+            .splat_bits::<F32, 1>(1.0_f32.to_bits())
+            .expect("splat");
+
+        let shared = lanes.broadcast(value, 0).expect("broadcast");
+
+        assert_eq!(shared.id(), value.id(), "the same value, untouched");
+        let words = module.finish();
+        assert_eq!(count(&words, op::GROUP_NON_UNIFORM_SHUFFLE), 0);
+        assert_eq!(count(&words, op::BITWISE_AND), 0);
+        assert_eq!(count(&words, op::I_ADD), 0);
     }
 
     #[test]

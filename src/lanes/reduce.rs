@@ -20,7 +20,7 @@
 //! `GroupNonUniformShuffleRelative` for the shuffles it is built from, and it needs neither of the
 //! arithmetic capabilities, because every instruction in it is a scalar one.
 
-use super::{Element, LaneError, Lanes, Mapping, Vector};
+use super::{Element, LaneError, Lanes, Mapping, U32, Vector};
 use crate::module::{Id, Reduction, op};
 use crate::spec::Capability;
 
@@ -206,12 +206,25 @@ impl Lanes<'_> {
         exclusive: bool,
         vector: Vector<T, LANES>,
     ) -> Result<Vector<T, LANES>, LaneError> {
+        // **A one-lane cluster is answered before anything is emitted.** Its inclusive prefix is
+        // the element itself and its exclusive one is the identity, and everything below —
+        // the built-in, the mask, the shuffle, the select — would compute exactly that at runtime
+        // and say something else about the kernel. `Simd<T, 1>` is a mapping this API accepts, so
+        // it is a case rather than an impossibility.
+        if size == 1 {
+            return if exclusive {
+                self.splat_bits::<T, LANES>(0)
+            } else {
+                Ok(vector)
+            };
+        }
+
         // Where this invocation sits inside its cluster. `size` divides the width and both are
         // powers of two, so the remainder is a mask — and it is the position within the *cluster*
         // rather than within the subgroup, because that is what decides whether the neighbour
         // `distance` below is a neighbour at all.
         let lane = self.lane_index()?;
-        let uint = self.module().type_int(32, false)?;
+        let uint = self.type_of::<U32>()?;
         let wrap = self.module().constant_u32(size.saturating_sub(1))?;
         let within = self.module().binary(op::BITWISE_AND, uint, lane, wrap)?;
 
@@ -245,8 +258,6 @@ impl Lanes<'_> {
         within: Id,
         edge: u32,
     ) -> Result<crate::lanes::Predicate<LANES>, LaneError> {
-        use crate::lanes::U32;
-
         let position = self.from_lane_value::<U32, LANES>(within)?;
         let edge = self.splat_bits::<U32, LANES>(edge)?;
         self.greater_than(position, edge)
@@ -581,17 +592,40 @@ mod tests {
     }
 
     #[test]
-    fn a_cluster_of_one_lane_scans_nothing_and_emits_no_ladder() {
-        // The degenerate end, which the loop has to reach rather than divide by: a single-lane
-        // cluster's inclusive prefix is the element itself.
-        let mut module = Module::new(Version::V1_3);
-        let mut lanes = Lanes::new(&mut module, 32).expect("built");
-        let value = lanes.splat_bits::<F32, 1>(0).expect("splat");
+    fn a_cluster_of_one_lane_scans_nothing_and_emits_nothing() {
+        // The degenerate end, and it is answered before a single instruction is emitted. A
+        // one-lane cluster's inclusive prefix is the element itself and its exclusive one is the
+        // identity — and the ladder would *compute* exactly that: the mask is `lane & 0`, so the
+        // shuffle's result is selected away in every lane. Right answer, and a module describing
+        // work the kernel does not do.
+        //
+        // Counted as instructions rather than as opcodes, because what the ladder would leave
+        // behind is a built-in variable, a load, a mask, a comparison and a select — and only the
+        // last two are opcodes this file otherwise counts.
+        for exclusive in [false, true] {
+            let mut module = Module::new(Version::V1_3);
+            let mut lanes = Lanes::new(&mut module, 32).expect("built");
+            let value = lanes.splat_bits::<F32, 1>(0).expect("splat");
 
-        let scanned = lanes.prefix_sum(value).expect("scanned");
+            let scanned = if exclusive {
+                lanes.prefix_sum_exclusive(value).expect("scanned")
+            } else {
+                lanes.prefix_sum(value).expect("scanned")
+            };
+            if !exclusive {
+                assert_eq!(scanned.id(), value.id(), "the same value, untouched");
+            }
 
-        assert_eq!(scanned.id(), value.id(), "the same value, untouched");
-        assert_eq!(count(&module.finish(), op::SELECT), 0);
+            let words = module.finish();
+            assert_eq!(count(&words, op::SELECT), 0);
+            assert_eq!(count(&words, op::GROUP_NON_UNIFORM_SHUFFLE_UP), 0);
+            assert_eq!(count(&words, op::BITWISE_AND), 0, "no mask was needed");
+            assert_eq!(
+                count(&words, op::VARIABLE),
+                0,
+                "and `SubgroupLocalInvocationId` was never asked for"
+            );
+        }
     }
 
     #[test]

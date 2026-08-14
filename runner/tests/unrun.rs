@@ -110,15 +110,27 @@ fn a_clustered_broadcast_hands_each_vector_its_own_source_lane() {
     // The wrong implementation is the one that treats `source` as a subgroup lane: it agrees here
     // for the first cluster of every subgroup and is wrong in the other three, which is the same
     // shape of failure a clustered scan would have.
-    let Some((gpu, width)) = ready("broadcast-cluster") else {
+    //
+    // **Not through `ready`**, which every other test here uses. That helper refuses a device whose
+    // subgroup is not 32 lanes, because their expectations are written for one — and this one's is
+    // not: clusters repeat every `cluster` lanes whatever the width, so the answer below has no
+    // width in it. A test that skipped 64 and 8 would leave the two devices that found this
+    // project's last ten bugs looking at nothing.
+    let Some(gpu) = device("broadcast-cluster") else {
         return;
     };
+    let limits = gpu.limits().clone();
+    if !limits.subgroup_shuffle {
+        eprintln!("SKIPPED broadcast-cluster: no subgroup shuffle");
+        return;
+    }
+    let width = limits.subgroup_size;
 
     let count = WORKGROUP_SIZE as usize;
     let input = ramp(count);
 
-    for (cluster, source) in [(2_u32, 1_u32), (4, 0), (4, 3), (8, 3), (16, 9)] {
-        if cluster >= width {
+    for (cluster, source) in [(1_u32, 0_u32), (2, 1), (4, 0), (4, 3), (8, 3), (16, 9)] {
+        if cluster > width {
             continue;
         }
 
