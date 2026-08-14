@@ -392,6 +392,23 @@ fn the_atomic_kernels_are_valid_at_every_width() {
             width,
         );
         valid_at(kernels::scatter::claim_slots(width), "claim_slots", width);
+        // The two the audit found unreachable: an exchange, and the load that is not a race.
+        valid_at(
+            kernels::scatter::exchange_chain(width),
+            "exchange_chain",
+            width,
+        );
+        valid_at(
+            kernels::scatter::atomic_gather(width),
+            "atomic_gather",
+            width,
+        );
+        // And the third — the vote about a value, driving the branch it exists for.
+        valid_at(
+            kernels::unrun::subgroup_agrees(width),
+            "subgroup_agrees",
+            width,
+        );
     }
 }
 

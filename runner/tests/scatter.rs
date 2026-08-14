@@ -225,3 +225,87 @@ fn a_histogram_over_several_workgroups_still_counts_everything() {
         elements as u32
     );
 }
+
+#[test]
+fn an_exchange_hands_out_every_value_exactly_once() {
+    // **What an exchange says that an add cannot.** The invocations form a chain through one slot:
+    // it starts at a marker, and each invocation in some order puts its own index in and receives
+    // whatever was there. Whatever order the scheduler picks, the values handed out plus the one
+    // left in the slot are exactly the marker together with every index, each appearing once.
+    //
+    // That is a stronger statement than a total. A lost exchange leaves two invocations holding
+    // the same value; one that read before it wrote invents a value that was never in the chain.
+    // Both show up here and neither shows up in a sum.
+    let Some(gpu) = device("exchange-chain") else {
+        return;
+    };
+    let limits = gpu.limits().clone();
+
+    const MARKER: u32 = 9_999;
+
+    let mut session = gpu
+        .session(
+            &kernels::exchange_chain(limits.subgroup_size).expect("built"),
+            &[count() + 1, count() + 1],
+        )
+        .expect("opened");
+    // Slot 0 is the chain's head and starts at the marker; the answers land from 1 onwards.
+    let mut initial = vec![0_u32; count() + 1];
+    if let Some(head) = initial.first_mut() {
+        *head = MARKER;
+    }
+    session.write(0, &initial).expect("uploaded");
+    session.write(1, &initial).expect("seeded the chain");
+    session.dispatch(1, 1).expect("dispatched");
+    let output = session.read(1, count() + 1).expect("read back");
+
+    let mut seen: Vec<u32> = output.iter().skip(1).copied().collect();
+    seen.push(output.first().copied().expect("the slot"));
+    seen.sort_unstable();
+
+    let mut expected: Vec<u32> = (0..count() as u32).collect();
+    expected.push(MARKER);
+    expected.sort_unstable();
+
+    assert_eq!(
+        seen, expected,
+        "the chain lost, duplicated or invented a value"
+    );
+}
+
+#[test]
+fn an_atomic_load_gathers_through_an_index_the_data_chose() {
+    // `out[i] = in[in[i]]`, read with `OpAtomicLoad` rather than `OpLoad`. What the assertion
+    // checks is the addressing — a version that read the *invocation's* slot would return `in[i]`
+    // and agree with this wherever the input happens to be a fixed point.
+    //
+    // The input below has none: `in[i] = (i * 7 + 3) % count`, whose fixed points are checked for
+    // rather than assumed away.
+    let Some(gpu) = device("atomic-gather") else {
+        return;
+    };
+    let limits = gpu.limits().clone();
+
+    let input: Vec<u32> = (0..count() as u32)
+        .map(|index| (index.wrapping_mul(7).wrapping_add(3)) % count() as u32)
+        .collect();
+    assert!(
+        input.iter().enumerate().all(|(at, to)| at as u32 != *to),
+        "a fixed point would make a wrong address look right"
+    );
+
+    let output = gpu
+        .run_u32(
+            &kernels::atomic_gather(limits.subgroup_size).expect("built"),
+            &input,
+            1,
+        )
+        .expect("dispatched");
+
+    let expected: Vec<u32> = input
+        .iter()
+        .map(|to| input.get(*to as usize).copied().unwrap_or_default())
+        .collect();
+
+    assert_eq!(output, expected);
+}

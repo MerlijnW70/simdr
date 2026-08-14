@@ -128,6 +128,41 @@ fn a_prefix_sum_is_valid_spirv() {
 }
 
 #[test]
+fn the_three_operations_an_audit_found_unreachable_are_valid_spirv() {
+    // **The check that has caught this class before.** `Lanes::dot_unsigned` emitted `OpUDot` with
+    // a signed result type for a week, and it was a public method with no caller, no unit test and
+    // no validator coverage — three layers, and it fell between all of them. An audit of the
+    // public surface found three more in the same state: the atomic exchange, the atomic load, and
+    // the vote about a value. Whether they were right was not known until this ran.
+    let mut kernel = Kernel::<U32>::new(shape()).expect("built");
+    let index = kernel.load::<32>(0).expect("loaded");
+    let seven = kernel.module().constant_u32(7).expect("7");
+    let slot = kernel.local_index();
+    let out = kernel.element_pointer_to(1, slot).expect("pointer");
+
+    let displaced = kernel
+        .atomic_exchange_at(1, index.id(), seven)
+        .expect("exchanged");
+    let read = kernel.atomic_load_at(1, displaced).expect("read");
+
+    // The vote drives a real branch, which is the whole of what it is for: `if_uniform` takes a
+    // `Uniform`, and until `all_equal` there was no way to make one out of a *value*.
+    let agreed = kernel
+        .lanes()
+        .expect("lanes")
+        .all_equal_uniform(index)
+        .expect("voted");
+    kernel
+        .lanes()
+        .expect("lanes")
+        .if_uniform(agreed, |lanes| Ok(lanes.module().store(out, read)?))
+        .expect("branched");
+
+    let words = kernel.finish().expect("finished");
+    expect_valid(&words, "kernel-audit-three", VULKAN_1_1);
+}
+
+#[test]
 fn a_clustered_scan_is_valid_spirv() {
     // **The one the validator has to see.** The clustered ladder reaches for
     // `SubgroupLocalInvocationId` while the body is being built, which is long after the entry

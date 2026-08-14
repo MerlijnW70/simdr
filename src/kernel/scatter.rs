@@ -66,6 +66,64 @@ impl<T: Element> Kernel<T> {
             .atomic_i_add(element, pointer, scope, semantics, value)?)
     }
 
+    /// Put `value` in element `index` of buffer `binding`, atomically, and yield what was there.
+    ///
+    /// **The primitive that publishes and learns in one instruction.** An add accumulates and a
+    /// store overwrites without saying what it replaced; this replaces *and* reports, which is what
+    /// a claim needs — the invocation that gets back the empty marker is the one that won the slot,
+    /// and every other gets the winner's value rather than a second chance.
+    ///
+    /// `Module::atomic_exchange` had been in this crate since the atomics landed with nothing able
+    /// to reach it: no `Kernel` path, no test, no validator. An audit of the public surface found
+    /// it beside [`Kernel::atomic_load_at`] and `Lanes::all_equal`.
+    ///
+    /// Same scope and semantics as [`Kernel::atomic_add_at`], and the same warning applies to
+    /// both: `MemorySemantics::None` orders nothing but the location itself. An exchange that
+    /// publishes a *pointer to* data another invocation then reads needs
+    /// `MemorySemantics::AcquireReleaseBuffer`, which this does not use because nothing here
+    /// publishes anything but the value.
+    ///
+    /// # Errors
+    ///
+    /// [`LaneError::NoSuchBuffer`] if `binding` was not bound.
+    pub fn atomic_exchange_at(
+        &mut self,
+        binding: u32,
+        index: Id,
+        value: Id,
+    ) -> Result<Id, LaneError> {
+        let pointer = self.element_pointer_to(binding, index)?;
+        let element = self.element();
+        let scope = self.module().scope(Scope::Device)?;
+        let semantics = self.module().memory_semantics(MemorySemantics::None)?;
+
+        Ok(self
+            .module()
+            .atomic_exchange(element, pointer, scope, semantics, value)?)
+    }
+
+    /// Read element `index` of buffer `binding`, atomically.
+    ///
+    /// **Not the same instruction as a load, and not the same claim.** `Kernel::load` reads an
+    /// address derived from the invocation index, which no other invocation touches; this reads an
+    /// address the *data* chose, which another invocation may be writing at the same moment. A
+    /// plain `OpLoad` there is a data race — undefined, not merely stale — and this is the read
+    /// that is not.
+    ///
+    /// # Errors
+    ///
+    /// [`LaneError::NoSuchBuffer`] if `binding` was not bound.
+    pub fn atomic_load_at(&mut self, binding: u32, index: Id) -> Result<Id, LaneError> {
+        let pointer = self.element_pointer_to(binding, index)?;
+        let element = self.element();
+        let scope = self.module().scope(Scope::Device)?;
+        let semantics = self.module().memory_semantics(MemorySemantics::None)?;
+
+        Ok(self
+            .module()
+            .atomic_load(element, pointer, scope, semantics)?)
+    }
+
     /// Add one to element `index` of buffer `binding`, atomically.
     ///
     /// `OpAtomicIIncrement` rather than an add of a constant one: it is a different instruction
@@ -125,6 +183,59 @@ mod tests {
             Some(value.id().word()),
             "the scatter's index is the data, not the invocation index"
         );
+    }
+
+    #[test]
+    fn an_exchange_takes_a_value_and_a_load_does_not() {
+        // Two instructions with the same shape as the add and the increment, and the same
+        // distinction between them. Both had been emittable and unreachable since the atomics
+        // landed: no `Kernel` path, no test, no validator.
+        let mut kernel = Kernel::<U32>::new(Shape::new(32, 64, 2)).expect("built");
+        let value = kernel.load::<32>(0).expect("loaded");
+        let seven = kernel.module().constant_u32(7).expect("7");
+
+        let displaced = kernel
+            .atomic_exchange_at(1, value.id(), seven)
+            .expect("exchanged");
+        kernel.atomic_load_at(1, displaced).expect("read back");
+
+        let words = kernel.finish().expect("finished");
+        assert_eq!(count(&words, op::ATOMIC_EXCHANGE), 1);
+        assert_eq!(count(&words, op::ATOMIC_LOAD), 1);
+
+        let operands = |opcode: u16| {
+            decode::body(&words)
+                .find(|instruction| instruction.opcode() == opcode)
+                .expect("emitted")
+                .operands()
+                .to_vec()
+        };
+        // Result type, pointer, scope, semantics — and the exchange's value after them.
+        assert_eq!(operands(op::ATOMIC_EXCHANGE).len(), 6);
+        assert_eq!(
+            operands(op::ATOMIC_LOAD).len(),
+            5,
+            "a load has nothing to write"
+        );
+    }
+
+    #[test]
+    fn an_atomic_load_reads_the_index_the_data_chose() {
+        // The distinction that makes it worth having at all: `Kernel::load` addresses by
+        // invocation, and this addresses by value. A version that read the invocation's own slot
+        // would agree with a plain load and be a different instruction for no reason.
+        let mut kernel = Kernel::<U32>::new(Shape::new(32, 64, 2)).expect("built");
+        let value = kernel.load::<32>(0).expect("loaded");
+
+        kernel.atomic_load_at(0, value.id()).expect("read");
+
+        let words = kernel.finish().expect("finished");
+        let chains: Vec<Vec<u32>> = decode::body(&words)
+            .filter(|instruction| instruction.opcode() == op::ACCESS_CHAIN)
+            .map(|instruction| instruction.operands().to_vec())
+            .collect();
+        assert_eq!(chains.len(), 2, "one for the load, one for the atomic");
+        assert_eq!(chains[1].last().copied(), Some(value.id().word()));
     }
 
     #[test]

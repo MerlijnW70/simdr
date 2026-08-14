@@ -94,24 +94,6 @@ impl Module {
         self.result_instruction(op::LOGICAL_AND, result_type, &[left.word(), right.word()])
     }
 
-    /// Ordered `>` on floats: false if either operand is NaN.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError`] if the instruction cannot be emitted.
-    pub fn f_ord_greater_than(
-        &mut self,
-        result_type: Id,
-        left: Id,
-        right: Id,
-    ) -> Result<Id, BuildError> {
-        self.result_instruction(
-            op::F_ORD_GREATER_THAN,
-            result_type,
-            &[left.word(), right.word()],
-        )
-    }
-
     /// Pick `when_true` or `when_false` according to `condition`.
     ///
     /// # Errors

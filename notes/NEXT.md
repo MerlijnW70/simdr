@@ -965,6 +965,42 @@ one is a defect and with two it is an argument.
 
 ---
 
+## The public surface, audited — 2026-08-14
+
+Item 17 asked which public operations no `spirv-val` test reached, and the first thing it found was
+invalid SPIR-V. The surface has grown by a dozen items since, so the question was asked again over
+all **201** public functions, in its strongest form: *which have no consumer at all* — no caller, no
+unit test, no validator.
+
+**Four**, and `notes/FINDINGS.md` has the table. One was deleted as a second spelling of an
+instruction the typed path already emits; three were finished, each with a `Kernel` or `Lanes`
+entry point, a kernel, validator coverage at every width, and a device test. All four turned out to
+be *valid*, which is worth stating: the check's value is the difference between "nothing has looked"
+and "something looked and it was right", and only one of those is a claim.
+
+The audit also found `Limits` reporting `subgroup_ballot` and no `subgroup_vote` while three kernels
+used votes — right on every device here because no implementation offers one without the other.
+
+### What it leaves open
+
+**9. `Lanes` has no elementwise equality.** `greater_than` is the only comparison, and `simd_eq` is
+the one a `Simd` API is asked for first. It is also what a **strip-mined `all_equal`** needs: one
+vote per strip says each strip is uniform, not that the strips agree with each other, so that
+mapping is refused by name rather than folded — the only lane operation whose strip case is refused
+for want of another operation rather than for want of an instruction.
+
+`Element` would gain an `EQUAL` opcode — `OpFOrdEqual` for the floats, `OpIEqual` for every integer
+signed or not, which is one of the few places where the signed and unsigned paths genuinely share
+an instruction and a test would have to say so.
+
+**10. Twelve more functions are used only inside the emitter**, their own tests included. That is a
+weaker finding than the four above and not nothing: a unit test written beside the function it
+tests agrees with the author, which is how `reduce_min` folded its strips with a maximum for weeks.
+The list is in the audit script's second section; `Module::f_add` and `Module::f_mul` are the two
+whose only callers are tests of the *block* machinery rather than of themselves.
+
+---
+
 ## Deliberately not doing
 
 **Chasing the large-working-set cliff.** Past ~50 MB the timings stop being steady, and three

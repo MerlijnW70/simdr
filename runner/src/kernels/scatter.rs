@@ -137,6 +137,78 @@ pub fn claim_slots(subgroup: u32) -> Result<Vec<u32>, LaneError> {
     kernel.finish()
 }
 
+/// Every invocation swaps its own index into slot 0 and keeps whatever it displaced.
+///
+/// **What an exchange says that an add cannot.** An atomic add accumulates, so a lost one shows up
+/// only as a wrong total; an exchange forms a *chain* — the slot holds `initial`, then each
+/// invocation in some order replaces it and receives the previous occupant. Whatever the order, the
+/// values handed out plus the one left in the slot are exactly `{initial}` together with every
+/// invocation index, each once. A lost exchange duplicates a value; a torn one invents one.
+///
+/// Binding 1 holds the slot at 0 and the answers from 1 onwards, so the counter is not overwritten
+/// by an answer.
+///
+/// # Errors
+///
+/// As [`histogram`].
+pub fn exchange_chain(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    let mut kernel = Kernel::<U32>::new(shape(subgroup))?;
+
+    let uint = kernel.index_type();
+    let slot = kernel.module().constant_u32(0)?;
+    let one = kernel.module().constant_u32(1)?;
+
+    // This invocation's own index, which is what it puts in — distinct in every invocation of the
+    // workgroup, so the chain's links are distinguishable. One workgroup, for that reason: the
+    // index repeats across workgroups and the invariant below counts each link once.
+    let mine = kernel.local_index();
+    let displaced = kernel.atomic_exchange_at(1, slot, mine)?;
+
+    let at = kernel.module().i_add(uint, mine, one)?;
+    let pointer = kernel.element_pointer_to(1, at)?;
+    kernel.module().store(pointer, displaced)?;
+
+    kernel.finish()
+}
+
+/// `out[i] = in[in[i]]` — a gather whose address the data chooses, read atomically.
+///
+/// **The read that is not a race.** Every other load in this library computes its address from the
+/// invocation index, so nothing else can be writing it. An address the data chose has no such
+/// promise, and a plain `OpLoad` of a location another invocation may be writing is undefined
+/// rather than merely stale. `OpAtomicLoad` is the read that is defined there.
+///
+/// Nothing writes binding 0 during this dispatch, which is deliberate: what is under test is the
+/// instruction and its addressing, and an answer that depends on which invocation ran first would
+/// be a test of the scheduler.
+///
+/// # Errors
+///
+/// As [`histogram`].
+pub fn atomic_gather(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup!(subgroup, atomic_gather_at)
+}
+
+fn atomic_gather_at<const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    let mut kernel = Kernel::<U32>::new(shape(subgroup))?;
+    let index = kernel.load::<LANES>(0)?;
+
+    // Held inside the buffer, for the reason the header gives: an out-of-range index is undefined
+    // behaviour rather than an error, and the caller's data decides this one.
+    let last = kernel
+        .module()
+        .constant_u32(super::WORKGROUP_SIZE.saturating_sub(1))?;
+    let clamped = {
+        let mut lanes = kernel.lanes()?;
+        let limit = lanes.from_lane_value::<U32, LANES>(last)?;
+        lanes.min(index, limit)?
+    };
+
+    let fetched = kernel.atomic_load_at(0, clamped.id())?;
+    kernel.store_scalar(1, fetched)?;
+    kernel.finish()
+}
+
 #[cfg(test)]
 mod tests {
     use super::claim_slots;

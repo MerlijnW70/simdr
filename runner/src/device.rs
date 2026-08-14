@@ -30,12 +30,20 @@ pub struct Limits {
     pub subgroup_clustered: bool,
     /// Whether the shuffles are usable.
     pub subgroup_shuffle: bool,
-    /// Whether the votes and `ballot` are usable.
+    /// Whether `ballot` is usable.
     ///
-    /// A kernel using them declares `GroupNonUniformBallot`, and a *surplus* capability
-    /// declaration fails at pipeline creation rather than at validation — so a test that skips on
-    /// this is skipping for a real reason rather than being cautious.
+    /// A kernel using it declares `GroupNonUniformBallot`, and a *surplus* capability declaration
+    /// fails at pipeline creation rather than at validation — so a test that skips on this is
+    /// skipping for a real reason rather than being cautious.
     pub subgroup_ballot: bool,
+    /// Whether the **votes** are usable — `any`, `all`, and the vote about a value.
+    ///
+    /// A separate feature bit from the ballot, and a separate capability:
+    /// `GroupNonUniformVote` against `GroupNonUniformBallot`. This was missing from these limits
+    /// while three kernels used votes and their tests gated on the ballot instead — right on every
+    /// device here, because no implementation offers one without the other, and a claim about the
+    /// wrong feature all the same.
+    pub subgroup_vote: bool,
     /// What the device offers for elements narrower than 32 bits.
     pub narrow: Narrow,
     /// The most invocations one workgroup may hold — `maxComputeWorkGroupInvocations`.
@@ -394,6 +402,7 @@ unsafe fn describe(
         subgroup_clustered: has(vk::SubgroupFeatureFlags::CLUSTERED),
         subgroup_shuffle: has(vk::SubgroupFeatureFlags::SHUFFLE),
         subgroup_ballot: has(vk::SubgroupFeatureFlags::BALLOT),
+        subgroup_vote: has(vk::SubgroupFeatureFlags::VOTE),
         narrow,
         max_workgroup_invocations: core.limits.max_compute_work_group_invocations,
         timestamp_period_ns,

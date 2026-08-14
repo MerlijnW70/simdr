@@ -42,13 +42,13 @@ pub use reduce::{
     dot_product_whole, fold_by, fold_halves, fold_halves_open, lane_max, lane_max_whole, lane_sum,
     lane_sum_whole, workgroup_sum,
 };
-pub use scatter::{claim_slots, histogram, histogram_incrementing};
+pub use scatter::{atomic_gather, claim_slots, exchange_chain, histogram, histogram_incrementing};
 pub use specialized::{
     specialized_add, specialized_affine, specialized_cluster, specialized_derived,
 };
 pub use unrun::{
     all_above, ballot_above, broadcast, broadcast_in_cluster, lane_min, prefix_sum, shift_down,
-    shift_up,
+    shift_up, subgroup_agrees,
 };
 
 use simdr::kernel::{Kernel, Shape};

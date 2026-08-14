@@ -197,6 +197,11 @@ let answer = lanes.choose_uniform(
 )?;
 ```
 
+There are three votes, and the third asks about a **value** rather than a predicate:
+`all_equal_uniform` is true when every lane holds the same thing — the fast path for a subgroup
+that all wants the same row, bucket or weight. No comparison can express it, because the value a
+lane would compare against is the one it is trying to learn.
+
 ---
 
 ## How this is known to work

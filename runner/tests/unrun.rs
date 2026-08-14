@@ -341,3 +341,49 @@ fn a_ballot_sets_one_bit_per_qualifying_lane() {
         assert_eq!(output, expected, "at threshold {threshold}");
     }
 }
+
+#[test]
+fn a_vote_on_a_value_tells_an_agreeing_subgroup_from_a_divergent_one() {
+    // **The third vote, run.** `all_equal` asks whether the lanes hold the same value, which no
+    // predicate can express, and it is the only way to obtain a `Uniform` from a *value* — so the
+    // kernel branches on it rather than selecting, and a subgroup that disagrees never reaches the
+    // write.
+    //
+    // Two inputs, because either alone would pass for a broken vote: one where every subgroup
+    // agrees, and one where exactly one lane differs. A vote stuck at `true` fails the second, and
+    // one stuck at `false` fails the first.
+    let Some(gpu) = device("all-equal") else {
+        return;
+    };
+    let limits = gpu.limits().clone();
+    if !limits.subgroup_vote {
+        eprintln!("SKIPPED all-equal: no subgroup vote");
+        return;
+    }
+
+    let width = limits.subgroup_size as usize;
+    let count = WORKGROUP_SIZE as usize;
+    let spirv = kernels::subgroup_agrees(limits.subgroup_size).expect("built");
+
+    let agreeing: Vec<u32> = vec![7; count];
+    let agreed = gpu.run_u32(&spirv, &agreeing, 1).expect("dispatched");
+    assert_eq!(
+        agreed,
+        vec![1; count],
+        "every subgroup held one value and the vote said otherwise"
+    );
+
+    // One lane of the *first* subgroup differs. Every subgroup after it still agrees, which is
+    // what separates a per-subgroup answer from a per-dispatch one.
+    let mut divergent = vec![7_u32; count];
+    if let Some(odd) = divergent.get_mut(1) {
+        *odd = 8;
+    }
+    let split = gpu.run_u32(&spirv, &divergent, 1).expect("dispatched");
+
+    let expected: Vec<u32> = (0..count).map(|lane| u32::from(lane >= width)).collect();
+    assert_eq!(
+        split, expected,
+        "the vote answered for the dispatch rather than for each subgroup"
+    );
+}

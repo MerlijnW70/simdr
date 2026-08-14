@@ -63,6 +63,22 @@ impl Lanes<'_> {
         self.all(predicate).map(Uniform::new)
     }
 
+    /// True in every lane when every lane holds the same value, as a branch condition.
+    ///
+    /// The other way to obtain a [`Uniform`], and the one that asks about a *value*. A kernel
+    /// whose subgroup all wants the same thing can take a path that reads it once; the same kernel
+    /// on a divergent subgroup must not, and this is the instruction that tells them apart.
+    ///
+    /// # Errors
+    ///
+    /// As [`Lanes::all_equal`].
+    pub fn all_equal_uniform<T: super::Element, const LANES: u32>(
+        &mut self,
+        vector: super::Vector<T, LANES>,
+    ) -> Result<Uniform, LaneError> {
+        self.all_equal(vector).map(Uniform::new)
+    }
+
     /// Run `body` only when `condition` holds, and rejoin afterwards.
     ///
     /// The whole subgroup takes the branch together or none of it does, so a reduction inside the

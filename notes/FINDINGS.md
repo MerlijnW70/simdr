@@ -2405,3 +2405,52 @@ early and the step-count tests see them vanish.
 
 Two runs, and the second is the one that closes the item. A fix that arrives with no mutant of its
 own is a fix nobody has checked.
+
+## The public surface, audited a second time — 2026-08-14
+
+Item 17 asked *which public operations appear in no test that runs `spirv-val`* and found fifteen;
+writing those tests took twenty minutes and the first run rejected `Lanes::dot_unsigned`, which had
+been emitting `OpUDot` with a signed result type. The surface has grown by a dozen items since, so
+the question was asked again — this time as *which public functions have no consumer at all*, over
+all 201 of them.
+
+**Four.** Not one of them was reachable from a caller, a unit test or the validator:
+
+| | what it is | what happened to it |
+| --- | --- | --- |
+| `Module::f_ord_greater_than` | `OpFOrdGreaterThan` | **deleted** — a second spelling of an instruction `Lanes::greater_than` already emits through `Element::GREATER_THAN` |
+| `Module::atomic_exchange` | `OpAtomicExchange` | finished: `Kernel::atomic_exchange_at`, a kernel, a device test |
+| `Module::atomic_load` | `OpAtomicLoad` | finished: `Kernel::atomic_load_at`, a gather kernel, a device test |
+| `Module::subgroup_all_equal` | `OpGroupNonUniformAllEqual` | finished: `Lanes::all_equal` and `all_equal_uniform`, a kernel that branches on it, a device test |
+
+`notes/NEXT.md` item 5 recorded all five atomics as "built" on 2026-08-12. Three of them were;
+two were *emittable*, which is a different claim and reads the same in a list.
+
+**All four were valid, which is the honest outcome and not the expected one.** The last audit found
+an invalid instruction on its first run; this one found none, and the value is the same either way
+— the difference between "no test has ever looked" and "a test looked and it was right" is the
+whole of what the check is for.
+
+### What the three that were kept turned into
+
+- **The exchange is checked by a chain, not by a total.** Every invocation swaps its own index into
+  one slot and keeps what it displaced. Whatever order the scheduler picks, the values handed out
+  plus the one left in the slot are exactly the marker together with every index, each once — so a
+  lost exchange shows up as a duplicate and a torn one as a value that was never in the chain.
+  Neither shows up in a sum, which is what the histogram tests can see.
+- **The atomic load is checked by where it reads**, not by what it returns: `out[i] = in[in[i]]`,
+  through an index the data chose, over an input with no fixed point — asserted, so that a kernel
+  which read the invocation's own slot cannot agree by accident.
+- **The vote is checked by a branch and by two inputs.** One where every subgroup agrees and one
+  where a single lane of the *first* subgroup differs: a vote stuck at true fails the second, one
+  stuck at false fails the first, and a vote that answered for the dispatch rather than for each
+  subgroup fails the second on every device wider than one subgroup.
+
+### And a limit that was reporting the wrong feature
+
+`Limits` offered `subgroup_arithmetic`, `subgroup_clustered`, `subgroup_shuffle` and
+`subgroup_ballot` — and no `subgroup_vote`, while three kernels used votes and their tests gated on
+the ballot instead. `VK_SUBGROUP_FEATURE_VOTE_BIT` and `..._BALLOT_BIT` are different bits, and
+`GroupNonUniformVote` and `GroupNonUniformBallot` are different capabilities. Every device here
+offers both, so the gate was right by luck on all three — the same shape as a test that takes a
+width parameter and then ignores it.

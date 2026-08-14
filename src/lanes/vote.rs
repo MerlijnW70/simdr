@@ -17,7 +17,7 @@
 //! `OpGroupNonUniformAny` has no clustered form — so a vote would answer for all four at once.
 //! [`Lanes::any`] refuses that rather than returning a plausible wrong answer.
 
-use super::{LaneError, Lanes, Mapping, Predicate};
+use super::{Element, LaneError, Lanes, Mapping, Predicate, Vector};
 use crate::module::Id;
 use crate::spec::Capability;
 
@@ -39,6 +39,78 @@ impl Lanes<'_> {
     /// As [`Lanes::any`].
     pub fn all<const LANES: u32>(&mut self, predicate: Predicate<LANES>) -> Result<Id, LaneError> {
         self.vote::<LANES>("all", predicate, Combine::And)
+    }
+
+    /// True in every lane when every lane holds the **same value** — the vote about a value
+    /// rather than about a predicate.
+    ///
+    /// `any` and `all` ask whether a comparison held somewhere or everywhere; this asks whether
+    /// the lanes agree, which no comparison can express: the value each lane would compare
+    /// against is the one it is trying to learn.
+    ///
+    /// **What it is for is the branch.** `decisions/DR-0003` refuses a branch on anything but a
+    /// [`super::Uniform`], and until now the only way to obtain one was to vote on a predicate.
+    /// This is the instruction that says a *value* is uniform — the fast path a kernel takes when
+    /// its whole subgroup wants the same row, the same bucket, the same weight — so
+    /// [`Lanes::all_equal_uniform`] hands the answer straight to `if_uniform`.
+    ///
+    /// `OpGroupNonUniformAllEqual` had been in this crate since the atomics landed, with no
+    /// caller, no test and no validator ever pointed at it. An audit of the public surface found
+    /// it, which is the second time that audit has found an operation nothing could reach.
+    ///
+    /// # Errors
+    ///
+    /// [`LaneError::NoSuchForm`] for a clustered mapping, where the vote would answer for every
+    /// vector sharing the subgroup, and for a strip-mined one — see below. Otherwise
+    /// [`LaneError::Build`].
+    ///
+    /// # Why a strip-mined vector is refused rather than folded
+    ///
+    /// `any` and `all` fold their strips with a logical or and and, and that is exactly right
+    /// because each strip's vote is already the whole answer *for that strip*. Agreement is not
+    /// like that: four strips each internally uniform can still hold four different values, and
+    /// the instruction never compares one strip against another. Folding would return `true` for
+    /// a vector whose elements are not all equal, which is a wrong answer rather than a missing
+    /// one.
+    ///
+    /// Doing it properly needs an elementwise equality — comparing strip against strip within a
+    /// lane — and the lane API has no `equal` yet. Refused by name until it does.
+    pub fn all_equal<T: Element, const LANES: u32>(
+        &mut self,
+        vector: Vector<T, LANES>,
+    ) -> Result<Id, LaneError> {
+        match self.mapping::<LANES>()? {
+            Mapping::WholeSubgroup => {}
+            Mapping::Clusters { .. } => {
+                return Err(LaneError::NoSuchForm {
+                    operation: "all_equal",
+                    because: "SPIR-V's votes have no clustered form, so the answer would cover \
+                              every vector sharing the subgroup rather than this one",
+                });
+            }
+            Mapping::Strips { .. } => {
+                return Err(LaneError::NoSuchForm {
+                    operation: "all_equal",
+                    because: "one vote per strip says each strip is uniform, not that the strips \
+                              agree with each other — and combining them needs an elementwise \
+                              equality this API does not have",
+                });
+            }
+        }
+
+        let boolean = self.module().type_bool()?;
+        let scope = self.scope();
+        self.module()
+            .require_capability(Capability::GroupNonUniform)?;
+        self.module()
+            .require_capability(Capability::GroupNonUniformVote)?;
+
+        let first = vector
+            .strips()
+            .first()
+            .copied()
+            .ok_or(LaneError::no_strips())?;
+        Ok(self.module().subgroup_all_equal(boolean, scope, first)?)
     }
 
     /// The predicate's first strip gathered into a bitmask, one bit per lane.
@@ -122,7 +194,7 @@ impl Lanes<'_> {
     }
 }
 
-/// How the per-strip votes are folded into one.
+/// How the per-strip votes are folded into one, for the votes that can be folded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Combine {
     Or,
@@ -154,6 +226,83 @@ mod tests {
             .splat_bits::<F32, LANES>(1.0_f32.to_bits())
             .expect("one");
         lanes.greater_than(one, zero).expect("compared")
+    }
+
+    #[test]
+    fn a_vote_on_a_value_is_one_instruction_and_asks_no_predicate() {
+        // The third vote. `any` and `all` take a comparison; this takes the vector, because the
+        // question is whether the lanes agree and no lane knows what to compare against.
+        let mut module = Module::new(Version::V1_3);
+        let mut lanes = Lanes::new(&mut module, 32).expect("built");
+        let value = lanes
+            .splat_bits::<F32, 32>(1.0_f32.to_bits())
+            .expect("splat");
+
+        lanes.all_equal(value).expect("voted");
+
+        let words = module.finish();
+        assert_eq!(count(&words, op::GROUP_NON_UNIFORM_ALL_EQUAL), 1);
+        assert_eq!(
+            count(&words, op::F_ORD_GREATER_THAN),
+            0,
+            "no comparison was needed to ask it"
+        );
+        assert_eq!(
+            count(&words, op::GROUP_NON_UNIFORM_ALL),
+            0,
+            "and it is not `all`"
+        );
+    }
+
+    #[test]
+    fn a_vote_on_a_value_declares_the_vote_capability_and_not_the_arithmetic_one() {
+        let mut module = Module::new(Version::V1_3);
+        let mut lanes = Lanes::new(&mut module, 32).expect("built");
+        let value = lanes
+            .splat_bits::<F32, 32>(1.0_f32.to_bits())
+            .expect("splat");
+        lanes.all_equal(value).expect("voted");
+
+        let declared: Vec<u32> = decode::body(&module.finish())
+            .filter(|instruction| instruction.opcode() == op::CAPABILITY)
+            .filter_map(|instruction| instruction.operands().first().copied())
+            .collect();
+
+        assert!(declared.contains(&Capability::GroupNonUniform.word()));
+        assert!(declared.contains(&Capability::GroupNonUniformVote.word()));
+        assert!(!declared.contains(&Capability::GroupNonUniformArithmetic.word()));
+    }
+
+    #[test]
+    fn a_vote_on_a_value_refuses_both_mappings_it_would_answer_wrongly_for() {
+        // Clusters, for the reason every vote refuses them: the answer would cover all four
+        // vectors. And **strips**, which `any` and `all` do fold — because folding says each strip
+        // is uniform and not that the strips agree with each other, which is a wrong answer rather
+        // than a missing one.
+        let mut module = Module::new(Version::V1_3);
+        let mut lanes = Lanes::new(&mut module, 32).expect("built");
+        let narrow = lanes.splat_bits::<F32, 8>(0).expect("splat");
+        let wide = lanes.splat_bits::<F32, 128>(0).expect("splat");
+
+        assert!(matches!(
+            lanes.all_equal(narrow).err(),
+            Some(LaneError::NoSuchForm {
+                operation: "all_equal",
+                ..
+            })
+        ));
+        assert!(matches!(
+            lanes.all_equal(wide).err(),
+            Some(LaneError::NoSuchForm {
+                operation: "all_equal",
+                ..
+            })
+        ));
+
+        // And `all` still folds its strips, so this is a difference between the two votes rather
+        // than a rule about strip-mining.
+        let mask = predicate::<128>(&mut lanes);
+        assert!(lanes.all(mask).is_ok());
     }
 
     #[test]

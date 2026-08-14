@@ -133,6 +133,54 @@ fn all_above_at<const LANES: u32>(subgroup: u32, threshold: u32) -> Result<Vec<u
     kernel.finish()
 }
 
+/// `out[i] = 1` when every lane of the subgroup holds the same input value, else `0`.
+///
+/// The third vote, and the one that asks about a **value**. `all_above` compares against a
+/// constant every lane already knows; this compares the lanes against each other, which no
+/// predicate can express — the value a lane would compare against is the one it is trying to
+/// learn.
+///
+/// A subgroup that agrees is the case a kernel takes a fast path for, and `decisions/DR-0003` will
+/// only branch on a `Uniform` — so the answer goes through `Lanes::all_equal_uniform` and drives a
+/// real branch here rather than a select. That makes the module say what the operation is for, and
+/// it is why the answer is written inside the branch: a kernel that took both paths would prove
+/// the vote's value and not its uniformity.
+///
+/// # Errors
+///
+/// [`LaneError`] if the module cannot be built.
+fn subgroup_agrees_at<const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    use simdr::lanes::U32;
+
+    let mut kernel = Kernel::<U32>::new(shape(subgroup))?;
+    let value = kernel.load::<LANES>(0)?;
+
+    let zero = kernel.module().constant_u32(0)?;
+    let one = kernel.module().constant_u32(1)?;
+    let slot = kernel.local_index();
+    let out = kernel.element_pointer_to(1, slot)?;
+
+    // Zero first, so the slot a divergent subgroup never reaches says so rather than holding
+    // whatever the buffer came with.
+    kernel.module().store(out, zero)?;
+
+    let agreed = kernel.lanes()?.all_equal_uniform(value)?;
+    kernel
+        .lanes()?
+        .if_uniform(agreed, |lanes| Ok(lanes.module().store(out, one)?))?;
+
+    kernel.finish()
+}
+
+/// `subgroup_agrees_at` over a vector as wide as this device's subgroup.
+///
+/// # Errors
+///
+/// [`LaneError`] if the module cannot be built, or the width is not one the dispatcher lists.
+pub fn subgroup_agrees(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup!(subgroup, subgroup_agrees_at)
+}
+
 /// `out[i] = ` the low 32 bits of the ballot of `in[i] > threshold`.
 ///
 /// One bit per lane, set where that lane's predicate held. Every lane of the subgroup receives the
