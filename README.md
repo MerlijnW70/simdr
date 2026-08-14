@@ -154,6 +154,8 @@ up.
 ```rust
 let mut scanner = gpu.scanner(1 << 20)?;   // three levels, seven dispatches
 let running = scanner.scan(&input)?;       // one submission
+
+gpu.scan(&input)?;                         // the same, building and dropping it all per call
 ```
 
 **2²⁰ elements is three levels**, and the count is decided in one place and cross-checked against

@@ -564,3 +564,35 @@ fn a_mapped_scanner_is_correct_at_every_depth_of_recursion() {
         }
     }
 }
+
+#[test]
+fn a_one_shot_scan_agrees_with_a_held_one_and_refuses_the_same_lengths() {
+    // The convenience form. It has to give the same answer as the object it builds and throws
+    // away — and refuse the same lengths, since a scanner it cannot build is a scan it cannot run.
+    let Some(gpu) = device("one-shot scan") else {
+        return;
+    };
+
+    let block = WORKGROUP_SIZE as usize;
+    for elements in [block, block * 4, block * block * 2] {
+        let input: Vec<f32> = (0..elements).map(|index| (index % 11) as f32).collect();
+
+        let once = gpu.scan(&input).expect("scanned");
+        let held = gpu
+            .scanner(elements)
+            .expect("built")
+            .scan(&input)
+            .expect("scanned");
+
+        assert_eq!(once, inclusive(&input), "{elements} elements");
+        assert_eq!(once, held, "the two routes disagree at {elements}");
+    }
+
+    for elements in [0_usize, 1, 63, 65, 100] {
+        let input = vec![1.0_f32; elements];
+        assert!(
+            matches!(gpu.scan(&input), Err(runner::Error::BadLength(_))),
+            "{elements} was accepted"
+        );
+    }
+}

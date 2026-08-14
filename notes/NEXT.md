@@ -783,9 +783,10 @@ device time.
 
 And the seven dispatches together are 3% of the call. `notes/FINDINGS.md` has both tables.
 
-**4. There is no one-shot `Gpu::scan`.** `Gpu::sum` exists and is what every test of the reduction
-starts from. Scanning needs a `Scanner` built first, which is right for a caller that scans
-repeatedly and an obstacle for a test, an example, or anyone trying the thing once.
+**4. There is no one-shot `Gpu::scan` — done.** It builds a `Scanner`, uses it once and drops it,
+which is ceremony traded for economy and the doc says so: a dozen buffers and `2 × levels + 1`
+pipelines rebuilt per call, all of which `Gpu::scanner` keeps. It exists for symmetry with
+`Gpu::sum` and for the cases where building an object to use it once is the wrong shape.
 
 **5. `Lanes::prefix_sum` still refuses a clustered vector.** The ladder works and is proven on three
 devices, and it lives in `runner::kernels` — so the *lane API*, which is what the README's mapping
