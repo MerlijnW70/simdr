@@ -489,3 +489,78 @@ fn a_clustered_scan_scans_each_cluster_independently() {
         }
     }
 }
+
+#[test]
+fn a_mapped_scanner_runs_the_map_on_the_device_and_agrees_with_doing_it_here() {
+    // **The crossing that does not happen.** Without `scanner_of` a caller wanting the running
+    // total of f(x) has to send the input, run the map, bring the squares home and send them back
+    // — three crossings, two of them the whole buffer. Here the map is the first pass of the same
+    // chain and its output never leaves the device.
+    //
+    // Both columns must agree exactly, which is what says the fused one is the same computation
+    // and not merely a faster-looking one.
+    let Some(gpu) = device("scanner mapped") else {
+        return;
+    };
+    eprintln!("device: {}", gpu.limits().name);
+
+    let width = gpu.limits().subgroup_size;
+    let square = kernels::square(width).expect("built");
+    let elements = WORKGROUP_SIZE as usize * 4;
+
+    // Values of 0, 1 and 2. Σ x² has to stay inside the 2²⁴ an `f32` counts exactly or the
+    // comparison is a tolerance wearing an equals sign — and 2 has to be present, because x² and
+    // x agree on 0 and 1 and a map that had stopped squaring would go unnoticed without it.
+    let input: Vec<f32> = (0..elements).map(|index| (index % 3) as f32).collect();
+
+    let mut fused = gpu.scanner_of(elements, &square).expect("built");
+    let mut plain = gpu.scanner(elements).expect("built");
+
+    assert_eq!(
+        fused.dispatches(),
+        plain.dispatches() + 1,
+        "the map is one more dispatch and nothing else"
+    );
+
+    let squares: Vec<f32> = input.iter().map(|value| value * value).collect();
+    let expected = inclusive(&squares);
+
+    let through_the_host = plain.scan(&squares).expect("scanned");
+    let on_the_device = fused.scan(&input).expect("scanned");
+
+    assert_eq!(
+        on_the_device, expected,
+        "the fused scan of squares is wrong"
+    );
+    assert_eq!(
+        on_the_device, through_the_host,
+        "the two routes computed different numbers"
+    );
+}
+
+#[test]
+fn a_mapped_scanner_is_correct_at_every_depth_of_recursion() {
+    // The map has to reach every element the *first* level scans, which is every element there
+    // is — so a map dispatched over too few workgroups is right in the first block and wrong
+    // after it, and only shows up once there is more than one level.
+    let Some(gpu) = device("scanner mapped deep") else {
+        return;
+    };
+
+    let width = gpu.limits().subgroup_size;
+    let square = kernels::square(width).expect("built");
+    let block = WORKGROUP_SIZE as usize;
+
+    for elements in [block, block * block, block * block * 2] {
+        let input: Vec<f32> = (0..elements).map(|index| (index % 3) as f32).collect();
+        let squares: Vec<f32> = input.iter().map(|value| value * value).collect();
+
+        let mut fused = gpu.scanner_of(elements, &square).expect("built");
+        let output = fused.scan(&input).expect("scanned");
+
+        let expected = inclusive(&squares);
+        for (index, (got, want)) in output.iter().zip(&expected).enumerate() {
+            assert_eq!(got, want, "element {index} of {elements}");
+        }
+    }
+}

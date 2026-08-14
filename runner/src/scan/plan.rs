@@ -91,15 +91,17 @@ pub(crate) fn levels(elements: usize) -> Result<Vec<Level>, Error> {
 
 /// How many dispatches a scan over these levels runs.
 ///
-/// Up one side and down the other: a block scan at the input, a block scan per level below the
-/// top, the single workgroup at the top, then an offset addition per level on the way back down.
-/// `2 × levels + 1`, and it is written as the sum of its parts rather than that formula so that a
-/// reader can check it against the loop in [`super::held`].
-pub(crate) fn dispatches(levels: usize) -> usize {
+/// Up one side and down the other: the map if there is one, a block scan at the input, a block
+/// scan per level below the top, the single workgroup at the top, then an offset addition per
+/// level on the way back down. `2 × levels + 1`, plus the map — and it is written as the sum of
+/// its parts rather than that formula so a reader can check it against the loop in
+/// [`super::held`].
+pub(crate) fn dispatches(levels: usize, mapped: bool) -> usize {
+    let map = usize::from(mapped);
     let up = 1 + levels.saturating_sub(1);
     let top = 1;
     let down = levels;
-    up + top + down
+    map + up + top + down
 }
 
 #[cfg(test)]
@@ -122,7 +124,8 @@ mod tests {
         assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].elements, BLOCK);
         assert_eq!(plan[0].workgroups, 1);
-        assert_eq!(dispatches(plan.len()), 3);
+        assert_eq!(dispatches(plan.len(), false), 3);
+        assert_eq!(dispatches(plan.len(), true), 4, "and one more with a map");
     }
 
     #[test]
@@ -131,7 +134,7 @@ mod tests {
 
         let counts: Vec<usize> = plan.iter().map(|level| level.elements).collect();
         assert_eq!(counts, vec![16384, 256, 4]);
-        assert_eq!(dispatches(plan.len()), 7);
+        assert_eq!(dispatches(plan.len(), false), 7);
     }
 
     #[test]
@@ -212,7 +215,12 @@ mod tests {
         // Derived independently of the implementation, so the two have to agree rather than being
         // the same expression twice.
         for count in 1..8_usize {
-            assert_eq!(dispatches(count), 2 * count + 1, "{count} levels");
+            assert_eq!(dispatches(count, false), 2 * count + 1, "{count} levels");
+            assert_eq!(
+                dispatches(count, true),
+                2 * count + 2,
+                "{count} levels and a map"
+            );
         }
     }
 }

@@ -2210,3 +2210,37 @@ the floor is ~2 µs, and ten of them is ~20 µs against a 400 µs call.
 
 **Neither device's answer generalises.** The example prints what the device in front of it says,
 rather than repeating either of these.
+
+## Fusing the map into a scan is worth 2–3×, and the scan itself is where the levels show
+
+`Gpu::scanner_of` makes an elementwise map the first pass of the scan's own chain, so its output
+never crosses the bus. The same trade `reducer_of` makes, measured the same way: both columns hold
+their pipelines and their buffers, so neither pays for allocation or pipeline creation, and both
+were asserted to compute the same numbers before either was timed.
+
+| Σ x² as a running total | three crossings | one crossing | |
+| --- | --- | --- | --- |
+| 4 096 — RTX 4080 | ~170 µs | ~66 µs | **2.6×** |
+| 65 536 | ~237 µs | ~101 µs | **2.4×** |
+| 2²⁰ | ~2078 µs | ~1008 µs | **2.1×** |
+| 4 096 — integrated Radeon | ~1140 µs | ~375 µs | **3.0×** |
+| 65 536 | ~1335 µs | ~518 µs | **2.6×** |
+| 2²⁰ | ~4263 µs | ~2168 µs | **2.0×** |
+
+**The multiple falls as the input grows, and that is the honest reading.** What is removed is two
+crossings of the buffer, which grows with the input — but so does the scan, and the scan grows
+faster because it is seven dispatches over a dozen buffers rather than one. At 4 096 the crossings
+are most of the work; at 2²⁰ they are half of it.
+
+### What the scan costs on its own
+
+| elements | levels | dispatches | RTX 4080 | integrated Radeon |
+| --- | --- | --- | --- | --- |
+| 4 096 | 1 | 3 | ~80 µs | ~389 µs |
+| 65 536 | 2 | 5 | ~106 µs | ~610 µs |
+| 2²⁰ | 3 | 7 | ~966 µs | ~2228 µs |
+
+Sixteen times the elements between the first two rows and about a third more time, because two more
+dispatches are most of what changed. Sixteen times again and it is nine times slower — by then the
+buffer is 4 MB and the host write is back to being the largest single row, which is what
+`runner/examples/reducer.rs` measures directly for the reduction.

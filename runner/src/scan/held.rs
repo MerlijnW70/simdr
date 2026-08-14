@@ -66,6 +66,43 @@ impl Gpu {
     /// [`Error::BadLength`] if `elements` is not a shape this can scan, [`Error::Emit`] if a
     /// kernel cannot be built, otherwise as [`Gpu::run`].
     pub fn scanner<'gpu>(&'gpu self, elements: usize) -> Result<Scanner<'gpu>, Error> {
+        self.build_scanner(elements, None)
+    }
+
+    /// The same, with one elementwise pass of `map` run over the input first.
+    ///
+    /// **What removes a crossing of the bus.** The running total of f(x) over data the caller
+    /// cannot reach otherwise costs three host crossings: send the input, run `f`, bring the
+    /// result home, send it back, scan. Two of those are the whole buffer.
+    ///
+    /// Here `map` is the first pass of the same chain — its output never leaves the device, and
+    /// the first block scan reads it where the input would have been. The same trade
+    /// [`Gpu::reducer_of`] makes, which `runner/examples/reducer.rs` measures at 3.7× for a
+    /// reduction over 2²⁰.
+    ///
+    /// `map` must be a two-binding kernel built for [`WORKGROUP_SIZE`] invocations, reading
+    /// binding 0 and writing binding 1, and it must write **every** element the first scan reads.
+    /// `elements / WORKGROUP_SIZE` workgroups of it are dispatched, worked out here rather than
+    /// taken as an argument so the count cannot disagree with the length the levels were built
+    /// for.
+    ///
+    /// # Errors
+    ///
+    /// As [`Gpu::scanner`].
+    pub fn scanner_of<'gpu>(
+        &'gpu self,
+        elements: usize,
+        map: &[u32],
+    ) -> Result<Scanner<'gpu>, Error> {
+        self.build_scanner(elements, Some(map))
+    }
+
+    /// The construction both of them share.
+    fn build_scanner<'gpu>(
+        &'gpu self,
+        elements: usize,
+        map: Option<&[u32]>,
+    ) -> Result<Scanner<'gpu>, Error> {
         let levels = plan::levels(elements)?;
         let width = self.limits().subgroup_size;
 
@@ -98,6 +135,15 @@ impl Gpu {
                 Ok(index) => index,
                 Err(error) => return Err(held.fail(error)),
             };
+            // Where the map writes, and where the first block scan then reads. Only allocated
+            // when there is a map: a scanner without one would hold a buffer nothing touches.
+            let mapped = match map {
+                None => None,
+                Some(_) => match held.local(bytes) {
+                    Ok(index) => Some(index),
+                    Err(error) => return Err(held.fail(error)),
+                },
+            };
             let scanned = match held.local(bytes) {
                 Ok(index) => index,
                 Err(error) => return Err(held.fail(error)),
@@ -119,14 +165,18 @@ impl Gpu {
             if let Err(error) = held.record(
                 &levels,
                 &slots,
-                input,
-                scanned,
-                output,
+                Ends {
+                    input,
+                    mapped,
+                    scanned,
+                    output,
+                },
                 &Modules {
                     blocks: &blocks,
                     blocks_exclusive: &blocks_exclusive,
                     top: &top,
                     add: &add,
+                    map,
                 },
             ) {
                 return Err(held.fail(error));
@@ -137,7 +187,7 @@ impl Gpu {
             // those ever disagree the scanner is running a different algorithm from the one that
             // was planned, and the difference would show up as a wrong answer at some depth rather
             // than as a failure here.
-            if held.pipelines.len() != plan::dispatches(levels.len()) {
+            if held.pipelines.len() != plan::dispatches(levels.len(), map.is_some()) {
                 return Err(held.fail(Error::NoPipeline));
             }
 
@@ -146,12 +196,30 @@ impl Gpu {
     }
 }
 
-/// The four modules a scan runs, so the recording below takes one argument rather than four.
+/// The modules a scan runs, so the recording below takes one argument rather than five.
 struct Modules<'a> {
     blocks: &'a [u32],
     blocks_exclusive: &'a [u32],
     top: &'a [u32],
     add: &'a [u32],
+    /// One elementwise pass over the input first, and `None` when there is none.
+    map: Option<&'a [u32]>,
+}
+
+/// The buffers at the ends of the chain — the input's own, rather than a level's.
+///
+/// Grouped for the same reason `Modules` is: `record` was growing an argument per buffer, and a
+/// caller passing `scanned` where `output` belongs would build a scanner that scans its own answer.
+#[derive(Clone, Copy)]
+struct Ends {
+    /// What the host writes.
+    input: usize,
+    /// What the map writes and the first scan reads, when there is a map.
+    mapped: Option<usize>,
+    /// The input's blocks, scanned from their own starts.
+    scanned: usize,
+    /// Where the answer lands.
+    output: usize,
 }
 
 /// A `Scanner` under construction, with the release path for a failure part way through.
@@ -315,13 +383,36 @@ impl Held<'_> {
         &mut self,
         levels: &[Level],
         slots: &[Slots],
-        input: usize,
-        scanned: usize,
-        output: usize,
+        ends: Ends,
         modules: &Modules<'_>,
     ) -> Result<(), Error> {
+        let Ends {
+            input,
+            mapped,
+            scanned,
+            output,
+        } = ends;
+
         let words = size_of::<f32>() as u64;
         let elements = self.buffers.get(input).map_or(0, Buffer::capacity) as u64 * words;
+        let workgroups =
+            (self.buffers.get(input).map_or(0, Buffer::capacity) / WORKGROUP_SIZE as usize) as u32;
+
+        // The map, when there is one: elementwise over the whole input, writing where the first
+        // block scan will read. Its output never crosses the bus, which is the whole point.
+        let first_read = match (modules.map, mapped) {
+            (Some(map), Some(mapped)) => {
+                // SAFETY: as the passes below — both indices name buffers this builder allocated.
+                unsafe {
+                    self.pass(map, &[(input, elements), (mapped, elements)], workgroups)?;
+                }
+                mapped
+            }
+            // A map with nowhere to write, or a buffer with no map, is a construction bug rather
+            // than a caller's mistake — the two are decided together in `build_scanner`.
+            (Some(_), None) | (None, Some(_)) => return Err(Error::NoPipeline),
+            (None, None) => input,
+        };
 
         let (Some(first), Some(first_slots)) = (levels.first(), slots.first()) else {
             return Err(Error::NoPipeline);
@@ -336,12 +427,11 @@ impl Held<'_> {
             self.pass(
                 modules.blocks,
                 &[
-                    (input, elements),
+                    (first_read, elements),
                     (scanned, elements),
                     (first_slots.totals, level_bytes(first)),
                 ],
-                (self.buffers.get(input).map_or(0, Buffer::capacity) / WORKGROUP_SIZE as usize)
-                    as u32,
+                workgroups,
             )?;
         }
 
@@ -424,8 +514,7 @@ impl Held<'_> {
                     (first_slots.offsets, level_bytes(first)),
                     (output, elements),
                 ],
-                (self.buffers.get(input).map_or(0, Buffer::capacity) / WORKGROUP_SIZE as usize)
-                    as u32,
+                workgroups,
             )?;
         }
 

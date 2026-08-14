@@ -770,11 +770,13 @@ on the lane order, so the reference has to model the mapping rather than the ari
 
 ### Tier 2 — asymmetries the last week opened
 
-**3. `Scanner` is missing what `Reducer` has.** No `scan_timed`, so the in-situ timing built two
-passes ago cannot see the deepest chain in the project — seven dispatches over three levels is the
-one place a per-pass profile would say something new. And no `scanner_of` to fuse a map into the
-first pass, which is worth to a scan exactly what `reducer_of` was worth to a reduction: it removes
-a whole crossing of the bus.
+**3. `Scanner` is missing what `Reducer` has — half done.** `Gpu::scanner_of` fuses an elementwise
+map into the chain's first pass, and it is worth **2.0–3.0×** depending on the length and the
+device: two crossings of the buffer removed, against a scan that grows faster than they do.
+`runner/examples/scanner.rs` prints the table and `notes/FINDINGS.md` records it.
+
+`scan_timed` is still missing. Seven dispatches over three levels is the one place a per-pass
+profile would say something the reduction's could not.
 
 **4. There is no one-shot `Gpu::scan`.** `Gpu::sum` exists and is what every test of the reduction
 starts from. Scanning needs a `Scanner` built first, which is right for a caller that scans

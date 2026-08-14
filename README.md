@@ -161,6 +161,11 @@ the dispatches actually recorded. The offsets a block owes are an *exclusive* sc
 operation, and computing it as `inclusive - own` instead would lose precisely the low bits the scan
 had just accumulated.
 
+`Gpu::scanner_of` fuses an elementwise map into the chain's first pass, so the running total of
+f(x) crosses the bus once instead of three times: **2.0–3.0×**, falling as the input grows because
+what is removed is two crossings of the buffer and the scan grows faster than they do.
+`runner/examples/scanner.rs` prints both tables.
+
 ## Branches are uniform or they are refused
 
 A branch takes a `Uniform`, and only a vote produces one. A subgroup instruction inside a divergent
