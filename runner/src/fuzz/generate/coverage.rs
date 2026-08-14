@@ -352,3 +352,45 @@ fn the_random_stream_spreads_across_its_range() {
     }
     spread_enough(&drawn, DRAWS, "the values `below(5)` returns");
 }
+
+/// The rotate is reached at **both** widths that allow it, not only the narrow one.
+///
+/// The mutation gate found this too: sending `lanes == subgroup` down the strip-mined pool changed
+/// nothing any test could see, because every program still built and still agreed — it only stopped
+/// the rotate ever being generated for a subgroup-wide vector. A pool that quietly loses an
+/// operation looks exactly like a fuzzer that keeps agreeing.
+#[test]
+fn the_rotate_is_generated_for_a_clustered_vector_and_for_a_whole_one() {
+    let mut clustered = 0;
+    let mut whole = 0;
+
+    for seed in 0..512_u64 {
+        let program = generate(&mut Rng::new(seed), Domain::Unsigned, 32, 64);
+        if !program
+            .steps
+            .iter()
+            .any(|step| matches!(step, Op::RotateUp(_)))
+        {
+            continue;
+        }
+        // A rotate over a strip-mined vector is refused by the lane API, so the generator must not
+        // draw one. Asserted rather than panicked: this crate's lints keep a bare `panic!` out of
+        // everything but the harness, and a failing claim is an assertion.
+        assert!(
+            program.lanes <= 32,
+            "seed {seed} put a rotate in a strip-mined program: {program:?}"
+        );
+        if program.lanes < 32 {
+            clustered += 1;
+        } else {
+            whole += 1;
+        }
+    }
+
+    assert!(clustered > 0, "no clustered rotate in 512 seeds");
+    assert!(
+        whole > 0,
+        "no rotate over a subgroup-wide vector in 512 seeds — the pool for `lanes == subgroup` \
+         is not being reached"
+    );
+}

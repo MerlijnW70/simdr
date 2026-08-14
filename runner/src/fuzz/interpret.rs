@@ -348,6 +348,39 @@ mod tests {
     }
 
     #[test]
+    fn the_vote_on_a_value_adds_where_the_subgroup_agrees_and_nowhere_else() {
+        // **Both branches, because a generated round only ever reaches one.** The corpus is
+        // distinct values by design — that is what makes a wrong answer obvious — so the vote it
+        // feeds never passes, and the mutation gate duly found that flipping this condition to
+        // `false` changed nothing any sweep could see.
+        //
+        // A uniform subgroup is not a shape the generator produces, and it is the only shape the
+        // operation is *for*.
+        let step = Op::AddIfAllEqual { add: 5 };
+        let agreeing: Vec<u32> = vec![Domain::Unsigned.encode(7); 64];
+        let out = values_of(
+            &program(Domain::Unsigned, 32, vec![step], Finish::Sum),
+            &agreeing,
+        );
+        assert_eq!(
+            out[0],
+            (7 + 5) * 32,
+            "every lane agreed, so every lane added"
+        );
+
+        // One lane of the first subgroup differs: that subgroup adds nothing, and the second still
+        // does. A reference that voted per *lane* would add in thirty-one of the first thirty-two.
+        let mut split = agreeing.clone();
+        split[1] = Domain::Unsigned.encode(8);
+        let out = values_of(
+            &program(Domain::Unsigned, 32, vec![step], Finish::Sum),
+            &split,
+        );
+        assert_eq!(out[0], 7 * 31 + 8, "the divergent subgroup adds nothing");
+        assert_eq!(out[32], (7 + 5) * 32, "and the one beside it is unaffected");
+    }
+
+    #[test]
     fn a_clustered_sum_covers_only_its_own_cluster() {
         let input = ramp(Domain::Unsigned, 64);
         let out = values_of(

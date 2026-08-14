@@ -329,3 +329,46 @@ fn an_unsigned_domain_reaches_its_whole_width_and_a_signed_one_stops_at_its_sign
         -32_768
     );
 }
+
+/// The two cases `Domain::equals` is written for, neither of which a generated round produces.
+///
+/// The mutation gate found this: all three mutants of its `is_float()` branch survived, because on
+/// a corpus of small positive integers a bitwise comparison and a numeric one agree everywhere. The
+/// branch is not equivalent — it is *unfalsifiable by the corpus*, which is a different thing and
+/// the one this project keeps meeting.
+///
+/// So the distinction is stated here directly, in both directions.
+#[test]
+fn equality_is_numeric_for_the_floats_and_bitwise_for_the_integers() {
+    // A float domain: two bit patterns, one value. `OpFOrdEqual` says they are equal, and a
+    // comparison that took the integer path would say they are not.
+    assert!(
+        Domain::Float.equals(0.0_f32.to_bits(), (-0.0_f32).to_bits()),
+        "+0.0 and -0.0 are one value and two bit patterns"
+    );
+    assert_ne!(
+        0.0_f32.to_bits(),
+        (-0.0_f32).to_bits(),
+        "the test above says nothing unless the bits differ"
+    );
+
+    // And a NaN equals nothing, itself included — which is what *ordered* means, and what the
+    // integer path would get wrong in the other direction.
+    let nan = f32::NAN.to_bits();
+    assert!(!Domain::Float.equals(nan, nan), "a NaN is equal to nothing");
+
+    // An integer domain: the same bits are a number, not a float. This pattern *is* a NaN read as
+    // a float, so a comparison that took the float path would call it unequal to itself.
+    assert!(
+        Domain::Unsigned.equals(nan, nan),
+        "an integer is equal to itself whatever its bits would mean elsewhere"
+    );
+
+    // And a narrow domain compares only its own width: two values differing above it are the same
+    // element, because that is what the device's 8-bit comparison sees.
+    assert!(
+        Domain::UnsignedByte.equals(0x0000_00FF, 0xFFFF_00FF),
+        "a byte domain compares eight bits"
+    );
+    assert!(!Domain::UnsignedByte.equals(0x0000_00FF, 0x0000_00FE));
+}

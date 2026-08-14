@@ -609,3 +609,63 @@ fn describe(program: &Program) -> String {
         program.finish
     )
 }
+
+#[test]
+fn the_vote_on_a_value_is_compared_on_a_corpus_that_makes_it_pass() {
+    // **The corpus that every other test here deliberately avoids.** `corpus` makes every element
+    // distinct, because that is what makes a wrong answer obvious — and it means the vote about a
+    // value never passes, so `Op::AddIfAllEqual` is generated and does nothing in every round.
+    //
+    // The mutation gate found it: flipping the reference's condition to `false` changed no sweep's
+    // answer. A step that cannot pass is a step nobody is checking.
+    let Some(gpu) = device("fuzz-agree") else {
+        return;
+    };
+    let limits = gpu.limits().clone();
+    if !limits.subgroup_surface() {
+        eprintln!("SKIPPED fuzz-agree: the device lacks part of the subgroup surface");
+        return;
+    }
+
+    for domain in ALL_DOMAINS {
+        let program = Program {
+            domain,
+            subgroup: limits.subgroup_size,
+            workgroup: WORKGROUP_SIZE,
+            groups: 1,
+            lanes: limits.subgroup_size,
+            steps: vec![Op::AddIfAllEqual { add: 3 }],
+            finish: Finish::Sum,
+        };
+
+        // Uniform: every subgroup agrees, so every lane adds. Nothing else in this file produces
+        // this shape.
+        let agreeing: Vec<u32> = vec![domain.encode(7); program.input_len()];
+        // And one lane of the first subgroup differing, so the same program takes the other branch
+        // in one subgroup and not in the rest.
+        let mut split = agreeing.clone();
+        if let Some(odd) = split.get_mut(1) {
+            *odd = domain.encode(8);
+        }
+
+        for (name, input) in [("agreeing", &agreeing), ("split", &split)] {
+            match fuzz::check(&gpu, &program, input).expect("dispatched") {
+                Outcome::Agreed => {}
+                Outcome::Refused(why) => eprintln!("fuzz-agree {domain:?} {name}: refused {why}"),
+                Outcome::Unrepresentable => {
+                    eprintln!("fuzz-agree {domain:?} {name}: outside the exact range");
+                }
+                Outcome::Disagreed {
+                    expected,
+                    actual,
+                    at,
+                    ..
+                } => panic!(
+                    "{domain:?} disagreed on the {name} corpus at index {at}: expected {}, got {}",
+                    expected.get(at).copied().unwrap_or_default(),
+                    actual.get(at).copied().unwrap_or_default()
+                ),
+            }
+        }
+    }
+}
