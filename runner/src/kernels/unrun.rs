@@ -172,6 +172,74 @@ fn subgroup_agrees_at<const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneE
     kernel.finish()
 }
 
+/// The same vote over a vector **wider** than the subgroup — the strip-mined form.
+///
+/// `LANES` elements per lane, and two questions rather than one: every lane holds the same strip 0,
+/// *and* in every lane the other strips equal strip 0. The second is what an elementwise equality
+/// is for, and without it this mapping was refused by name.
+///
+/// **The input that separates the two implementations** is one where every strip is internally
+/// uniform and the strips differ from each other — all lanes hold 1 in strip 0 and 2 in strip 1.
+/// A folded vote says `true` for that, and it is false.
+///
+/// # Errors
+///
+/// [`LaneError`] if the module cannot be built.
+pub fn subgroup_agrees_wide<const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    use simdr::lanes::U32;
+
+    let mut kernel = Kernel::<U32>::new(shape(subgroup))?;
+    let value = kernel.load::<LANES>(0)?;
+
+    let zero = kernel.module().constant_u32(0)?;
+    let one = kernel.module().constant_u32(1)?;
+    let slot = kernel.local_index();
+    let out = kernel.element_pointer_to(1, slot)?;
+    kernel.module().store(out, zero)?;
+
+    let agreed = kernel.lanes()?.all_equal_uniform(value)?;
+    kernel
+        .lanes()?
+        .if_uniform(agreed, |lanes| Ok(lanes.module().store(out, one)?))?;
+
+    kernel.finish()
+}
+
+/// `out[i] = 1` where `in[i]` equals `wanted`, else `0` — the elementwise comparison.
+///
+/// `Lanes::equal` is the comparison a `Simd` layer is asked for first and this library had none.
+/// Run rather than counted, because an opcode-counting test passes just as well for
+/// `OpINotEqual`.
+///
+/// # Errors
+///
+/// [`LaneError`] if the module cannot be built.
+fn equals_at<const LANES: u32>(subgroup: u32, wanted: u32) -> Result<Vec<u32>, LaneError> {
+    use simdr::lanes::U32;
+
+    let mut kernel = Kernel::<U32>::new(shape(subgroup))?;
+    let value = kernel.load::<LANES>(0)?;
+    let flag = {
+        let mut lanes = kernel.lanes()?;
+        let target = lanes.splat_bits::<U32, LANES>(wanted)?;
+        let same = lanes.equal(value, target)?;
+        let yes = lanes.splat_bits::<U32, LANES>(1)?;
+        let no = lanes.splat_bits::<U32, LANES>(0)?;
+        lanes.select(same, yes, no)?
+    };
+    kernel.store(1, flag)?;
+    kernel.finish()
+}
+
+/// `equals_at` over a vector as wide as this device's subgroup.
+///
+/// # Errors
+///
+/// [`LaneError`] if the module cannot be built, or the width is not one the dispatcher lists.
+pub fn equals(subgroup: u32, wanted: u32) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup!(subgroup, equals_at, wanted)
+}
+
 /// `subgroup_agrees_at` over a vector as wide as this device's subgroup.
 ///
 /// # Errors

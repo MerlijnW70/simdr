@@ -409,6 +409,19 @@ fn the_atomic_kernels_are_valid_at_every_width() {
             "subgroup_agrees",
             width,
         );
+        // Its strip-mined form, which is two group instructions and a comparison rather than one
+        // instruction — and the elementwise equality that made it buildable.
+        valid_at(
+            kernels::unrun::subgroup_agrees_wide::<64>(width),
+            "subgroup_agrees_wide-64",
+            width,
+        );
+        valid_at(
+            kernels::unrun::subgroup_agrees_wide::<128>(width),
+            "subgroup_agrees_wide-128",
+            width,
+        );
+        valid_at(kernels::unrun::equals(width, 3), "equals", width);
     }
 }
 

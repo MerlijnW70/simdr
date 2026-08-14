@@ -45,6 +45,7 @@ impl Element for I8 {
     const ADD: u16 = op::I_ADD;
     const MUL: u16 = op::I_MUL;
     const GREATER_THAN: u16 = op::S_GREATER_THAN;
+    const EQUAL: u16 = op::I_EQUAL;
     const GROUP_ADD: u16 = op::GROUP_NON_UNIFORM_I_ADD;
     const GROUP_MAX: u16 = op::GROUP_NON_UNIFORM_S_MAX;
     const GROUP_MIN: u16 = op::GROUP_NON_UNIFORM_S_MIN;
@@ -84,6 +85,7 @@ impl Element for U8 {
     const ADD: u16 = op::I_ADD;
     const MUL: u16 = op::I_MUL;
     const GREATER_THAN: u16 = op::U_GREATER_THAN;
+    const EQUAL: u16 = op::I_EQUAL;
     const GROUP_ADD: u16 = op::GROUP_NON_UNIFORM_I_ADD;
     const GROUP_MAX: u16 = op::GROUP_NON_UNIFORM_U_MAX;
     const GROUP_MIN: u16 = op::GROUP_NON_UNIFORM_U_MIN;
@@ -120,6 +122,7 @@ impl Element for I16 {
     const ADD: u16 = op::I_ADD;
     const MUL: u16 = op::I_MUL;
     const GREATER_THAN: u16 = op::S_GREATER_THAN;
+    const EQUAL: u16 = op::I_EQUAL;
     const GROUP_ADD: u16 = op::GROUP_NON_UNIFORM_I_ADD;
     const GROUP_MAX: u16 = op::GROUP_NON_UNIFORM_S_MAX;
     const GROUP_MIN: u16 = op::GROUP_NON_UNIFORM_S_MIN;
@@ -157,6 +160,7 @@ impl Element for U16 {
     const ADD: u16 = op::I_ADD;
     const MUL: u16 = op::I_MUL;
     const GREATER_THAN: u16 = op::U_GREATER_THAN;
+    const EQUAL: u16 = op::I_EQUAL;
     const GROUP_ADD: u16 = op::GROUP_NON_UNIFORM_I_ADD;
     const GROUP_MAX: u16 = op::GROUP_NON_UNIFORM_U_MAX;
     const GROUP_MIN: u16 = op::GROUP_NON_UNIFORM_U_MIN;
@@ -194,6 +198,7 @@ impl Element for F16 {
     const ADD: u16 = op::F_ADD;
     const MUL: u16 = op::F_MUL;
     const GREATER_THAN: u16 = op::F_ORD_GREATER_THAN;
+    const EQUAL: u16 = op::F_ORD_EQUAL;
     const GROUP_ADD: u16 = op::GROUP_NON_UNIFORM_F_ADD;
     const GROUP_MAX: u16 = op::GROUP_NON_UNIFORM_F_MAX;
     const GROUP_MIN: u16 = op::GROUP_NON_UNIFORM_F_MIN;

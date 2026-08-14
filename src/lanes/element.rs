@@ -30,6 +30,14 @@ pub trait Element: Copy + core::fmt::Debug + 'static {
     const MUL: u16;
     /// Elementwise `>`, yielding a boolean.
     const GREATER_THAN: u16;
+    /// Elementwise `==`, yielding a boolean.
+    ///
+    /// **The one comparison where the two integer families agree.** `GREATER_THAN` is `OpSGreaterThan`
+    /// for the signed types and `OpUGreaterThan` for the unsigned ones, and they disagree above
+    /// 2³¹; equality is `OpIEqual` for both, because two bit patterns are equal or they are not and
+    /// no interpretation of the sign bit changes that. The floats keep their own instruction — an
+    /// *ordered* one, so a NaN equals nothing, itself included.
+    const EQUAL: u16;
 
     /// Add across a group.
     const GROUP_ADD: u16;
@@ -118,6 +126,7 @@ impl Element for F32 {
     const ADD: u16 = op::F_ADD;
     const MUL: u16 = op::F_MUL;
     const GREATER_THAN: u16 = op::F_ORD_GREATER_THAN;
+    const EQUAL: u16 = op::F_ORD_EQUAL;
     const GROUP_ADD: u16 = op::GROUP_NON_UNIFORM_F_ADD;
     const GROUP_MAX: u16 = op::GROUP_NON_UNIFORM_F_MAX;
     const GROUP_MIN: u16 = op::GROUP_NON_UNIFORM_F_MIN;
@@ -146,6 +155,7 @@ impl Element for I32 {
     const ADD: u16 = op::I_ADD;
     const MUL: u16 = op::I_MUL;
     const GREATER_THAN: u16 = op::S_GREATER_THAN;
+    const EQUAL: u16 = op::I_EQUAL;
     const GROUP_ADD: u16 = op::GROUP_NON_UNIFORM_I_ADD;
     const GROUP_MAX: u16 = op::GROUP_NON_UNIFORM_S_MAX;
     const GROUP_MIN: u16 = op::GROUP_NON_UNIFORM_S_MIN;
@@ -178,6 +188,7 @@ impl Element for U32 {
     const ADD: u16 = op::I_ADD;
     const MUL: u16 = op::I_MUL;
     const GREATER_THAN: u16 = op::U_GREATER_THAN;
+    const EQUAL: u16 = op::I_EQUAL;
     const GROUP_ADD: u16 = op::GROUP_NON_UNIFORM_I_ADD;
     const GROUP_MAX: u16 = op::GROUP_NON_UNIFORM_U_MAX;
     const GROUP_MIN: u16 = op::GROUP_NON_UNIFORM_U_MIN;

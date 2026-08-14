@@ -148,6 +148,12 @@ pub const U_LESS_THAN: u16 = 176;
 pub const S_GREATER_THAN: u16 = 173;
 /// `OpFOrdGreaterThan` — ordered floating-point comparison, yielding a bool.
 pub const F_ORD_GREATER_THAN: u16 = 186;
+/// `OpFOrdEqual` — ordered floating-point equality: false if either operand is NaN.
+///
+/// 180, and not the 170 the integer form uses nor the 186 beside it — read out of `spirv-as` the
+/// way `decisions/DR-0001` says to, because the comparisons are *not* consecutive in the grammar
+/// and a number remembered from the neighbourhood would have assembled into something else.
+pub const F_ORD_EQUAL: u16 = 180;
 /// `OpGroupNonUniformElect` — true in exactly one lane of the group.
 pub const GROUP_NON_UNIFORM_ELECT: u16 = 333;
 /// `OpGroupNonUniformAll` — true when the predicate holds in every active lane.

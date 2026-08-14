@@ -983,15 +983,25 @@ used votes — right on every device here because no implementation offers one w
 
 ### What it leaves open
 
-**9. `Lanes` has no elementwise equality.** `greater_than` is the only comparison, and `simd_eq` is
-the one a `Simd` API is asked for first. It is also what a **strip-mined `all_equal`** needs: one
-vote per strip says each strip is uniform, not that the strips agree with each other, so that
-mapping is refused by name rather than folded — the only lane operation whose strip case is refused
-for want of another operation rather than for want of an instruction.
+**9. `Lanes` had no elementwise equality — done, and the strip-mined vote came with it.**
+`greater_than` was the only comparison, and `simd_eq` is the one a `Simd` API is asked for first.
 
-`Element` would gain an `EQUAL` opcode — `OpFOrdEqual` for the floats, `OpIEqual` for every integer
-signed or not, which is one of the few places where the signed and unsigned paths genuinely share
-an instruction and a test would have to say so.
+`Element::EQUAL` is `OpFOrdEqual` for the floats and `OpIEqual` for **every** integer, signed or
+not — the one place in that trait where the two integer families share an instruction, because two
+bit patterns are equal or they are not and no reading of the sign bit changes it. A test says so
+against `greater_than`, which is three instructions across the same three types.
+
+`OpFOrdEqual` is **180**, and the comparisons are not consecutive in the grammar: `OpIEqual` is 170
+and `OpFOrdGreaterThan` is 186. The number came out of `spirv-as`, the way DR-0001 says to, and a
+number remembered from the neighbourhood would have assembled into something else.
+
+**And the strip-mined `all_equal` is built on it.** It is two questions rather than one folded vote:
+every lane holds the same strip 0 (one `AllEqual`), *and* in every lane the other strips equal strip
+0 (`strips - 1` comparisons folded with `and`, then one `All`). Neither says it alone.
+
+The device test is the one the old refusal existed for: two strips, each internally uniform, holding
+different values. A folded vote answers 1 and the answer is 0. Checked by breaking it — dropping the
+second question makes exactly that case fail, and nothing else.
 
 **10. Twelve more functions are used only inside the emitter**, their own tests included. That is a
 weaker finding than the four above and not nothing: a unit test written beside the function it

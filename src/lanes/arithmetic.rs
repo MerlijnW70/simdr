@@ -51,20 +51,30 @@ impl Lanes<'_> {
         left: Vector<T, LANES>,
         right: Vector<T, LANES>,
     ) -> Result<Predicate<LANES>, LaneError> {
-        let boolean = self.module().type_bool()?;
-        let mut ids = Vec::with_capacity(left.strip_count());
+        self.compare(T::GREATER_THAN, left, right)
+    }
 
-        for (&a, &b) in left.strips().iter().zip(right.strips()) {
-            ids.push(self.module().binary(T::GREATER_THAN, boolean, a, b)?);
-        }
-
-        // `ids` came from a vector's own strips, so it is already between one and `MAX_STRIPS`.
-        Strips::new(&ids)
-            .map(|strips| Predicate { strips })
-            .ok_or(LaneError::TooManyStrips {
-                strips: ids.len(),
-                limit: super::MAX_STRIPS,
-            })
+    /// `a == b`, elementwise, yielding a boolean per element — `Simd::simd_eq`.
+    ///
+    /// **Ordered for floats, which is the whole of what the word "ordered" buys**: a NaN is equal
+    /// to nothing, itself included, so `equal(x, x)` is a NaN test written backwards. The integers
+    /// have no such case and both families share one instruction — see [`Element::EQUAL`], which
+    /// is the only place in this trait where the signed and unsigned paths do.
+    ///
+    /// Added because the lane API had `greater_than` and no equality at all, which is the
+    /// comparison a `Simd` layer is asked for first — and because a strip-mined
+    /// [`Lanes::all_equal`] cannot be built without one: one vote per strip says each strip is
+    /// uniform, and saying the strips agree with *each other* is exactly this.
+    ///
+    /// # Errors
+    ///
+    /// [`LaneError`] if the instructions cannot be emitted.
+    pub fn equal<T: Element, const LANES: u32>(
+        &mut self,
+        left: Vector<T, LANES>,
+        right: Vector<T, LANES>,
+    ) -> Result<Predicate<LANES>, LaneError> {
+        self.compare(T::EQUAL, left, right)
     }
 
     /// Pick `when_true` or `when_false` per element, according to `predicate`.
@@ -94,6 +104,33 @@ impl Lanes<'_> {
         }
 
         self.from_strips(&ids)
+    }
+
+    /// Any comparison, strip by strip: the same shape as [`Lanes::zip`] with a boolean result.
+    ///
+    /// One function rather than one per comparison, for the reason `Module::binary` takes an
+    /// opcode: what differs between `>` and `==` is a number the [`Element`] holds, and writing the
+    /// loop twice would be two places for the result type to stop being `bool`.
+    fn compare<T: Element, const LANES: u32>(
+        &mut self,
+        opcode: u16,
+        left: Vector<T, LANES>,
+        right: Vector<T, LANES>,
+    ) -> Result<Predicate<LANES>, LaneError> {
+        let boolean = self.module().type_bool()?;
+        let mut ids = Vec::with_capacity(left.strip_count());
+
+        for (&a, &b) in left.strips().iter().zip(right.strips()) {
+            ids.push(self.module().binary(opcode, boolean, a, b)?);
+        }
+
+        // `ids` came from a vector's own strips, so it is already between one and `MAX_STRIPS`.
+        Strips::new(&ids)
+            .map(|strips| Predicate { strips })
+            .ok_or(LaneError::TooManyStrips {
+                strips: ids.len(),
+                limit: super::MAX_STRIPS,
+            })
     }
 
     /// Apply a two-operand instruction strip by strip.
@@ -160,6 +197,60 @@ mod tests {
         lanes.add(value, value).expect("added");
 
         count(&module.finish(), op::F_ADD)
+    }
+
+    #[test]
+    fn equality_is_one_instruction_for_both_integer_families_and_its_own_for_floats() {
+        // The claim `Element::EQUAL` makes, checked. `greater_than` is three instructions across
+        // the three types because `OpSGreaterThan` and `OpUGreaterThan` disagree above 2³¹;
+        // equality is two, because two bit patterns are equal or they are not.
+        let emitted = |compare: fn(&mut Lanes<'_>) -> ()| {
+            let mut module = Module::new(Version::V1_3);
+            let mut lanes = Lanes::new(&mut module, 32).expect("built");
+            compare(&mut lanes);
+            let words = module.finish();
+            (
+                count(&words, op::I_EQUAL),
+                count(&words, op::F_ORD_EQUAL),
+                count(&words, op::S_GREATER_THAN),
+                count(&words, op::U_GREATER_THAN),
+            )
+        };
+
+        let signed = emitted(|lanes| {
+            let value = lanes.splat_bits::<I32, 32>(7).expect("splat");
+            lanes.equal(value, value).expect("compared");
+        });
+        let unsigned = emitted(|lanes| {
+            let value = lanes.splat_bits::<U32, 32>(7).expect("splat");
+            lanes.equal(value, value).expect("compared");
+        });
+        let float = emitted(|lanes| {
+            let value = lanes
+                .splat_bits::<F32, 32>(1.0_f32.to_bits())
+                .expect("splat");
+            lanes.equal(value, value).expect("compared");
+        });
+
+        assert_eq!(signed, (1, 0, 0, 0), "the signed integers use OpIEqual");
+        assert_eq!(unsigned, (1, 0, 0, 0), "and so do the unsigned ones");
+        assert_eq!(float, (0, 1, 0, 0), "the floats keep an ordered comparison");
+    }
+
+    #[test]
+    fn a_strip_mined_equality_compares_every_strip() {
+        // One instruction per strip, the same as every other elementwise operation — and a
+        // `Predicate` with a boolean per element rather than per lane.
+        let mut module = Module::new(Version::V1_3);
+        let mut lanes = Lanes::new(&mut module, 32).expect("built");
+        let wide = lanes
+            .splat_bits::<F32, 128>(1.0_f32.to_bits())
+            .expect("splat");
+
+        let same = lanes.equal(wide, wide).expect("compared");
+
+        assert_eq!(same.strips().len(), 4);
+        assert_eq!(count(&module.finish(), op::F_ORD_EQUAL), 4);
     }
 
     #[test]

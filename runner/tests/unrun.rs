@@ -387,3 +387,111 @@ fn a_vote_on_a_value_tells_an_agreeing_subgroup_from_a_divergent_one() {
         "the vote answered for the dispatch rather than for each subgroup"
     );
 }
+
+#[test]
+fn an_elementwise_equality_answers_per_element_and_not_per_lane() {
+    // The comparison the lane API had no spelling for. Run rather than counted: `OpIEqual` and
+    // `OpINotEqual` are adjacent numbers, and an opcode-counting test passes for either.
+    let Some(gpu) = device("equals") else {
+        return;
+    };
+    let limits = gpu.limits().clone();
+
+    let count = WORKGROUP_SIZE as usize;
+    let input: Vec<u32> = (0..count as u32).map(|index| index % 4).collect();
+
+    for wanted in [0_u32, 3, 9] {
+        let output = gpu
+            .run_u32(
+                &kernels::equals(limits.subgroup_size, wanted).expect("built"),
+                &input,
+                1,
+            )
+            .expect("dispatched");
+
+        let expected: Vec<u32> = input
+            .iter()
+            .map(|value| u32::from(*value == wanted))
+            .collect();
+        assert_eq!(output, expected, "comparing against {wanted}");
+    }
+}
+
+#[test]
+fn a_strip_mined_vote_on_a_value_sees_strips_that_differ_from_each_other() {
+    // **The input the refusal existed for.** Two strips, each internally uniform, holding
+    // different values: every `AllEqual` says true, and the vector is not all equal. A folded
+    // vote answers 1 here; the built one asks the second question — does every strip equal strip 0
+    // in my lane — and answers 0.
+    //
+    // The kernel loads `Simd<u32, 2 × width>`, so lane `l` holds elements `l` and `l + width`.
+    let Some(gpu) = device("all-equal-wide") else {
+        return;
+    };
+    let limits = gpu.limits().clone();
+    if !limits.subgroup_vote {
+        eprintln!("SKIPPED all-equal-wide: no subgroup vote");
+        return;
+    }
+
+    let width = limits.subgroup_size as usize;
+    let count = WORKGROUP_SIZE as usize;
+    // Two strips per lane over one workgroup: the buffer is twice the invocation count, laid out
+    // strip after strip, which is the order `Kernel::load` reads.
+    let elements = count * 2;
+
+    let spirv = match limits.subgroup_size {
+        4 => kernels::subgroup_agrees_wide::<8>(4),
+        8 => kernels::subgroup_agrees_wide::<16>(8),
+        16 => kernels::subgroup_agrees_wide::<32>(16),
+        32 => kernels::subgroup_agrees_wide::<64>(32),
+        64 => kernels::subgroup_agrees_wide::<128>(64),
+        other => {
+            eprintln!("SKIPPED all-equal-wide: no lane count listed for a width of {other}");
+            return;
+        }
+    }
+    .expect("built");
+
+    // Everything the same: both halves of the question say yes.
+    // The buffer is twice the invocation count and the kernel writes one slot each, so only the
+    // first `count` slots are answers — the rest is the input buffer's own length showing through.
+    let answers = |input: &[u32]| {
+        gpu.run_u32(&spirv, input, 1)
+            .expect("dispatched")
+            .get(..count)
+            .map(<[u32]>::to_vec)
+            .expect("one answer per invocation")
+    };
+
+    let agreeing = vec![7_u32; elements];
+    assert_eq!(
+        answers(&agreeing),
+        vec![1; count],
+        "a vector of one value everywhere is all equal"
+    );
+
+    // Each strip uniform, the strips different. Strip 0 is the first `WORKGROUP_SIZE` elements.
+    let mut split = vec![1_u32; elements];
+    for slot in split.iter_mut().skip(count) {
+        *slot = 2;
+    }
+    assert_eq!(
+        answers(&split),
+        vec![0; count],
+        "every lane agrees within each strip and the strips differ — a folded vote says otherwise"
+    );
+
+    // And one lane of the first subgroup differing in strip 1 only, which the first question
+    // cannot see either.
+    let mut odd = vec![5_u32; elements];
+    if let Some(slot) = odd.get_mut(count + 1) {
+        *slot = 6;
+    }
+    let expected: Vec<u32> = (0..count).map(|lane| u32::from(lane >= width)).collect();
+    assert_eq!(
+        answers(&odd),
+        expected,
+        "one element of one lane's second strip differs, in the first subgroup only"
+    );
+}

@@ -61,41 +61,35 @@ impl Lanes<'_> {
     /// # Errors
     ///
     /// [`LaneError::NoSuchForm`] for a clustered mapping, where the vote would answer for every
-    /// vector sharing the subgroup, and for a strip-mined one — see below. Otherwise
-    /// [`LaneError::Build`].
+    /// vector sharing the subgroup. Otherwise [`LaneError::Build`].
     ///
-    /// # Why a strip-mined vector is refused rather than folded
+    /// # A strip-mined vector is two questions, not one folded vote
     ///
     /// `any` and `all` fold their strips with a logical or and and, and that is exactly right
     /// because each strip's vote is already the whole answer *for that strip*. Agreement is not
     /// like that: four strips each internally uniform can still hold four different values, and
-    /// the instruction never compares one strip against another. Folding would return `true` for
-    /// a vector whose elements are not all equal, which is a wrong answer rather than a missing
-    /// one.
+    /// `OpGroupNonUniformAllEqual` never compares one strip against another. Folding would return
+    /// `true` for a vector whose elements differ — a wrong answer rather than a missing one, which
+    /// is why this refused the mapping by name until there was something better to do.
     ///
-    /// Doing it properly needs an elementwise equality — comparing strip against strip within a
-    /// lane — and the lane API has no `equal` yet. Refused by name until it does.
+    /// What it takes is both halves:
+    ///
+    /// * every lane holds the same **strip 0** — one `AllEqual`, and
+    /// * in every lane, every other strip equals strip 0 — `strips - 1` elementwise comparisons
+    ///   folded with `and`, then one `All` over the subgroup.
+    ///
+    /// Together those say every element of the vector is the same value, and neither says it
+    /// alone. The second is what [`Lanes::equal`] was added for.
     pub fn all_equal<T: Element, const LANES: u32>(
         &mut self,
         vector: Vector<T, LANES>,
     ) -> Result<Id, LaneError> {
-        match self.mapping::<LANES>()? {
-            Mapping::WholeSubgroup => {}
-            Mapping::Clusters { .. } => {
-                return Err(LaneError::NoSuchForm {
-                    operation: "all_equal",
-                    because: "SPIR-V's votes have no clustered form, so the answer would cover \
-                              every vector sharing the subgroup rather than this one",
-                });
-            }
-            Mapping::Strips { .. } => {
-                return Err(LaneError::NoSuchForm {
-                    operation: "all_equal",
-                    because: "one vote per strip says each strip is uniform, not that the strips \
-                              agree with each other — and combining them needs an elementwise \
-                              equality this API does not have",
-                });
-            }
+        if let Mapping::Clusters { .. } = self.mapping::<LANES>()? {
+            return Err(LaneError::NoSuchForm {
+                operation: "all_equal",
+                because: "SPIR-V's votes have no clustered form, so the answer would cover \
+                          every vector sharing the subgroup rather than this one",
+            });
         }
 
         let boolean = self.module().type_bool()?;
@@ -105,12 +99,28 @@ impl Lanes<'_> {
         self.module()
             .require_capability(Capability::GroupNonUniformVote)?;
 
-        let first = vector
-            .strips()
-            .first()
-            .copied()
-            .ok_or(LaneError::no_strips())?;
-        Ok(self.module().subgroup_all_equal(boolean, scope, first)?)
+        let strips = vector.strips().to_vec();
+        let first = strips.first().copied().ok_or(LaneError::no_strips())?;
+        let lanes_agree = self.module().subgroup_all_equal(boolean, scope, first)?;
+
+        // Every strip against strip 0, within the lane. Nothing to ask when there is one strip,
+        // and that is the whole-subgroup case: one instruction, exactly as before.
+        let mut same_here: Option<Id> = None;
+        for &strip in strips.iter().skip(1) {
+            let matched = self.module().binary(T::EQUAL, boolean, strip, first)?;
+            same_here = Some(match same_here {
+                None => matched,
+                Some(previous) => self.module().logical_and(boolean, previous, matched)?,
+            });
+        }
+
+        let Some(same_here) = same_here else {
+            return Ok(lanes_agree);
+        };
+        let strips_agree = self.module().subgroup_all(boolean, scope, same_here)?;
+        Ok(self
+            .module()
+            .logical_and(boolean, lanes_agree, strips_agree)?)
     }
 
     /// The predicate's first strip gathered into a bitmask, one bit per lane.
@@ -274,11 +284,61 @@ mod tests {
     }
 
     #[test]
-    fn a_vote_on_a_value_refuses_both_mappings_it_would_answer_wrongly_for() {
+    fn a_strip_mined_vote_on_a_value_asks_both_halves_of_the_question() {
+        // Four strips: one `AllEqual` for "every lane holds the same strip 0", three comparisons
+        // folded with `and` for "every strip equals strip 0 in my lane", and one `All` to put that
+        // to the subgroup. A version that folded four `AllEqual`s would emit four of them and no
+        // comparison at all — and would answer `true` for a vector whose strips differ.
+        let mut module = Module::new(Version::V1_3);
+        let mut lanes = Lanes::new(&mut module, 32).expect("built");
+        let wide = lanes
+            .splat_bits::<F32, 128>(1.0_f32.to_bits())
+            .expect("splat");
+
+        lanes.all_equal(wide).expect("voted");
+
+        let words = module.finish();
+        assert_eq!(
+            count(&words, op::GROUP_NON_UNIFORM_ALL_EQUAL),
+            1,
+            "the lanes are asked about one strip, not about each"
+        );
+        assert_eq!(
+            count(&words, op::F_ORD_EQUAL),
+            3,
+            "every strip against the first"
+        );
+        assert_eq!(count(&words, op::GROUP_NON_UNIFORM_ALL), 1);
+        assert_eq!(
+            count(&words, op::LOGICAL_AND),
+            3,
+            "two folding the comparisons, one joining the two halves"
+        );
+    }
+
+    #[test]
+    fn a_whole_subgroup_vote_on_a_value_stays_one_instruction() {
+        // The strip-mined form is built out of the same call, so this is what says the extra
+        // machinery costs nothing where there is nothing to ask.
+        let mut module = Module::new(Version::V1_3);
+        let mut lanes = Lanes::new(&mut module, 32).expect("built");
+        let value = lanes
+            .splat_bits::<F32, 32>(1.0_f32.to_bits())
+            .expect("splat");
+
+        lanes.all_equal(value).expect("voted");
+
+        let words = module.finish();
+        assert_eq!(count(&words, op::GROUP_NON_UNIFORM_ALL_EQUAL), 1);
+        assert_eq!(count(&words, op::F_ORD_EQUAL), 0);
+        assert_eq!(count(&words, op::GROUP_NON_UNIFORM_ALL), 0);
+        assert_eq!(count(&words, op::LOGICAL_AND), 0);
+    }
+
+    #[test]
+    fn a_vote_on_a_value_refuses_the_one_mapping_it_would_answer_wrongly_for() {
         // Clusters, for the reason every vote refuses them: the answer would cover all four
-        // vectors. And **strips**, which `any` and `all` do fold — because folding says each strip
-        // is uniform and not that the strips agree with each other, which is a wrong answer rather
-        // than a missing one.
+        // vectors sharing the subgroup rather than this one.
         let mut module = Module::new(Version::V1_3);
         let mut lanes = Lanes::new(&mut module, 32).expect("built");
         let narrow = lanes.splat_bits::<F32, 8>(0).expect("splat");
@@ -291,18 +351,10 @@ mod tests {
                 ..
             })
         ));
-        assert!(matches!(
-            lanes.all_equal(wide).err(),
-            Some(LaneError::NoSuchForm {
-                operation: "all_equal",
-                ..
-            })
-        ));
 
-        // And `all` still folds its strips, so this is a difference between the two votes rather
-        // than a rule about strip-mining.
-        let mask = predicate::<128>(&mut lanes);
-        assert!(lanes.all(mask).is_ok());
+        // The strip-mined one is *built* now, and the two halves above are why it took an
+        // elementwise equality to build it.
+        assert!(lanes.all_equal(wide).is_ok());
     }
 
     #[test]
