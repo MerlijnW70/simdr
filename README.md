@@ -85,19 +85,23 @@ choice of *shape*. `decisions/DR-0005` records the experiment; DR-0002 carries t
 | `N` vs width | mapping | a reduction | a scan | a shuffle |
 | --- | --- | --- | --- | --- |
 | equal | `WholeSubgroup` | one subgroup instruction | one subgroup instruction | one instruction |
-| a divisor | `Clusters` | one clustered instruction, several vectors at once | a `log2(N)`-step ladder | a butterfly or a broadcast, inside the vector |
+| a divisor | `Clusters` | one clustered instruction, several vectors at once | a `log2(N)`-step ladder | a butterfly, a broadcast or a rotate, inside the vector |
 | a multiple | `Strips` | `strips - 1` scalar ops, then one subgroup instruction | one scan per strip, carrying a running total | one instruction per strip |
 
 Anything else — 12 lanes on a 32-wide subgroup — has no mapping and is refused by name.
 
-**The clustered row's last column was empty until it was read rather than trusted.** All four
-shuffles refused a vector narrower than the subgroup, on the grounds that its lanes are shared with
-other vectors. That is true of the two *shifts* and false of the other two: a butterfly with
-`mask < N` cannot leave an aligned run of `N` lanes, and a broadcast reads
-`(lane & !(N - 1)) + source`, which `OpGroupNonUniformShuffle` will take because its id may differ
-per invocation. So the mapping that exists to run four small vectors at once can now swizzle them,
-and `kernels::butterfly_cluster_sum` — four independent trees, checked against the one
-`ClusteredReduce` that computes the same thing — is what that buys.
+**The clustered row's last column was empty until it was read rather than trusted.** Every shuffle
+refused a vector narrower than the subgroup, on the grounds that its lanes are shared with other
+vectors. That is true of the two *shifts* and false of the rest: a butterfly with `mask < N` cannot
+leave an aligned run of `N` lanes; a broadcast reads `(lane & !(N - 1)) + source`, which
+`OpGroupNonUniformShuffle` takes because its id may differ per invocation; and a **rotate** wraps
+inside the vector, so no lane reads outside it at all. `kernels::butterfly_cluster_sum` — four
+independent trees, checked against the one `ClusteredReduce` computing the same thing — is what that
+buys.
+
+The shifts stay refused there, and that is a decision rather than a hole: an edge can be called
+undefined, which promises less than the hardware does, or masked to something, which invents a
+semantics SPIR-V does not have. The operation a caller wants at an edge is the one that has none.
 
 **All three scan, and the clustered one is the expensive row.** SPIR-V has a `ClusteredReduce` and
 no clustered scan, so `Lanes::prefix_sum` builds a Hillis-Steele ladder instead: `log2(N)` steps of

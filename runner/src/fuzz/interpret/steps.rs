@@ -144,6 +144,20 @@ pub(super) fn apply(program: &Program, held: &[Vec<u32>], step: Op) -> Vec<Vec<u
                 })
                 .collect()
         }
+        Op::RotateUp(delta) => {
+            // Inside the *vector*, which is `min(lanes, width)` invocations — a clustered vector
+            // rotates within its own cluster and a subgroup-wide one within the subgroup. The
+            // wrap is what a shift does not have, and it is the whole of what this checks.
+            let size = (program.lanes.min(program.subgroup) as usize).max(1);
+            let delta = delta as usize % size;
+            (0..held.len())
+                .map(|invocation| {
+                    let base = invocation / size * size;
+                    let within = (invocation + size - delta) % size;
+                    held.get(base + within).cloned().unwrap_or_default()
+                })
+                .collect()
+        }
         Op::ButterflyAdd(mask) => held
             .iter()
             .enumerate()

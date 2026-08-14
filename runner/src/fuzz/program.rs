@@ -52,6 +52,13 @@ pub enum Op {
         /// The upper bound, never below `low`.
         high: u32,
     },
+    /// Replace each element by the one `delta` lanes below, **wrapping inside the vector**.
+    ///
+    /// The one shuffle here that can be generated with a real distance. [`Op::ShiftUp`] is drawn
+    /// with a delta of zero and nothing else, because SPIR-V leaves its bottom lanes undefined and
+    /// a reference cannot predict undefined — a rotate has no such lane, so every delta is fair
+    /// game and the reference knows exactly where each element came from.
+    RotateUp(u32),
     /// Replace every element equal to `to` with `then`, and leave the rest alone.
     ///
     /// The elementwise **equality**, which the lane API had no spelling for until the audit above

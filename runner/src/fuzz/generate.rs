@@ -8,7 +8,7 @@ mod vocabulary;
 #[cfg(test)]
 mod coverage;
 
-use self::vocabulary::{ELEMENTWISE, EVERYTHING, Kind, fill};
+use self::vocabulary::{CLUSTERED, Kind, STRIPPED, WHOLE, fill};
 use super::domain::Domain;
 use super::program::{Finish, Program};
 
@@ -54,8 +54,19 @@ pub fn generate(rng: &mut Rng, domain: Domain, subgroup: u32, workgroup: u32) ->
     let steps_wanted = 1 + rng.below(4) as usize;
 
     // Which operations are legal depends on the mapping, and the generator respects that rather
-    // than leaning on `build` to refuse: a run made mostly of refusals tests very little. Votes
-    // and shuffles both need a vector at least as wide as the subgroup.
+    // than leaning on `build` to refuse: a run made mostly of refusals tests very little. Votes and
+    // shuffles need a vector at least as wide as the subgroup; the rotate needs one that is exactly
+    // as wide or narrower, because over strips it would move elements between them.
+    //
+    // **Three pools rather than two**, since the rotate arrived: the mapping is a three-way choice
+    // and it used to be asked as a yes-or-no. `lanes == subgroup` was the case that had no name.
+    let pool = if lanes < subgroup {
+        CLUSTERED
+    } else if lanes == subgroup {
+        WHOLE
+    } else {
+        STRIPPED
+    };
     let clustered = lanes < subgroup;
     let mut steps = Vec::with_capacity(steps_wanted);
 
@@ -63,7 +74,6 @@ pub fn generate(rng: &mut Rng, domain: Domain, subgroup: u32, workgroup: u32) ->
     // — four blocks and two phis — and the short one leaves the sums well inside the float
     // domain's exact range, which is what lets the comparison be exact at all.
     for _ in 0..steps_wanted {
-        let pool = if clustered { ELEMENTWISE } else { EVERYTHING };
         let kind = pool
             .get(rng.below(pool.len() as u64) as usize)
             .copied()

@@ -45,6 +45,7 @@ fn the_generator_reaches_every_operation_it_knows() {
                 Op::AddIfAnyAbove { .. } => "branch",
                 Op::AddIfAllEqual { .. } => "agree",
                 Op::SelectEqual { .. } => "equal",
+                Op::RotateUp(_) => "rotate",
                 Op::ShiftUp(_) => "shift",
             };
             if !seen.contains(&name) {
@@ -70,6 +71,7 @@ fn the_generator_reaches_every_operation_it_knows() {
             "mul",
             "repeat",
             "rolled",
+            "rotate",
             "shift",
         ],
         "the generator never produced some of its own vocabulary in 512 seeds"

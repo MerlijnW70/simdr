@@ -32,11 +32,16 @@ pub(super) enum Kind {
     AddIfAnyAbove,
     AddIfAllEqual,
     SelectEqual,
+    RotateUp,
     ShiftUp,
 }
 
-/// Legal under every mapping: nothing here reads another lane.
-pub(super) const ELEMENTWISE: &[Kind] = &[
+/// What a vector **narrower** than the subgroup may do.
+///
+/// Elementwise work, which crosses no lane at all, plus the rotate — which crosses lanes and stays
+/// inside the cluster while doing it, so a `Simd<f32, 8>` rotates its own eight elements and reads
+/// none of the twenty-four beside them.
+pub(super) const CLUSTERED: &[Kind] = &[
     Kind::AddConstant,
     Kind::MulConstant,
     Kind::ClampBelow,
@@ -47,14 +52,39 @@ pub(super) const ELEMENTWISE: &[Kind] = &[
     Kind::RolledAdd,
     Kind::RolledCounterAdd,
     Kind::SelectEqual,
+    Kind::RotateUp,
 ];
 
-/// The above, plus the four that need a vector at least as wide as the subgroup.
+/// What a vector **exactly the subgroup's width** may do: all of it.
 ///
 /// A shuffle or a vote on a vector that shares its lanes with three others is refused by the lane
 /// API, and the generator respects that rather than leaning on `build` to say no — a run made
 /// mostly of refusals tests very little.
-pub(super) const EVERYTHING: &[Kind] = &[
+pub(super) const WHOLE: &[Kind] = &[
+    Kind::AddConstant,
+    Kind::MulConstant,
+    Kind::ClampBelow,
+    Kind::MinConstant,
+    Kind::MaxConstant,
+    Kind::ClampBoth,
+    Kind::RepeatAdd,
+    Kind::RolledAdd,
+    Kind::RolledCounterAdd,
+    Kind::SelectEqual,
+    Kind::RotateUp,
+    Kind::ButterflyAdd,
+    Kind::AddIfAnyAbove,
+    Kind::AddIfAllEqual,
+    Kind::ShiftUp,
+];
+
+/// What a **strip-mined** vector may do: everything but the rotate.
+///
+/// A rotate over a vector wider than the subgroup moves elements *between* strips — a shuffle per
+/// strip plus a rotation of the strips themselves — and `Lanes::rotate_up` refuses it by name. The
+/// other three lane-crossing operations are fine: a shuffle applies per strip, and the votes fold
+/// their strips together.
+pub(super) const STRIPPED: &[Kind] = &[
     Kind::AddConstant,
     Kind::MulConstant,
     Kind::ClampBelow,
@@ -108,6 +138,10 @@ pub(super) fn fill(rng: &mut Rng, domain: Domain, subgroup: u32, kind: Kind) -> 
         Kind::AddIfAllEqual => Op::AddIfAllEqual {
             add: 1 + rng.below(8) as u32,
         },
+        // Any distance at all: a rotate wraps, so unlike `ShiftUp` below there is no undefined
+        // lane to steer around. The draw is deliberately wider than the smallest vector the
+        // generator makes, because the reduction modulo the width is part of what is under test.
+        Kind::RotateUp => Op::RotateUp(rng.below(u64::from(subgroup.max(1))) as u32),
         Kind::RepeatAdd => Op::RepeatAdd {
             times: rng.below(5) as u32,
             add: 1 + rng.below(8) as u32,
@@ -161,6 +195,76 @@ fn distances(subgroup: u32) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// Every operation this file knows, so the pools can be checked against a whole.
+    ///
+    /// Spelled out rather than derived: `Kind` has no iterator and adding one would be a second
+    /// list to keep true. What keeps *this* one honest is the test below — a `Kind` missing from it
+    /// is a `Kind` in no pool, and a `Kind` in no pool is an operation the generator can never
+    /// draw.
+    const EVERY_KIND: [Kind; 15] = [
+        Kind::AddConstant,
+        Kind::MulConstant,
+        Kind::ClampBelow,
+        Kind::MinConstant,
+        Kind::MaxConstant,
+        Kind::ClampBoth,
+        Kind::RepeatAdd,
+        Kind::RolledAdd,
+        Kind::RolledCounterAdd,
+        Kind::SelectEqual,
+        Kind::RotateUp,
+        Kind::ButterflyAdd,
+        Kind::AddIfAnyAbove,
+        Kind::AddIfAllEqual,
+        Kind::ShiftUp,
+    ];
+
+    #[test]
+    fn the_three_pools_are_a_mapping_apiece_and_agree_about_what_is_in_them() {
+        // Three lists with the same operations in most of them is a drift risk, and the drift would
+        // be silent: a `Kind` dropped from one pool means a program shape the fuzzer stops
+        // generating, which looks exactly like a fuzzer that keeps agreeing.
+        //
+        // So the relationships are asserted rather than maintained by hand. `WHOLE` is the whole
+        // vocabulary — a vector the subgroup's own width can do everything — and the other two are
+        // it minus what their mapping refuses.
+        for kind in EVERY_KIND {
+            assert!(
+                WHOLE.contains(&kind),
+                "{kind:?} is in no pool, so the generator can never draw it"
+            );
+        }
+        assert_eq!(WHOLE.len(), EVERY_KIND.len());
+
+        // A clustered vector shares its lanes with three others: no shuffle across the subgroup and
+        // no vote. The rotate stays, because it wraps inside the cluster.
+        for kind in CLUSTERED {
+            assert!(WHOLE.contains(kind));
+            assert!(
+                !matches!(
+                    kind,
+                    Kind::ButterflyAdd | Kind::ShiftUp | Kind::AddIfAnyAbove | Kind::AddIfAllEqual
+                ),
+                "{kind:?} answers for every vector sharing the subgroup"
+            );
+        }
+        assert!(CLUSTERED.contains(&Kind::RotateUp));
+
+        // A strip-mined vector may shuffle and vote, and may not rotate: that would move elements
+        // between strips.
+        for kind in STRIPPED {
+            assert!(WHOLE.contains(kind));
+        }
+        assert!(!STRIPPED.contains(&Kind::RotateUp));
+        assert!(STRIPPED.contains(&Kind::ButterflyAdd));
+        assert_eq!(
+            STRIPPED.len(),
+            WHOLE.len() - 1,
+            "the rotate, and nothing else"
+        );
+    }
     use super::distances;
 
     #[test]
