@@ -2529,3 +2529,17 @@ everywhere. Its two real cases — `+0.0` equals `-0.0`; a NaN equals nothing, a
 *integer* equal themselves — are now stated where no generated round has to reach them.
 
 **Re-run after the fixes: 32 of 32 killed, no survivors, over 968 lines.**
+
+### And the width sweep found one more, as it usually does
+
+Running the whole suite at width **4** after the vocabulary changed: `the_fuzzer_notices_when_the
+_answer_is_wrong` failed with `TooManyStrips { strips: 16, limit: 8 }`.
+
+Not a new bug — a latent one. The generator draws its lane count from a fixed list, and on a
+four-wide subgroup a vector of 64 is sixteen strips, which the emitter refuses by name. Every sweep
+in that file already treats a refusal as `Outcome::Refused`; this one test called `.expect("built")`
+and had only ever run where the seeds happened not to draw one.
+
+Adding two operations changed which programs the seeds produce, and the test met a refusal for the
+first time. **The fifth time a width sweep has found something the width did not cause** — it moves
+the dice, and what falls out was already there.

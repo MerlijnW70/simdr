@@ -517,7 +517,15 @@ fn the_fuzzer_notices_when_the_answer_is_wrong() {
                 *first = domain.encode(200);
             }
 
-            let spirv = program.build().expect("built");
+            // **A refused program is the next seed's turn, not a failure.** The generator draws a
+            // lane count from a fixed list, and on a four-wide subgroup a vector of 64 is sixteen
+            // strips — more than `MAX_STRIPS`, so the emitter refuses it by name. Every sweep in
+            // this file already treats that as `Outcome::Refused`; this test expected it to build,
+            // and only ever ran where the seeds happened not to draw one. Found by running at
+            // width 4 after the vocabulary changed which programs the seeds produce.
+            let Ok(spirv) = program.build() else {
+                continue;
+            };
             let actual = gpu
                 .run_u32(&spirv, &input, program.workgroups())
                 .expect("ran");
