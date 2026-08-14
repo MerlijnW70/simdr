@@ -569,6 +569,14 @@ always.
 Widths 32 and 64 stay manual because they need the two GPUs, and the workflow says so rather than
 leaving it to be assumed.
 
+**And its first run on a device found a portability bug.** A test asserted that the sum of
+sixty-four negative zeros keeps its sign, which IEEE 754 says and Vulkan does not require — it is
+the optional `shaderSignedZeroInfNanPreserveFloat32`, binding only a module that declares the
+matching execution mode, which this emitter does not. Two GPUs and a locally built lavapipe all
+preserved it; the Mesa in Ubuntu 24.04 folds it to `+0.0`. A shared runner turns out to be a
+*fourth implementation* rather than only automation, which is a better argument for CI than the one
+this item was written for.
+
 `rust-version` said **1.97** under a comment reading *"Measured, not assumed"*. It was neither: 1.97
 is the version that happened to be installed, and nothing had ever built the workspace with anything
 else. The true floor is **1.88**, where `if let` chains stabilised —

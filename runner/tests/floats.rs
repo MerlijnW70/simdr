@@ -191,7 +191,7 @@ fn a_maximum_containing_a_nan_behaves_the_same_on_both_reduction_paths() {
 }
 
 #[test]
-fn negative_zero_and_positive_zero_sum_to_positive_zero() {
+fn a_sum_of_negative_zeros_is_zero_and_its_sign_is_the_implementations_business() {
     let Some(gpu) = device("signed-zero") else {
         return;
     };
@@ -216,12 +216,34 @@ fn negative_zero_and_positive_zero_sum_to_positive_zero() {
         .expect("dispatched");
 
     let total = output.first().copied().expect("an answer");
-    assert_eq!(total, 0.0, "numerically zero");
-    assert!(
-        total.is_sign_negative(),
-        "and negative, because every addend was: got a sign bit of {}",
+    eprintln!(
+        "signed-zero: the sum of {count} negative zeros has sign bit {}",
         total.to_bits() >> 31
     );
+
+    // **Guaranteed: numerically zero.** Whatever an implementation does with the sign, the value
+    // is zero and a comparison against `0.0` is true either way — which is the point, because that
+    // comparison is exactly what hides the question.
+    assert_eq!(total, 0.0, "numerically zero");
+
+    // **The sign is not guaranteed, and asserting it was wrong.** IEEE 754 says `-0.0 + -0.0` is
+    // `-0.0`, and Vulkan does not require an implementation to follow it: signed-zero preservation
+    // is the optional `shaderSignedZeroInfNanPreserveFloat32` property, and it only binds a module
+    // that declares the `SignedZeroInfNanPreserve` execution mode. This emitter declares no such
+    // mode, so nothing here has asked for the behaviour it was demanding.
+    //
+    // It held on both GPUs in this machine and on the lavapipe built here, and it does *not* hold
+    // on the Mesa in Ubuntu 24.04 — LLVM 20.1.2 folds the sum to `+0.0`, which it is entitled to.
+    // The first CI run that reached a device found it. Observed rather than asserted, the same way
+    // `an_extreme_containing_a_nan_is_observed_rather_than_asserted` treats NaN, and
+    // `notes/FINDINGS.md` records both.
+    if total.is_sign_negative() {
+        eprintln!("signed-zero: this implementation preserves it");
+    } else {
+        eprintln!(
+            "signed-zero: this implementation does not — permitted, and worth knowing about              before trusting a sign bit that came off a GPU"
+        );
+    }
 }
 
 #[test]

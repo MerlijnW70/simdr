@@ -2136,3 +2136,32 @@ optimising the wrong thing.
 
 Left undone, deliberately, and this is the third item on that list to be refuted by its own
 measurement rather than by an argument.
+
+## The first CI run that reached a device found a signed zero that is not preserved
+
+`negative_zero_and_positive_zero_sum_to_positive_zero` summed sixty-four negative zeros and
+asserted the answer was `-0.0`. IEEE 754 says so: `-0.0 + -0.0` is `-0.0` whatever the order. It
+held on the RTX 4080, on the integrated Radeon, and on the lavapipe built on this machine.
+
+It does not hold on the Mesa that ships in Ubuntu 24.04. LLVM 20.1.2 folds the sum to `+0.0`, and
+**it is entitled to**: Vulkan does not require signed-zero preservation. It is the optional
+`shaderSignedZeroInfNanPreserveFloat32` property, and even a device that reports it only binds a
+module declaring the `SignedZeroInfNanPreserve` execution mode. This emitter declares no such mode,
+so nothing here had asked for the behaviour the test was demanding.
+
+The test now asserts what is guaranteed — the value is numerically zero, which is the comparison
+that hides the question — and *observes* the sign, the way the NaN test already treats a maximum.
+
+### What this says about the width sweep, again
+
+Three implementations agreed and a fourth did not. The three that agreed are the three that were
+easy to reach: two GPUs in one machine and a Mesa built on it. The fourth was a different build of
+the same software renderer, and it disagreed on the first run.
+
+That is the second time in two days that adding a *place to run* found something the existing
+places could not, after eleven tests reading past their input showed up when the bounds check
+started looking. Both were latent for as long as the code has existed.
+
+**A shared runner is a fourth implementation, not just automation.** That is the strongest argument
+for CI here, and it is not the one the item was written for — item 4 was about the suite being run
+by hand on one machine. It found a portability bug on its first green device.
