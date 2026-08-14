@@ -707,6 +707,73 @@ And with what they say about a smaller `N`, which is the case `ClusteredReduce` 
 
 ---
 
+## The list, rewritten 2026-08-14, after the first one ran out
+
+Eleven of the thirteen above are done and the other two are deferred on purpose or need hardware
+that is not here. This is what a second survey turned up, and its shape is different: the first list
+was mostly *things that were false*, and this one is mostly **holes the last week's work opened**.
+Building the scan three times over left the layers around it out of step.
+
+### Tier 1 — the code contradicts itself
+
+**1. Two doc comments say things the code beside them disproves.** `kernels::scan::scan_workgroup`
+still reads *"the exclusive form is this shifted by one and is not built — a caller who wants it can
+subtract its own element"*, and `scan_workgroup_at` still reads *"a strip-mined scan would have to
+carry a running total between strips, which is not built"*. Both were built this week. Worse, the
+subtraction that first comment recommends is the exact thing `prefix_sum_exclusive` exists to avoid:
+over floats it takes a large running total back off itself and loses the low bits the scan just
+accumulated.
+
+The cheapest item here and the one that misleads a reader fastest, because it sits directly above
+the function that refutes it.
+
+**2. The fuzzer has never generated a scan.** `fuzz::program::Finish` offers `Sum`, `Max`, `Min` and
+`SumOrMax`. Nothing prefixes.
+
+That matters more than a missing case usually would. The scan is now the most intricate thing in
+the tree — three mappings, two directions, a carry between strips, a mask between clusters — and
+**every test of it is hand-written**. That is precisely the state the reduction was in when the
+differential fuzzer found `reduce_min` folding its strips with a *maximum*: right for every mapping
+but the strip-mined one, so no hand-written test had ever looked. A scan has three mappings to get
+wrong instead of one, and two directions in each.
+
+The CPU reference has to grow a prefix, which is where the work is: a scan's expected answer depends
+on the lane order, so the reference has to model the mapping rather than the arithmetic.
+
+### Tier 2 — asymmetries the last week opened
+
+**3. `Scanner` is missing what `Reducer` has.** No `scan_timed`, so the in-situ timing built two
+passes ago cannot see the deepest chain in the project — seven dispatches over three levels is the
+one place a per-pass profile would say something new. And no `scanner_of` to fuse a map into the
+first pass, which is worth to a scan exactly what `reducer_of` was worth to a reduction: it removes
+a whole crossing of the bus.
+
+**4. There is no one-shot `Gpu::scan`.** `Gpu::sum` exists and is what every test of the reduction
+starts from. Scanning needs a `Scanner` built first, which is right for a caller that scans
+repeatedly and an obstacle for a test, an example, or anyone trying the thing once.
+
+**5. `Lanes::prefix_sum` still refuses a clustered vector.** The ladder works and is proven on three
+devices, and it lives in `runner::kernels` — so the *lane API*, which is what the README's mapping
+table describes, cannot reach it. Two ways in are written down above and neither is obviously right;
+that is the decision to make rather than the code to write.
+
+### Tier 3 — hygiene
+
+**6. `kernels::scan::mod` is 672 lines again.** It was split at 639 four days ago and the clustered
+ladder put it straight back. There are three concerns in it now, not two: the workgroup scan and the
+arithmetic everything shares, the block composition (already next door in `blocks.rs`), and the
+clustered ladder — which shares nothing with either and is the one that grew.
+
+### Tier 4 — carried over, unchanged
+
+**7. A buffer the caller already owns.** Still no caller in this repository wants it.
+
+**8. A third vendor.** Still needs hardware that is not in this machine. Intel integrated is the
+cheap one, and CI on a shared runner has already shown what a fourth implementation is worth — it
+found a signed zero two GPUs and a local lavapipe all agreed on.
+
+---
+
 ## Deliberately not doing
 
 **Chasing the large-working-set cliff.** Past ~50 MB the timings stop being steady, and three
