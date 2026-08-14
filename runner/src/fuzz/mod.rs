@@ -14,13 +14,18 @@
 //! The integer domains have no such problem: addition and multiplication are associative and
 //! commutative modulo their width, and wrapping is defined. The float domain earns the same
 //! property by generating only small integers, which are exact in an `f32` and stay exact through
-//! sums that remain below 2²⁴ — see [`Domain::ceiling`]. `f16` is not fuzzed, because a half is
-//! exact only to 2048 and a sum over sixty-four lanes leaves that range at once.
+//! sums that remain below 2²⁴ — see [`Domain::ceiling`].
+//!
+//! **`f16` is fuzzed too**, which this paragraph denied for longer than it was true. A half is
+//! exact only to 2048 and a sum over sixty-four lanes leaves that range at once — so a round that
+//! leaves it is *refused* rather than compared, which is what [`Reference::exact`] is for. Two
+//! rounds in 256 are typically refused that way; the rest are compared exactly like any other
+//! domain.
 //!
 //! # What is generated
 //!
 //! Straight-line programs over one loaded vector and a handful of constants: elementwise
-//! arithmetic, comparisons and selects, subgroup shuffles, and one reduction at the end.
+//! arithmetic, comparisons and selects, subgroup shuffles, and one reduction or scan at the end.
 //!
 //! **And control flow, since 2026-08-11.** `Op::RepeatAdd` and `Op::RolledAdd` do the same
 //! arithmetic through an unrolled loop and a real four-block one, so the pair must agree while
@@ -36,6 +41,18 @@
 //! conversion and extreme instructions from the same source, and had direct device tests and no
 //! fuzzing. The buffer is where they differ from everything else here — four 8-bit elements share
 //! a word — and [`check`] is the one place that packs and unpacks.
+//!
+//! **And the scans, since 2026-08-14.** [`Finish::Scan`] and [`Finish::ScanExclusive`] are the
+//! first finishes that keep *every* element rather than combining them, and they are here for a
+//! reason the reductions illustrate: a reduction combines the same set whatever order the lanes
+//! are in, so a mapping that pairs the wrong lanes still returns the right total. That is how
+//! `reduce_min` came to fold its strips with a maximum and agree with every hand-written test but
+//! the strip-mined one.
+//!
+//! A scan cannot hide that. Its answer at position `j` depends on exactly which elements the
+//! hardware considers to come before `j`, so the reference has to model the **lane order** and not
+//! only the arithmetic — see [`interpret`]. Until this, every test of the scan was hand-written,
+//! which is the state the reduction was in when the fuzzer found that bug.
 
 mod domain;
 mod generate;

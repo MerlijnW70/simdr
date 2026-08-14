@@ -85,13 +85,19 @@ pub fn generate(rng: &mut Rng, domain: Domain, subgroup: u32, workgroup: u32) ->
 
 /// How the program ends.
 ///
-/// `SumOrMax` needs a vote, so it is offered only where a vote is — the same subgroup-width rule
-/// the shuffles follow.
+/// `SumOrMax` needs a vote and the scans need a mapping SPIR-V has a scan for, so both are offered
+/// only where the vector is at least as wide as the subgroup — the same rule the shuffles follow.
+///
+/// **The scans are excluded from clustered vectors rather than generated and refused.** A clustered
+/// scan is `Outcome::Refused` by name, which is the right answer and not a useful thing to spend
+/// half the rounds discovering; the refusal has its own test.
 fn finish(rng: &mut Rng, domain: Domain, clustered: bool) -> Finish {
-    match rng.below(if clustered { 3 } else { 4 }) {
+    match rng.below(if clustered { 3 } else { 6 }) {
         0 => Finish::Sum,
         1 => Finish::Max,
         2 => Finish::Min,
+        3 => Finish::Scan,
+        4 => Finish::ScanExclusive,
         _ => Finish::SumOrMax {
             // Straddling the input's range again, so both arms are reached across a sweep.
             when_any_above: rng.below(u64::from(domain.ceiling())) as u32,

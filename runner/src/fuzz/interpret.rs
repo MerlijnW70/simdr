@@ -69,7 +69,20 @@ pub fn reference(program: &Program, input: &[u32]) -> Reference {
         exact = exact && within(domain, limit, &held);
     }
 
-    // Step 3: reduce. A vector at least as wide as the subgroup reduces over the subgroup after
+    // Step 3a: a scan, if that is the finish. It keeps every element rather than combining them,
+    // so it answers in the buffer's own shape and returns before the reduction below.
+    //
+    // The `else` is what makes the match below exhaustive without an unreachable arm. An arm that
+    // cannot be reached is a lie waiting to become true, and returning the identity from one would
+    // turn a future mistake into zeros rather than a compile error.
+    let Some(combine) = Combine::of(program.finish) else {
+        let exclusive = matches!(program.finish, Finish::ScanExclusive);
+        let values = scanned(program, &held, exclusive);
+        let exact = exact && within(domain, limit, std::slice::from_ref(&values));
+        return Reference { values, exact };
+    };
+
+    // Step 3b: reduce. A vector at least as wide as the subgroup reduces over the subgroup after
     // its strips are folded; a narrower one reduces within its cluster. `min` rather than a
     // comparison, for the same reason as `strips_of` below: at equal widths both arms of the
     // branch give the same number, so the branch was unfalsifiable.
@@ -121,15 +134,15 @@ pub fn reference(program: &Program, input: &[u32]) -> Reference {
                     .unwrap_or_else(|| domain.smallest())
             };
 
-            match program.finish {
-                Finish::Sum => sum(),
-                Finish::Max => max(),
-                Finish::Min => values
+            match combine {
+                Combine::Sum => sum(),
+                Combine::Max => max(),
+                Combine::Min => values
                     .iter()
                     .copied()
                     .reduce(|best, value| domain.min(best, value))
                     .unwrap_or_else(|| domain.largest()),
-                Finish::SumOrMax { when_any_above } => {
+                Combine::SumOrMax { when_any_above } => {
                     // The vote covers this invocation's whole *subgroup*, which is a different set
                     // from the lanes the reduction above combines whenever the vector is narrower
                     // than the subgroup.
@@ -153,6 +166,88 @@ pub fn reference(program: &Program, input: &[u32]) -> Reference {
     let exact = exact && within(domain, limit, std::slice::from_ref(&values));
 
     Reference { values, exact }
+}
+
+/// The finishes that **combine** the lanes rather than keeping every element.
+///
+/// A separate type rather than a subset of [`Finish`] matched loosely, so the reduction below is
+/// exhaustive over exactly the cases it answers for. Adding a third kind of scan will not compile
+/// until somebody decides what it means here.
+#[derive(Clone, Copy)]
+enum Combine {
+    Sum,
+    Max,
+    Min,
+    SumOrMax { when_any_above: u32 },
+}
+
+impl Combine {
+    /// `None` for the finishes that keep every element, which are answered elsewhere.
+    const fn of(finish: Finish) -> Option<Self> {
+        match finish {
+            Finish::Sum => Some(Self::Sum),
+            Finish::Max => Some(Self::Max),
+            Finish::Min => Some(Self::Min),
+            Finish::SumOrMax { when_any_above } => Some(Self::SumOrMax { when_any_above }),
+            Finish::Scan | Finish::ScanExclusive => None,
+        }
+    }
+}
+
+/// What a scan should write, in the buffer's own order.
+///
+/// **This models the lane order rather than the arithmetic, and that is the whole point.** A
+/// reduction combines the same set whichever lane holds what, so its reference never had to know
+/// where an element sits. A prefix does: element `j` of the answer is the sum of vector positions
+/// `0..=j`, and which element is at position `j` is exactly what a mapping decides.
+///
+/// `crate::lanes::vector` documents the order this reproduces: lane `l` holds the elements at `l`,
+/// `l + width`, `l + 2·width`, so vector position `j` is strip `j / width` of lane `j % width` —
+/// strips are consecutive runs of the vector and every element of one comes before every element
+/// of the next.
+///
+/// The vector belongs to a **subgroup**, not a workgroup: nothing in `Lanes` crosses between them,
+/// so each run of `width` invocations scans on its own and the next starts from zero again.
+fn scanned(program: &Program, held: &[Vec<u32>], exclusive: bool) -> Vec<u32> {
+    let domain = program.domain;
+    let width = program.subgroup as usize;
+    let workgroup = program.workgroup as usize;
+    let strips = strips_of(program);
+    let invocations = held.len();
+
+    let mut values = vec![domain.zero(); invocations * strips];
+
+    for first in (0..invocations).step_by(width.max(1)) {
+        let members = width.min(invocations.saturating_sub(first));
+        let mut running = domain.zero();
+
+        for position in 0..members * strips {
+            let lane = position % width.max(1);
+            let strip = position / width.max(1);
+            let invocation = first + lane;
+
+            let Some(element) = held.get(invocation).and_then(|held| held.get(strip)) else {
+                continue;
+            };
+
+            // The inclusive total is what carries forward either way; which of the two is
+            // *written* is the only difference between the finishes.
+            let inclusive = domain.add(running, *element);
+            let answer = if exclusive { running } else { inclusive };
+            running = inclusive;
+
+            // Back to where the kernel's own addressing puts it: workgroup-blocked, strided
+            // within the run — the same arithmetic step 1 read the corpus with.
+            let group = invocation / workgroup.max(1);
+            let local = invocation % workgroup.max(1);
+            let at = group * workgroup * strips + local + strip * workgroup;
+            if let Some(slot) = values.get_mut(at) {
+                *slot = answer;
+            }
+        }
+    }
+
+    values
 }
 
 /// Whether every value in `held` is one its domain still counts exactly.
@@ -346,6 +441,85 @@ mod tests {
         );
 
         assert_eq!(plain, shifted);
+    }
+
+    #[test]
+    fn a_scan_that_leaves_the_range_is_not_exact_even_though_every_element_was_inside_it() {
+        // The same `and`, on the scan's own path. A prefix is the one finish whose *output* can
+        // leave a domain's exact range while every input and every step stayed inside it: 300
+        // halves are each representable and their running total passes 2048 part way along.
+        //
+        // With `or` the round would be reported comparable and both sides would be rounded, which
+        // says nothing about which lanes were combined — the failure `exact` exists to prevent.
+        let input = vec![Domain::Half.encode(300); 64];
+        let answer = reference(&program(Domain::Half, 32, Vec::new(), Finish::Scan), &input);
+
+        assert!(
+            !answer.exact,
+            "a running total of 300s passes 2048 before the end of a 32-lane scan"
+        );
+
+        // And the inputs really were inside it, so this is the accumulation being caught rather
+        // than the corpus.
+        let each = reference(&program(Domain::Half, 32, Vec::new(), Finish::Max), &input);
+        assert!(each.exact, "300 on its own is exactly representable");
+    }
+
+    #[test]
+    fn a_scan_answers_for_every_element_and_not_every_invocation() {
+        // **The shape, which is what tells a scan from a reduction here.** A reduction writes one
+        // value per invocation; a scan writes one per element, so its answer is as long as the
+        // input and lands in the same places.
+        //
+        // A length computed with a division rather than a multiplication — which is what the
+        // mutation gate tried — leaves the vector short, the extra writes dropped on the floor,
+        // and the comparison in `verdict` zipping over a prefix of what it should check.
+        for lanes in [32_u32, 64, 128] {
+            let scanning = program(Domain::Unsigned, lanes, Vec::new(), Finish::Scan);
+            let reducing = program(Domain::Unsigned, lanes, Vec::new(), Finish::Sum);
+            let input = ramp(Domain::Unsigned, scanning.input_len() as u32);
+
+            assert_eq!(
+                reference(&scanning, &input).values.len(),
+                scanning.input_len(),
+                "a scan of {lanes} lanes answers for every element"
+            );
+            assert_eq!(
+                reference(&reducing, &input).values.len(),
+                (scanning.groups * scanning.workgroup) as usize,
+                "a reduction of {lanes} lanes answers once per invocation"
+            );
+        }
+    }
+
+    #[test]
+    fn a_scan_is_the_prefix_of_its_subgroup_and_starts_again_at_the_next() {
+        // Nothing in `Lanes` crosses between subgroups, so a workgroup of 64 over a 32-wide
+        // subgroup holds two scans and not one. The 33rd element starts from its own element
+        // again, which is the boundary a reference that scanned the whole workgroup would miss.
+        let scanning = program(Domain::Unsigned, 32, Vec::new(), Finish::Scan);
+        let input = vec![Domain::Unsigned.encode(1); scanning.input_len()];
+        let answer = reference(&scanning, &input);
+
+        assert_eq!(answer.values[0], Domain::Unsigned.encode(1));
+        assert_eq!(answer.values[31], Domain::Unsigned.encode(32));
+        assert_eq!(
+            answer.values[32],
+            Domain::Unsigned.encode(1),
+            "the second subgroup starts again"
+        );
+        assert_eq!(answer.values[63], Domain::Unsigned.encode(32));
+    }
+
+    #[test]
+    fn an_exclusive_scan_leaves_each_element_out_and_starts_at_zero() {
+        let scanning = program(Domain::Unsigned, 32, Vec::new(), Finish::ScanExclusive);
+        let input = vec![Domain::Unsigned.encode(1); scanning.input_len()];
+        let answer = reference(&scanning, &input);
+
+        assert_eq!(answer.values[0], Domain::Unsigned.encode(0));
+        assert_eq!(answer.values[31], Domain::Unsigned.encode(31));
+        assert_eq!(answer.values[32], Domain::Unsigned.encode(0));
     }
 
     #[test]

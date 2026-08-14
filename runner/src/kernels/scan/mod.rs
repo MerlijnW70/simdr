@@ -78,9 +78,14 @@ pub(super) enum Scan {
 
 /// `out[i] = in[0] + in[1] + … + in[i]`, within one workgroup.
 ///
-/// Inclusive: element `i` of the output includes element `i` of the input. The exclusive form is
-/// this shifted by one and is not built — a caller who wants it can subtract its own element,
-/// which costs one instruction and no second kernel.
+/// Inclusive: element `i` of the output includes element `i` of the input.
+/// [`scan_workgroup_exclusive`] is the other direction.
+///
+/// This used to say the exclusive form was not built and that a caller could subtract their own
+/// element instead. **Both halves were wrong.** It is built, and the subtraction is the thing it
+/// exists to avoid: over floats it takes a large running total back off itself and loses precisely
+/// the low bits the scan had just accumulated, which is why SPIR-V has a separate group operation
+/// for it rather than leaving it to arithmetic.
 ///
 /// # Errors
 ///
@@ -222,9 +227,13 @@ fn scan_workgroup_exclusive_at<T: Element, const LANES: u32>(
 
 /// The builder, at a lane count that has to equal the subgroup width.
 ///
-/// `prefix_sum` refuses any mapping but the whole subgroup — a strip-mined scan would have to
-/// carry a running total between strips, which is not built — so this is only ever instantiated
-/// with `LANES` equal to `subgroup`, which is what [`whole_subgroup_of`] arranges.
+/// `LANES` equals `subgroup` here because that is what [`whole_subgroup_of`] arranges, not because
+/// the other mappings are unavailable — this line used to say a strip-mined scan "is not built",
+/// and `Lanes::prefix_sum` has carried a running total between strips since. `scan_strips` is the
+/// kernel that uses it, and `scan_clusters` is the third mapping.
+///
+/// What is still refused is a *clustered* vector through `Lanes::prefix_sum`, and that is a
+/// question of where the ladder lives rather than whether it works — see `notes/NEXT.md`.
 fn scan_workgroup_at<T: Element, const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
     let mut kernel = Kernel::<T>::new(shape(subgroup))?;
     let (scanned, _) = scanned_at::<T, LANES>(&mut kernel, subgroup, Scan::Inclusive, false)?;

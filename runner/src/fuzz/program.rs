@@ -122,6 +122,20 @@ pub enum Finish {
         /// The threshold the vote compares against.
         when_any_above: u32,
     },
+    /// Running totals: every element keeps the sum of everything up to and including itself.
+    ///
+    /// **The only finish that keeps every element**, and that is why it is worth generating. A
+    /// reduction combines the same set whatever order the lanes are in, so a mapping that pairs
+    /// the wrong lanes still returns the right total — which is how `reduce_min` folded its strips
+    /// with a *maximum* and agreed with every hand-written test but the strip-mined one. A scan
+    /// gets a different number at almost every position and the same grand total at the end.
+    Scan,
+    /// The same, with each element's own contribution left out.
+    ///
+    /// Not a shift of [`Finish::Scan`]: SPIR-V has a separate group operation for it, because
+    /// deriving one from the other over floats subtracts a large running total back off itself and
+    /// loses the low bits the scan just accumulated.
+    ScanExclusive,
 }
 
 /// A generated program.
@@ -152,12 +166,12 @@ impl Program {
 
     /// How many elements the input buffer must hold.
     #[must_use]
-    pub const fn input_len(&self) -> usize {
-        let strips = if self.lanes > self.subgroup {
-            self.lanes / self.subgroup
-        } else {
-            1
-        };
+    pub fn input_len(&self) -> usize {
+        // Division and a floor, not a comparison. The branch this replaced asked whether the
+        // vector was wider than the subgroup and returned 1 when it was not — and at *equal*
+        // widths both arms give 1, so no input could tell them apart. `interpret::strips_of` had
+        // the same shape and was fixed the same way; the mutation gate found the second copy.
+        let strips = (self.lanes / self.subgroup.max(1)).max(1);
         (self.groups * self.workgroup * strips) as usize
     }
 
@@ -211,25 +225,51 @@ impl Program {
         }
 
         let element = kernel.element();
-        let total = match self.finish {
-            Finish::Sum => kernel.lanes()?.reduce_sum(value)?,
-            Finish::Max => kernel.lanes()?.reduce_max(value)?,
-            Finish::Min => kernel.lanes()?.reduce_min(value)?,
-            Finish::SumOrMax { when_any_above } => {
-                let mut lanes = kernel.lanes()?;
-                let limit = lanes.splat_bits::<T, LANES>(self.domain.encode(when_any_above))?;
-                let above = lanes.greater_than(value, limit)?;
-                let vote = lanes.any_uniform(above)?;
 
-                lanes.choose_uniform(
-                    vote,
-                    element,
-                    |lanes| lanes.reduce_sum(value),
-                    |lanes| lanes.reduce_max(value),
-                )?
+        // **Each arm stores what it produces**, because the two kinds of finish do not produce the
+        // same shape. A reduction is one value per invocation and goes out through `store_scalar`;
+        // a scan keeps every element and goes out through `store`, filling exactly the addresses
+        // the input came from.
+        match self.finish {
+            Finish::Sum => {
+                let total = kernel.lanes()?.reduce_sum(value)?;
+                kernel.store_scalar(1, total)?;
             }
-        };
-        kernel.store_scalar(1, total)?;
+            Finish::Max => {
+                let total = kernel.lanes()?.reduce_max(value)?;
+                kernel.store_scalar(1, total)?;
+            }
+            Finish::Min => {
+                let total = kernel.lanes()?.reduce_min(value)?;
+                kernel.store_scalar(1, total)?;
+            }
+            Finish::SumOrMax { when_any_above } => {
+                let total = {
+                    let mut lanes = kernel.lanes()?;
+                    let limit = lanes.splat_bits::<T, LANES>(self.domain.encode(when_any_above))?;
+                    let above = lanes.greater_than(value, limit)?;
+                    let vote = lanes.any_uniform(above)?;
+
+                    lanes.choose_uniform(
+                        vote,
+                        element,
+                        |lanes| lanes.reduce_sum(value),
+                        |lanes| lanes.reduce_max(value),
+                    )?
+                };
+                kernel.store_scalar(1, total)?;
+            }
+            // A clustered vector has no scan and `Lanes::prefix_sum` says so by name, which
+            // arrives here as `Outcome::Refused` rather than a wrong answer.
+            Finish::Scan => {
+                let scanned = kernel.lanes()?.prefix_sum(value)?;
+                kernel.store(1, scanned)?;
+            }
+            Finish::ScanExclusive => {
+                let scanned = kernel.lanes()?.prefix_sum_exclusive(value)?;
+                kernel.store(1, scanned)?;
+            }
+        }
         kernel.finish()
     }
 }

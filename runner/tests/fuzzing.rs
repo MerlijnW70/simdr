@@ -56,6 +56,13 @@ struct Swept {
     refused: u64,
     /// Rounds whose arithmetic left the range the domain counts exactly, so nothing was compared.
     unrepresentable: u64,
+    /// Of the rounds that agreed, how many ended in a **scan**.
+    ///
+    /// Counted apart because the guard below — most rounds proved something — is satisfied by the
+    /// reductions alone. A scan is refused for a clustered vector and is the newest thing here, so
+    /// "the sweep ran" and "the sweep exercised a prefix" are different claims and only one of
+    /// them was being made.
+    scans: u64,
 }
 
 impl Swept {
@@ -67,13 +74,17 @@ impl Swept {
     /// than a hypothetical, because a sum over a few hundred halves leaves 2048 at once.
     fn expect_mostly_checked(&self, domain: Domain, rounds: u64) {
         eprintln!(
-            "fuzz {domain:?}: {} agreed, {} refused, {} unrepresentable, over {rounds} seeds",
-            self.checked, self.refused, self.unrepresentable
+            "fuzz {domain:?} over {rounds} seeds: {} agreed of which {} scans, {} refused, {} unrepresentable",
+            self.checked, self.scans, self.refused, self.unrepresentable
         );
         assert!(
             self.checked > rounds / 2,
             "most {domain:?} rounds proved nothing: {} checked of {rounds}",
             self.checked
+        );
+        assert!(
+            self.scans > 0,
+            "no {domain:?} round compared a scan, so the prefix path proved nothing"
         );
     }
 }
@@ -83,14 +94,22 @@ fn sweep(gpu: &runner::Gpu, domain: Domain, subgroup: u32, rounds: u64) -> Swept
     let mut checked = 0;
     let mut refused = 0;
     let mut unrepresentable = 0;
+    let mut scans = 0;
 
     for seed in 0..rounds {
         let mut rng = fuzz::Rng::new(seed);
         let program = fuzz::generate(&mut rng, domain, subgroup, WORKGROUP_SIZE);
         let input = corpus(domain, program.input_len());
+        let is_scan = matches!(
+            program.finish,
+            fuzz::Finish::Scan | fuzz::Finish::ScanExclusive
+        );
 
         match fuzz::check(gpu, &program, &input).expect("dispatched") {
-            Outcome::Agreed => checked += 1,
+            Outcome::Agreed => {
+                checked += 1;
+                scans += u64::from(is_scan);
+            }
             Outcome::Refused(_) => refused += 1,
             Outcome::Unrepresentable => unrepresentable += 1,
             Outcome::Disagreed {
@@ -113,6 +132,7 @@ fn sweep(gpu: &runner::Gpu, domain: Domain, subgroup: u32, rounds: u64) -> Swept
         checked,
         refused,
         unrepresentable,
+        scans,
     }
 }
 
@@ -245,6 +265,11 @@ fn strip_mined_programs_agree_in_every_domain() {
         return;
     }
 
+    // Scans over a strip-mined vector are the case with a carry between strips, which is the one
+    // shape of scan that no single instruction covers. Counted so this cannot pass by reaching
+    // none of them.
+    let mut scanned = 0_u64;
+
     for domain in ALL_DOMAINS {
         for seed in 0..64_u64 {
             let mut rng = fuzz::Rng::new(seed.wrapping_mul(0x5851_F42D_4C95_7F2D));
@@ -253,9 +278,14 @@ fn strip_mined_programs_agree_in_every_domain() {
 
             program.lanes = limits.subgroup_size * (2 + (seed % 3) as u32).min(4);
             let input = corpus(domain, program.input_len());
+            let is_scan = matches!(
+                program.finish,
+                fuzz::Finish::Scan | fuzz::Finish::ScanExclusive
+            );
 
             match fuzz::check(&gpu, &program, &input).expect("dispatched") {
-                Outcome::Agreed | Outcome::Refused(_) | Outcome::Unrepresentable => {}
+                Outcome::Agreed => scanned += u64::from(is_scan),
+                Outcome::Refused(_) | Outcome::Unrepresentable => {}
                 Outcome::Disagreed {
                     program,
                     expected,
@@ -272,6 +302,12 @@ fn strip_mined_programs_agree_in_every_domain() {
             }
         }
     }
+
+    eprintln!("fuzz-strips: {scanned} strip-mined scans agreed");
+    assert!(
+        scanned > 0,
+        "no strip-mined scan was compared, so the carry between strips proved nothing"
+    );
 }
 
 /// The fuzzer's own test: a deliberately wrong reference must be caught.
@@ -326,6 +362,58 @@ fn the_fuzzer_notices_when_the_answer_is_wrong() {
             "no program in 64 seeds noticed a perturbed input in {domain:?}, \
              so the comparison this file rests on cannot fail"
         );
+    }
+}
+
+/// The same teeth, held against a scan specifically.
+///
+/// The test above generates freely and stops at the first program sensitive to a perturbed input,
+/// so it may never reach a scan — and a scan is the newest and most intricate thing the reference
+/// models. Here the finish is forced, which also makes the sensitivity trivial to argue: a prefix
+/// depends on every element before it, so changing the first one changes every answer after it.
+///
+/// **Both directions, because they differ in exactly one place.** An exclusive scan leaves each
+/// element's own contribution out, so a reference that quietly returned the inclusive answer would
+/// be wrong at every position and right at none — and would still pass a test that only ran the
+/// inclusive form.
+#[test]
+fn the_fuzzer_notices_when_a_scan_is_wrong() {
+    let Some(gpu) = device("fuzz-teeth-scan") else {
+        return;
+    };
+    let limits = gpu.limits().clone();
+
+    if !limits.subgroup_arithmetic {
+        eprintln!("SKIPPED fuzz-teeth-scan: no subgroup arithmetic");
+        return;
+    }
+
+    for finish in [fuzz::Finish::Scan, fuzz::Finish::ScanExclusive] {
+        for domain in ALL_DOMAINS {
+            let mut rng = fuzz::Rng::new(7);
+            let mut program =
+                fuzz::generate(&mut rng, domain, limits.subgroup_size, WORKGROUP_SIZE);
+            program.finish = finish;
+            // A scan has no clustered form, so the vector has to be at least the subgroup.
+            program.lanes = limits.subgroup_size;
+
+            let input = corpus(domain, program.input_len());
+            let mut wrong = input.clone();
+            if let Some(first) = wrong.first_mut() {
+                *first = domain.encode(200);
+            }
+
+            let spirv = program.build().expect("built");
+            let actual = gpu
+                .run_u32(&spirv, &input, program.workgroups())
+                .expect("ran");
+            let expected = fuzz::reference(&program, &wrong);
+
+            assert_ne!(
+                expected.values, actual,
+                "a {finish:?} in {domain:?} did not notice a changed element, so the comparison                  that guards every scan in this file cannot fail"
+            );
+        }
     }
 }
 

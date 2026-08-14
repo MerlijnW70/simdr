@@ -230,6 +230,8 @@ fn the_generator_reaches_every_finish() {
     let mut maxes = 0;
     let mut mins = 0;
     let mut chosen = 0;
+    let mut scans = 0;
+    let mut exclusive = 0;
 
     for seed in 0..512_u64 {
         match generate(&mut Rng::new(seed), Domain::Float, 32, 64).finish {
@@ -237,6 +239,8 @@ fn the_generator_reaches_every_finish() {
             Finish::Max => maxes += 1,
             Finish::Min => mins += 1,
             Finish::SumOrMax { .. } => chosen += 1,
+            Finish::Scan => scans += 1,
+            Finish::ScanExclusive => exclusive += 1,
         }
     }
 
@@ -245,6 +249,8 @@ fn the_generator_reaches_every_finish() {
         ("max", maxes),
         ("min", mins),
         ("sum-or-max", chosen),
+        ("scan", scans),
+        ("exclusive scan", exclusive),
     ] {
         assert!(count > 0, "no program in 512 seeds finished with {name}");
     }

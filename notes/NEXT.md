@@ -716,7 +716,16 @@ Building the scan three times over left the layers around it out of step.
 
 ### Tier 1 — the code contradicts itself
 
-**1. Two doc comments say things the code beside them disproves.** `kernels::scan::scan_workgroup`
+**1. Two doc comments say things the code beside them disproves — done.** Both corrected, and the
+correction says what was wrong rather than quietly replacing it: the exclusive scan is built, and
+the subtraction the old comment recommended is the thing it exists to avoid.
+
+A third was found while fixing them. `fuzz::mod`'s header said **"`f16` is not fuzzed"** and had
+said so since before `Domain::Half` was added to the sweep — the fuzzer runs it 256 times a domain
+and refuses the two rounds that leave a half's exact range. That claim was older and more wrong
+than either of the two on the list.
+
+**~~1.~~ The original wording, for the record:** `kernels::scan::scan_workgroup`
 still reads *"the exclusive form is this shifted by one and is not built — a caller who wants it can
 subtract its own element"*, and `scan_workgroup_at` still reads *"a strip-mined scan would have to
 carry a running total between strips, which is not built"*. Both were built this week. Worse, the
@@ -727,7 +736,26 @@ accumulated.
 The cheapest item here and the one that misleads a reader fastest, because it sits directly above
 the function that refutes it.
 
-**2. The fuzzer has never generated a scan.** `fuzz::program::Finish` offers `Sum`, `Max`, `Min` and
+**2. The fuzzer has never generated a scan — done.** `Finish::Scan` and `Finish::ScanExclusive`
+are generated, built, and modelled by the reference. 25 of every 256 rounds end in a scan in each
+of the eight domains, and 72 strip-mined scans agree across the forced-wide sweep.
+
+The reference had to grow something the reductions never needed: it models the **lane order**.
+Element `j` of a prefix depends on exactly which elements the hardware puts before `j`, so
+`interpret::scanned` reproduces the addressing — lane `l` holding `l`, `l + width`, `l + 2·width`
+— rather than only the arithmetic.
+
+**It has teeth, and that was checked rather than assumed.** Two deliberate breakages were tried:
+writing the inclusive answer where the exclusive one belongs, and reading the vector blocked rather
+than strided. Both were caught at seed 1. `the_fuzzer_notices_when_a_scan_is_wrong` keeps a
+scan-specific version of that permanently, because the existing teeth test stops at the first
+sensitive program and may never reach a scan.
+
+The gate found three survivors, one of them a second copy of an unfalsifiable branch that
+`interpret::strips_of` had already been fixed for — `if lanes > subgroup` returns the same answer as
+the division at equal widths, so nothing could tell the arms apart.
+
+**~~2.~~ The original wording, for the record:** `fuzz::program::Finish` offers `Sum`, `Max`, `Min` and
 `SumOrMax`. Nothing prefixes.
 
 That matters more than a missing case usually would. The scan is now the most intricate thing in
