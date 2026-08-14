@@ -2280,3 +2280,75 @@ input and waiting for one submission, neither of which is inside the command buf
 conclusion `runner/examples/reducer.rs` reaches for the reduction, arrived at independently and by
 a different route. On this hardware, at this size, **the arithmetic is not the cost of either
 algorithm.**
+
+## The clustered scan moved into the lane API — 2026-08-14
+
+`Lanes::prefix_sum` covers all three mappings now. The clustered one is a Hillis-Steele ladder,
+built where the other two are, and the kernel that used to hold a second copy of it is a load, a
+scan and a store.
+
+What it needed was the invocation's own lane, and `Lanes` is handed a module and a width. It
+declares `SubgroupLocalInvocationId` for itself, on demand, so a kernel that only scales still
+declares no `Input` variable and no `GroupNonUniform` capability — `decisions/DR-0007` has the
+argument and the two options it was chosen over.
+
+**The failure mode is not a wrong number, it is an invalid module that every driver runs anyway.**
+`OpEntryPoint` lists the `Input` variables the entry point reaches, and a built-in the *body* asks
+for arrives long after that instruction was emitted. `Module` renders it from data now. Deleting
+the one line that adds the variable to the interface leaves **19 of `tests/kernels.rs`'s 20 modules
+rejected by `spirv-val`** and all three devices still returning the right answers — which is what
+says the validator is carrying this and no execution test could.
+
+### The fuzzer generates clustered scans now, and it took two deliberate breakages
+
+`fuzz::generate` used to exclude the scans from a clustered vector, because they were refused. That
+left the ladder — three mappings, two directions, a mask — checked by hand-written tests only,
+which is precisely the state the reduction was in when the fuzzer found `reduce_min` folding its
+strips with a maximum.
+
+The reference needed one line: the run that scans together is `min(lanes, width)` invocations, not
+the width. Both breakages were caught immediately — dropping the mask disagreed at seed 0, and
+returning the inclusive answer where the exclusive one belongs disagreed at seed 1.
+
+432 clustered scans agreed on an RTX 4080; 146 strip-mined ones on the same run.
+
+## An AMD driver that faults compiling a valid module — 2026-08-14
+
+The new coverage found this on the first sweep at width 64. The **integrated AMD Radeon** cannot
+compile the clustered ladder past a certain size: `vkCreateComputePipelines` dies with
+`STATUS_ACCESS_VIOLATION`, taking the test process with it. Smaller programs of the same shape
+compile and return *wrong answers*.
+
+Bisected, all at subgroup 64 with `Simd<f32, 16>` — a cluster of 16:
+
+| program | this device |
+| --- | --- |
+| `[MinConstant, MulConstant, MaxConstant]` + clustered scan | compiles, agrees |
+| `[MinConstant, MulConstant, MaxConstant, ClampBoth]` + clustered **sum** | compiles, agrees |
+| the same four + clustered **maximum** | compiles, agrees |
+| the same four + clustered scan, inclusive | **faults in pipeline creation** |
+| the same four + clustered scan, exclusive | **faults in pipeline creation** |
+
+So the ladder is necessary and so is enough code around it; the direction is not. A separate
+8-bit case — `OpExtInst UMax` on a `uchar` feeding the same tail — compiles and answers wrongly
+rather than faulting, which is what the probe in `runner/tests/fuzzing.rs` uses, because nothing can
+catch a fault in order to report it.
+
+**Why it is theirs and not ours.** `spirv-val --target-env vulkan1.1` accepts every one of these
+modules. An RTX 4080 and lavapipe compile and run all of them and agree with the CPU reference,
+across thousands of rounds. The one control that could not be run is the same *module* on another
+64-wide device, because there is only one here — forcing llvmpipe to a 2048-bit vector width gets a
+64-wide subgroup and then disagrees about clustered **reductions**, which are years old and green
+everywhere, so that configuration is broken rather than a witness. And a driver that faults while
+compiling a valid module has a defect whatever the module says.
+
+**What the suite does about it.** `runner/tests/fuzzing.rs` probes once per device with the 8-bit
+program that answers wrongly. On a device that fails the probe, the generated sweeps replace a
+clustered scan with a **sum** rather than dropping the round — a third of the seeds generate one,
+and dropping them would take their steps down with the tail — and the dedicated clustered sweep
+skips loudly. Every count is printed: `85 clustered scans replaced by a sum` per domain, of 256.
+
+The filter took three widenings, and each one was it being too clever: "8-bit and a max" (the probe),
+then every 8-bit program (a `MinConstant(0)` faulted), then every narrow one (a 16-bit program
+disagreed), then the ladder itself (an `f32` program faulted). Each attempt was an instruction in
+front of the same tail, which is what said the tail was the part that was broken.

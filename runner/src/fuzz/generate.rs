@@ -85,14 +85,17 @@ pub fn generate(rng: &mut Rng, domain: Domain, subgroup: u32, workgroup: u32) ->
 
 /// How the program ends.
 ///
-/// `SumOrMax` needs a vote and the scans need a mapping SPIR-V has a scan for, so both are offered
-/// only where the vector is at least as wide as the subgroup — the same rule the shuffles follow.
+/// `SumOrMax` needs a vote, which has no clustered form and answers for every vector sharing the
+/// subgroup — so it is offered only where the vector is at least as wide as the subgroup, the same
+/// rule the shuffles follow.
 ///
-/// **The scans are excluded from clustered vectors rather than generated and refused.** A clustered
-/// scan is `Outcome::Refused` by name, which is the right answer and not a useful thing to spend
-/// half the rounds discovering; the refusal has its own test.
+/// **The scans are offered at every mapping, and used not to be.** A clustered scan was
+/// `Outcome::Refused` by name, so the rounds that would have exercised the ladder ended in a
+/// reduction instead — and the ladder is the most intricate thing in the tree with the least
+/// differential coverage. It has all three mappings now: an instruction at the width, a carry
+/// between strips above it, and the ladder below.
 fn finish(rng: &mut Rng, domain: Domain, clustered: bool) -> Finish {
-    match rng.below(if clustered { 3 } else { 6 }) {
+    match rng.below(if clustered { 5 } else { 6 }) {
         0 => Finish::Sum,
         1 => Finish::Max,
         2 => Finish::Min,

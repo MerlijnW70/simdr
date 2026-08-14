@@ -45,9 +45,11 @@ pub fn compute_skeleton(version: Version) -> Result<(Module, Id), BuildError> {
         &[AddressingModel::Logical.word(), MemoryModel::Glsl450.word()],
     )?;
 
-    let mut entry = vec![ExecutionModel::GlCompute.word(), main.word()];
-    encode::literal_string(&mut entry, "main");
-    module.emit(Section::EntryPoint, op::ENTRY_POINT, &entry)?;
+    // Through `Module::entry_point` rather than emitted here, so that a test which builds lane
+    // operations into this skeleton gets the interface entries they declare for themselves. A
+    // clustered scan reaches for `SubgroupLocalInvocationId`, and a hand-written `OpEntryPoint`
+    // would be missing it — which `spirv-val` rejects and every driver runs anyway.
+    module.entry_point(ExecutionModel::GlCompute, main, "main")?;
 
     module.emit(
         Section::ExecutionMode,

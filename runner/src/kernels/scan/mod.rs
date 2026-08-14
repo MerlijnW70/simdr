@@ -47,18 +47,23 @@
 //! what a longer input needs — the per-block kernels and the offset addition that pays each block
 //! what it owes. They were one file until it reached 639 lines holding two jobs at two scales.
 //!
-//! # What it does not do
+//! # What a kernel here does not do
 //!
-//! **One workgroup.** This scans [`super::WORKGROUP_SIZE`] elements and no more; a longer input
-//! needs the block totals scanned and added back, which is a second and third dispatch and is not
-//! built. The limit is in the name of the function rather than hidden in its behaviour, because a
-//! scan that silently restarted at every block boundary would return plausible numbers.
+//! **One workgroup, and that is the kernel's limit rather than the crate's.** [`scan_workgroup`]
+//! scans [`super::WORKGROUP_SIZE`] elements and no more, and the limit is in the name of the
+//! function rather than hidden in its behaviour — a scan that silently restarted at every block
+//! boundary would return plausible numbers.
+//!
+//! A longer input needs the block totals scanned and added back, and that **is** built: `blocks.rs`
+//! has the kernels and `crate::scan` has the levels and the dispatches, which `Gpu::scanner` runs
+//! in one submission. This paragraph said "is not built" for two days after that landed, four lines
+//! below the sentence naming the file that does it.
 
 mod blocks;
 mod clusters;
 
 pub use blocks::{add_offsets, scan_blocks, scan_blocks_exclusive};
-pub use clusters::scan_clusters;
+pub use clusters::{scan_clusters, scan_clusters_exclusive};
 
 use super::{shape, whole_subgroup_of};
 use simdr::kernel::Kernel;
@@ -111,8 +116,8 @@ pub fn scan_workgroup<T: Element>(subgroup: u32) -> Result<Vec<u32>, LaneError> 
 ///
 /// # Errors
 ///
-/// As [`scan_workgroup`], and [`LaneError::NoSuchForm`] if `LANES` is *narrower* than the subgroup
-/// — SPIR-V has no clustered scan.
+/// As [`scan_workgroup`]. A `LANES` *narrower* than the subgroup builds too, and builds something
+/// else — the clustered ladder, which [`scan_clusters`] is the kernel for.
 pub fn scan_strips<const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
     let mut kernel = Kernel::<simdr::lanes::F32>::new(shape(subgroup))?;
     let value = kernel.load::<LANES>(0)?;
@@ -152,8 +157,9 @@ fn scan_workgroup_exclusive_at<T: Element, const LANES: u32>(
 /// and `Lanes::prefix_sum` has carried a running total between strips since. `scan_strips` is the
 /// kernel that uses it, and `scan_clusters` is the third mapping.
 ///
-/// What is still refused is a *clustered* vector through `Lanes::prefix_sum`, and that is a
-/// question of where the ladder lives rather than whether it works — see `notes/NEXT.md`.
+/// All three go through `Lanes::prefix_sum` now. The clustered one was a kernel in this crate for
+/// two days, because the lane API refused a vector narrower than the subgroup; what it needed was
+/// the invocation's own lane, which it declares for itself.
 fn scan_workgroup_at<T: Element, const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
     let mut kernel = Kernel::<T>::new(shape(subgroup))?;
     let (scanned, _) = scanned_at::<T, LANES>(&mut kernel, subgroup, Scan::Inclusive, false)?;

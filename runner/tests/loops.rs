@@ -60,6 +60,75 @@ fn an_unrolled_loop_reimplements_the_subgroup_sum_exactly() {
     assert_eq!(tree, builtin);
 }
 
+/// The same tree inside a cluster, against the clustered reduce it reimplements.
+///
+/// **The kernel that could not be written until this week.** `Lanes::butterfly` refused every
+/// clustered vector, so the mapping that exists to run four small vectors at once could be reduced
+/// by the hardware and not swizzled at all. A mask below the cluster's width cannot leave it — the
+/// clusters are aligned runs of a power-of-two size — and this is what says so on a device rather
+/// than in a comment.
+///
+/// Two implementations, neither of them the reference: one `ClusteredReduce` against `log2(cluster)`
+/// shuffles and adds. The failure it guards against is a tree that folds `log2(width)` times
+/// instead, which returns the *subgroup's* total in every lane and agrees with the reference in the
+/// one case where a cluster is the subgroup.
+#[test]
+fn a_butterfly_tree_inside_a_cluster_agrees_with_the_clustered_reduce() {
+    use simdr::lanes::{F32, LaneError};
+
+    let Some(gpu) = device("butterfly-cluster") else {
+        return;
+    };
+    let limits = gpu.limits().clone();
+
+    if !limits.subgroup_arithmetic || !limits.subgroup_shuffle || !limits.subgroup_clustered {
+        eprintln!("SKIPPED butterfly-cluster: the device lacks part of the subgroup surface");
+        return;
+    }
+
+    let width = limits.subgroup_size;
+    let count = WORKGROUP_SIZE as usize;
+    let input = ramp(count);
+
+    // The built-in's lane count is a const generic and the cluster width is a number, so the two
+    // are paired here rather than matched on — a `_ =>` arm would be a case this test silently did
+    // not run.
+    type Builder = fn(u32) -> Result<Vec<u32>, LaneError>;
+    let cases: [(u32, Builder); 3] = [
+        (2, kernels::lane_sum::<F32, 2>),
+        (4, kernels::lane_sum::<F32, 4>),
+        (8, kernels::lane_sum::<F32, 8>),
+    ];
+
+    for (cluster, builtin) in cases {
+        if cluster >= width {
+            eprintln!("SKIPPED clusters of {cluster}: not narrower than a {width}-wide subgroup");
+            continue;
+        }
+
+        let tree = gpu
+            .run(
+                &kernels::butterfly_cluster_sum(width, cluster).expect("built"),
+                &input,
+                1,
+            )
+            .expect("dispatched");
+        let reduced = gpu
+            .run(&builtin(width).expect("built"), &input, 1)
+            .expect("dispatched");
+
+        assert_eq!(
+            tree,
+            common::grouped_sums(count, cluster as usize),
+            "the clustered tree disagrees with the reference at cluster {cluster}"
+        );
+        assert_eq!(
+            tree, reduced,
+            "the clustered tree and the clustered reduce disagree at cluster {cluster}"
+        );
+    }
+}
+
 /// A rolled loop, which is where the phis and the back edge live.
 #[test]
 fn a_rolled_loop_carries_its_value_round_the_back_edge() {

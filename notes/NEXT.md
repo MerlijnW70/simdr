@@ -709,6 +709,16 @@ And with what they say about a smaller `N`, which is the case `ClusteredReduce` 
 
 ## The list, rewritten 2026-08-14, after the first one ran out
 
+> **All six are done as of the same day**, and the last of them — item 5, the clustered scan —
+> was written here as a decision rather than as work. It was: the two options offered were both
+> wrong, and finding the third took less time than either would have. What is left below is items
+> 7 and 8, which are the two that were carried over deliberately.
+>
+> The thing worth carrying forward is not any of the six. It is that finishing item 5 let the
+> *fuzzer* reach the clustered scan for the first time, and the first sweep found a driver that
+> faults compiling a valid module. Two of the four sittings this file has recorded ended the same
+> way: the coverage that mattered came from removing a refusal, not from adding a test.
+
 Eleven of the thirteen above are done and the other two are deferred on purpose or need hardware
 that is not here. This is what a second survey turned up, and its shape is different: the first list
 was mostly *things that were false*, and this one is mostly **holes the last week's work opened**.
@@ -788,14 +798,41 @@ which is ceremony traded for economy and the doc says so: a dozen buffers and `2
 pipelines rebuilt per call, all of which `Gpu::scanner` keeps. It exists for symmetry with
 `Gpu::sum` and for the cases where building an object to use it once is the wrong shape.
 
-**5. `Lanes::prefix_sum` still refuses a clustered vector.** The ladder works and is proven on three
-devices, and it lives in `runner::kernels` — so the *lane API*, which is what the README's mapping
-table describes, cannot reach it. Two ways in are written down above and neither is obviously right;
-that is the decision to make rather than the code to write.
+**5. `Lanes::prefix_sum` refused a clustered vector — done, by a third way neither option saw.**
+The two written down were "thread a lane index into `Lanes::new`" and "declare
+`SubgroupLocalInvocationId` in `kernel::binding`". The objection to the second was entirely about
+*when*: it costs every kernel an `Input` variable and the `GroupNonUniform` capability. Declared
+**on demand**, by `Lanes` itself, it costs nothing to a kernel that does not scan a clustered
+vector — and a test still asserts that a kernel which only scales declares no subgroup capability.
+
+That also settles which number it is. A kernel knows its index within the *workgroup*, and on all
+three implementations here `local & (width - 1)` is the same number — because subgroups happen to
+be cut from consecutive local invocations, which Vulkan promises for a pipeline that asked for full
+subgroups and not otherwise. The first option would have carried that coincidence into the layer
+whose value is that it is defined. `decisions/DR-0007` writes it up.
+
+The price is one mechanism underneath: `OpEntryPoint` lists the `Input` variables the entry point
+reaches, and a built-in the *body* asks for arrives long after that instruction was emitted, so
+`Module` holds the entry point and its interface as data and renders the instruction whenever
+either grows.
+
+**The failure mode is an invalid module that every driver runs anyway**, so the check that carries
+this is `spirv-val` and nothing else: deleting the line that adds the variable to the interface
+leaves 19 of `tests/kernels.rs`'s 20 modules rejected and all three devices still returning right
+answers. That was run rather than assumed.
+
+The kernel that held the second copy of the ladder is now a load, a scan and a store — and the
+fuzzer generates clustered scans, which it never could while they were refused. Two deliberate
+breakages were caught at seeds 0 and 1. **It also found a driver that faults compiling a valid
+module**; `notes/FINDINGS.md` has the bisection and what the suite does about it.
 
 ### Tier 3 — hygiene
 
-**6. `kernels::scan::mod` is 672 lines again.** It was split at 639 four days ago and the clustered
+**~~6.~~ `kernels::scan::mod` is 672 lines again — done, and then done again.** Split when the
+clustered ladder was carved out into `clusters.rs`; that file then lost the ladder itself to
+`Lanes::prefix_sum` under item 5, and what is left in it is the kernel that runs the mapping.
+
+**6. The original wording, for the record:** It was split at 639 four days ago and the clustered
 ladder put it straight back. There are three concerns in it now, not two: the workgroup scan and the
 arithmetic everything shares, the block composition (already next door in `blocks.rs`), and the
 clustered ladder — which shares nothing with either and is the one that grew.
@@ -807,6 +844,87 @@ clustered ladder — which shares nothing with either and is the one that grew.
 **8. A third vendor.** Still needs hardware that is not in this machine. Intel integrated is the
 cheap one, and CI on a shared runner has already shown what a fourth implementation is worth — it
 found a signed zero two GPUs and a local lavapipe all agreed on.
+
+---
+
+## The list, rewritten 2026-08-14, after the second one ran out
+
+The second list finished the same day it was written, so this is a third survey of the tree. Its
+shape is different again. The first list was mostly *things that were false*; the second was
+**holes the week's work opened**; this one is mostly **refusals that are stronger than the hardware
+they are protecting** — and the reason it has that shape is item 5 of the second list. Removing one
+refusal turned out to be worth more than any test written that week, so the survey went looking for
+the others.
+
+### Tier 1 — things that were already false, and are fixed
+
+**1. `kernels::scan::mod` said the multi-block scan "is not built" — done.** It sat in a section
+headed *What it does not do*, four lines below the sentence naming `blocks.rs` as the file that
+does it, and two days after `Gpu::scanner` started running the whole thing in one submission. The
+heading is *What a kernel here does not do* now, and the limit it states is the kernel's rather
+than the crate's.
+
+**2. The README's test counts were 333 and 706 — done.** They are 348 and 740. Also in that table:
+`spirv-val`'s row now records what it is the only layer that can see, which is an entry point whose
+interface omits a built-in the body loads.
+
+### Tier 2 — refusals stronger than the hardware
+
+**3. `Lanes::butterfly` refused a clustered vector, and for a small mask it need not — done.** A
+butterfly pairs lane `l` with `l ^ mask`. Clusters are aligned runs of `LANES` lanes and `LANES` is
+a power of two, so a `mask < LANES` flips only bits below the cluster's own width and **cannot
+leave it**. Nothing to mask off, no lane index needed, no undefined lane anywhere: the change is a
+bound, and a `mask` at or above `LANES` is refused by name rather than clamped.
+
+The refusal's stated reason — "a shuffle reads a lane of the subgroup, and a narrower vector shares
+those lanes with other vectors" — was true of the *shifts* and false of the butterfly, and it made
+the one shuffle a clustered vector can have unreachable.
+
+`kernels::butterfly_cluster_sum` is what it buys, and it is the kernel this could not have: four
+independent trees of `log2(cluster)` steps, checked on a device against the single `ClusteredReduce`
+that computes the same thing. Two implementations, neither of them the reference — which is what
+`kernels::reduce`'s own header says it is for.
+
+**And the bound caught the mistake before the comparison did.** The teeth check for that test was to
+fold `log2(width)` times instead of `log2(cluster)` — the plausible wrong kernel, which returns the
+subgroup's total in every lane. It does not return anything: the first mask that reaches outside the
+cluster is refused at build time, by name.
+
+**4. `Lanes::broadcast` refuses one too, and could now be built.** Broadcasting lane `source` of a
+clustered vector means reading subgroup lane `(l & !(LANES - 1)) + source`, which differs per lane
+— and `OpGroupNonUniformShuffle` takes a **dynamic** id, so that is one `OpBitwiseAnd`, one
+`OpIAdd` and the instruction. It needs the invocation's own lane, which `Lanes` has had since
+`decisions/DR-0007` and did not when this was refused.
+
+Worth doing after 3, and worth measuring against the alternative: a clustered `Reduce` already
+delivers a total to every lane of the cluster, so the broadcast is only interesting for values a
+reduction does not produce.
+
+**5. The shifts are the two that genuinely cross, and the question is what a cluster's edge means.**
+`shift_up`/`shift_down` really do read a neighbouring vector's lanes, and the clustered ladder shows
+what masking them costs — one compare and one select per call. What it does not show is what should
+land in the bottom `delta` lanes: the subgroup form leaves them undefined and says so, and doing the
+same at a cluster's edge would be consistent but is a claim about *our* API rather than about SPIR-V.
+Written down rather than guessed at, exactly as item 5 of the second list was.
+
+### Tier 3 — verification debt
+
+**6. The mutation gate has not run over the clustered scan.** Every other item of the last two lists
+records what the gate found; this one cannot yet, because a diff-scoped run over a thousand changed
+lines runs the whole GPU suite per mutant and takes hours. What stands in for it so far is four
+deliberate breakages — the mask dropped, the exclusive answer replaced by the inclusive one, the
+interface entry removed, and the reference's group width set back to the subgroup — each caught,
+three of them at seed 0 or 1.
+
+That is not the same claim and should not be written as though it were.
+
+### Tier 4 — carried over, unchanged
+
+**7. A buffer the caller already owns.** Still no caller in this repository wants it.
+
+**8. A third vendor.** Still needs hardware that is not in this machine — and the integrated
+Radeon's compiler fault is a second argument for it, because with three implementations a fault on
+one is a defect and with two it is an argument.
 
 ---
 
@@ -832,6 +950,17 @@ defined behaviour lost.
 **A third dispatch axis.** `decisions/DR-0006` has the argument: the term is easy and the *layout*
 is not, and a z count above 1 today would run every workgroup again over the same elements. `Grid`
 has no z field, so that dispatch cannot be written by accident.
+
+**Working around the AMD driver's clustered-scan fault.** It dies inside
+`vkCreateComputePipelines` on a module `spirv-val` accepts and two other implementations run
+correctly, so there is nothing here to fix — and shaping the emitter around one vendor's crash
+would mean carrying a workaround with no test that could ever say it was still needed. The suite
+probes for it, replaces those rounds with a reduction, and prints the count.
+
+**A clustered scan by subtraction, as the cheap path for that device.** It would dodge the fault
+and it is the trade this project has refused twice: over floats it takes a large running total back
+off itself and loses precisely the low bits the scan just accumulated. An exact answer on two
+devices beats an approximate one on three.
 
 ---
 

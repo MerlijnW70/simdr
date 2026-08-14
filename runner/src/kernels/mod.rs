@@ -38,9 +38,9 @@ pub use network::{Layer, clipped_dot, clipped_dot_split, unclipped_dot};
 pub use occupancy::{sized_lane_sum, sized_repeated_scale};
 pub use plane::{flat_scale, row_bias, row_index, row_scale, row_sum};
 pub use reduce::{
-    FOLD_HALF_SPEC_ID, butterfly_pair_sum, butterfly_tree_sum, dot_product, dot_product_whole,
-    fold_by, fold_halves, fold_halves_open, lane_max, lane_max_whole, lane_sum, lane_sum_whole,
-    workgroup_sum,
+    FOLD_HALF_SPEC_ID, butterfly_cluster_sum, butterfly_pair_sum, butterfly_tree_sum, dot_product,
+    dot_product_whole, fold_by, fold_halves, fold_halves_open, lane_max, lane_max_whole, lane_sum,
+    lane_sum_whole, workgroup_sum,
 };
 pub use scatter::{claim_slots, histogram, histogram_incrementing};
 pub use specialized::{

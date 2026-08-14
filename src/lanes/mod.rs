@@ -58,7 +58,7 @@ pub use self::uniform::Uniform;
 pub use self::vector::{MAX_STRIPS, Vector};
 
 use crate::module::{Id, Module};
-use crate::spec::Scope;
+use crate::spec::{BuiltIn, Capability, Scope};
 
 /// Builds lane operations into a module, for a subgroup of a known width.
 pub struct Lanes<'module> {
@@ -216,6 +216,34 @@ impl<'module> Lanes<'module> {
     /// The scope constant every subgroup instruction here uses.
     pub(crate) const fn scope(&self) -> Id {
         self.scope
+    }
+
+    /// This invocation's index within its subgroup, loaded from `SubgroupLocalInvocationId`.
+    ///
+    /// **The defined answer, and there is a cheaper wrong one.** A kernel already knows its index
+    /// within the *workgroup*, and on the three implementations here `local & (width - 1)` gives
+    /// the same number — but only because subgroups happen to be cut from consecutive local
+    /// indices, which Vulkan guarantees for a pipeline that asked for full subgroups and not
+    /// otherwise. This built-in is defined to be the lane's position, so the mask that keeps a
+    /// clustered scan inside its cluster rests on the specification rather than on three devices
+    /// agreeing.
+    ///
+    /// Declared on demand: nothing that does not ask for it pays the `Input` variable, and nothing
+    /// that does not ask for it declares `GroupNonUniform` — which a kernel that only scales must
+    /// not, or it stops running on devices that would have run it. Asking twice yields one
+    /// variable and two loads; the second is `OpLoad` of a value the driver has in a register.
+    ///
+    /// # Errors
+    ///
+    /// [`LaneError::Build`] if the variable or the load cannot be emitted.
+    fn lane_index(&mut self) -> Result<Id, LaneError> {
+        self.module()
+            .require_capability(Capability::GroupNonUniform)?;
+        let uint = self.module().type_int(32, false)?;
+        let variable = self
+            .module()
+            .builtin_input(BuiltIn::SubgroupLocalInvocationId, uint)?;
+        Ok(self.module().load(uint, variable)?)
     }
 }
 

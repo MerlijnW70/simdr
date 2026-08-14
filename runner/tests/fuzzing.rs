@@ -11,7 +11,7 @@
 mod common;
 
 use common::device;
-use runner::fuzz::{self, ALL_DOMAINS, Domain, Outcome, Program};
+use runner::fuzz::{self, ALL_DOMAINS, Domain, Finish, Op, Outcome, Program};
 use runner::kernels::WORKGROUP_SIZE;
 
 /// How many programs each domain checks.
@@ -48,6 +48,65 @@ fn rounds() -> u64 {
         .unwrap_or(ROUNDS)
 }
 
+/// One program, run to find out whether **this device** miscompiles the clustered ladder.
+///
+/// An integrated AMD Radeon does. It answers this one wrongly, and — bisected in
+/// `notes/FINDINGS.md` — it takes the *process* down inside `vkCreateComputePipelines` for a
+/// four-step program whose three-step prefix compiles, whose reduction and maximum forms compile,
+/// and which `spirv-val` accepts. A driver that faults compiling a valid module has a defect
+/// whatever the module says; an RTX 4080 and lavapipe compile and run every one of them correctly.
+///
+/// Probed rather than matched on a device name: a driver update that fixes it should restore the
+/// coverage without anyone editing a list, and a second device that has it should lose the
+/// coverage without anyone noticing it there first. The probe has to be a program the device gets
+/// *wrong* rather than one it faults on — nothing can catch a fault to report it.
+fn miscompiles_clustered_scans(gpu: &runner::Gpu, limits: &runner::Limits) -> bool {
+    // The probe is an 8-bit program, so a device that cannot hold a byte in a buffer cannot be
+    // asked. None is known; the alternative would be a probe whose failure mode is the fault.
+    if !limits.narrow.byte_kernel() {
+        return false;
+    }
+
+    let domain = Domain::UnsignedByte;
+    let program = Program {
+        domain,
+        subgroup: limits.subgroup_size,
+        workgroup: WORKGROUP_SIZE,
+        groups: 1,
+        lanes: (limits.subgroup_size / 2).max(1),
+        steps: vec![Op::MaxConstant(3)],
+        finish: Finish::ScanExclusive,
+    };
+    // Every value is above the max's operand, so the step is the identity and only the instruction
+    // is under test.
+    let input: Vec<u32> = (0..program.input_len())
+        .map(|index| domain.encode(index as u32 % 9 + 10))
+        .collect();
+
+    match fuzz::check(gpu, &program, &input) {
+        Ok(Outcome::Disagreed { .. }) => true,
+        // Refused or unrepresentable means the probe proved nothing, and neither does an error;
+        // in all three the sweeps run as usual and would report a disagreement themselves.
+        Ok(_) | Err(_) => false,
+    }
+}
+
+/// Whether `program` is the shape [`miscompiles_clustered_scans`] found this device getting wrong.
+///
+/// **Three widenings, and each one was the filter being too clever.** It began as "8-bit, and a
+/// max": the probe reproduced with one. Then a `[MinConstant(0)]` in the same shape faulted the
+/// process, so it became the 8-bit family; then a 16-bit program disagreed after a rolled loop, so
+/// it became every narrow type; then an `f32` program faulted, and the bisection showed the
+/// *inclusive* direction faulting too. What survives all four is the ladder itself.
+///
+/// So the rule is two conditions: a vector narrower than the subgroup, and a scan. Every reduction,
+/// shuffle, vote and strip-mined scan in every domain is still checked on this device — the loss is
+/// the mapping the driver cannot compile, and it is counted where the report can see it.
+fn defective_here(program: &Program) -> bool {
+    program.lanes < program.subgroup
+        && matches!(program.finish, Finish::Scan | Finish::ScanExclusive)
+}
+
 /// What a sweep did, rather than only how many times it agreed.
 struct Swept {
     /// Rounds the device and the reference were compared on, and agreed.
@@ -59,10 +118,16 @@ struct Swept {
     /// Of the rounds that agreed, how many ended in a **scan**.
     ///
     /// Counted apart because the guard below — most rounds proved something — is satisfied by the
-    /// reductions alone. A scan is refused for a clustered vector and is the newest thing here, so
-    /// "the sweep ran" and "the sweep exercised a prefix" are different claims and only one of
-    /// them was being made.
+    /// reductions alone: "the sweep ran" and "the sweep exercised a prefix" are different claims
+    /// and only one of them was being made. Every mapping ends up here now, the clustered one
+    /// included, where the generator used to offer a reduction instead.
     scans: u64,
+    /// Rounds whose clustered scan was replaced by a sum, this device being unable to compile one.
+    ///
+    /// Zero on every device that passes [`miscompiles_clustered_scans`], which is every device here
+    /// but one. Reported rather than hidden: a skip that nobody sees is a coverage loss that looks
+    /// like coverage.
+    defective: u64,
 }
 
 impl Swept {
@@ -74,8 +139,8 @@ impl Swept {
     /// than a hypothetical, because a sum over a few hundred halves leaves 2048 at once.
     fn expect_mostly_checked(&self, domain: Domain, rounds: u64) {
         eprintln!(
-            "fuzz {domain:?} over {rounds} seeds: {} agreed of which {} scans, {} refused, {} unrepresentable",
-            self.checked, self.scans, self.refused, self.unrepresentable
+            "fuzz {domain:?} over {rounds} seeds: {} agreed of which {} scans, {} refused, {} unrepresentable, {} clustered scans replaced by a sum",
+            self.checked, self.scans, self.refused, self.unrepresentable, self.defective
         );
         assert!(
             self.checked > rounds / 2,
@@ -90,15 +155,27 @@ impl Swept {
 }
 
 /// Run `rounds` generated programs in `domain` and report how many were actually checked.
-fn sweep(gpu: &runner::Gpu, domain: Domain, subgroup: u32, rounds: u64) -> Swept {
+///
+/// `defect` says whether this device failed [`miscompiles_clustered_scans`]; when it did, the
+/// rounds that would end in a clustered scan **end in a sum instead** rather than being dropped.
+/// A third of the seeds generate one, and dropping them would take their steps — the loops, the
+/// votes, the narrow conversions — down with the tail this driver cannot compile.
+fn sweep(gpu: &runner::Gpu, domain: Domain, subgroup: u32, rounds: u64, defect: bool) -> Swept {
     let mut checked = 0;
     let mut refused = 0;
     let mut unrepresentable = 0;
     let mut scans = 0;
+    let mut defective = 0;
 
     for seed in 0..rounds {
         let mut rng = fuzz::Rng::new(seed);
-        let program = fuzz::generate(&mut rng, domain, subgroup, WORKGROUP_SIZE);
+        let mut program = fuzz::generate(&mut rng, domain, subgroup, WORKGROUP_SIZE);
+
+        if defect && defective_here(&program) {
+            defective += 1;
+            program.finish = Finish::Sum;
+        }
+
         let input = corpus(domain, program.input_len());
         let is_scan = matches!(
             program.finish,
@@ -133,6 +210,7 @@ fn sweep(gpu: &runner::Gpu, domain: Domain, subgroup: u32, rounds: u64) -> Swept
         refused,
         unrepresentable,
         scans,
+        defective,
     }
 }
 
@@ -149,7 +227,8 @@ fn generated_integer_programs_agree_with_the_cpu_reference() {
     }
 
     let rounds = rounds();
-    let swept = sweep(&gpu, Domain::Unsigned, limits.subgroup_size, rounds);
+    let defect = miscompiles_clustered_scans(&gpu, &limits);
+    let swept = sweep(&gpu, Domain::Unsigned, limits.subgroup_size, rounds, defect);
 
     swept.expect_mostly_checked(Domain::Unsigned, rounds);
 }
@@ -172,7 +251,8 @@ fn generated_float_programs_agree_with_the_cpu_reference() {
     }
 
     let rounds = rounds();
-    let swept = sweep(&gpu, Domain::Float, limits.subgroup_size, rounds);
+    let defect = miscompiles_clustered_scans(&gpu, &limits);
+    let swept = sweep(&gpu, Domain::Float, limits.subgroup_size, rounds, defect);
 
     swept.expect_mostly_checked(Domain::Float, rounds);
 }
@@ -195,7 +275,8 @@ fn generated_signed_programs_agree_with_the_cpu_reference() {
     }
 
     let rounds = rounds();
-    let swept = sweep(&gpu, Domain::Signed, limits.subgroup_size, rounds);
+    let defect = miscompiles_clustered_scans(&gpu, &limits);
+    let swept = sweep(&gpu, Domain::Signed, limits.subgroup_size, rounds, defect);
 
     swept.expect_mostly_checked(Domain::Signed, rounds);
 }
@@ -235,6 +316,14 @@ fn generated_narrow_programs_agree_with_the_cpu_reference() {
     }
 
     let rounds = rounds();
+    let defect = miscompiles_clustered_scans(&gpu, &limits);
+    if defect {
+        eprintln!(
+            "fuzz-narrow: this driver miscompiles the clustered ladder, so those rounds are \
+             counted and skipped — see notes/FINDINGS.md"
+        );
+    }
+
     for (domain, needed) in [
         (Domain::UnsignedByte, limits.narrow.byte_kernel()),
         (Domain::Byte, limits.narrow.byte_kernel()),
@@ -247,7 +336,7 @@ fn generated_narrow_programs_agree_with_the_cpu_reference() {
             continue;
         }
 
-        let swept = sweep(&gpu, domain, limits.subgroup_size, rounds);
+        let swept = sweep(&gpu, domain, limits.subgroup_size, rounds, defect);
         swept.expect_mostly_checked(domain, rounds);
     }
 }
@@ -307,6 +396,89 @@ fn strip_mined_programs_agree_in_every_domain() {
     assert!(
         scanned > 0,
         "no strip-mined scan was compared, so the carry between strips proved nothing"
+    );
+}
+
+/// The clustered end, which randomness alone reaches rarely and which is a *ladder* rather than an
+/// instruction.
+///
+/// A vector narrower than the subgroup packs several of itself into it, and SPIR-V has no clustered
+/// scan — so `Lanes::prefix_sum` builds `log2(cluster)` steps of shuffle, compare and select. Every
+/// step of that is a chance to include a lane belonging to the cluster next door, and the failure
+/// it produces is a scan that agrees in the first cluster of every subgroup and is wrong in all the
+/// others. That is exactly the shape a hand-written test at one cluster width is worst at seeing.
+///
+/// The scan is forced rather than waited for: a generated program reaches this shape by chance only
+/// twice in five.
+#[test]
+fn clustered_programs_agree_in_every_domain() {
+    let Some(gpu) = device("fuzz-clusters") else {
+        return;
+    };
+    let limits = gpu.limits().clone();
+
+    if !limits.subgroup_arithmetic || !limits.subgroup_shuffle {
+        eprintln!("SKIPPED fuzz-clusters: the device lacks part of the subgroup surface");
+        return;
+    }
+    if limits.subgroup_size < 2 {
+        eprintln!("SKIPPED fuzz-clusters: nothing is narrower than a one-lane subgroup");
+        return;
+    }
+
+    // Every program here is the shape this driver cannot compile, so there is nothing left to run
+    // — and the whole test is skipped rather than passing on an empty count.
+    if miscompiles_clustered_scans(&gpu, &limits) {
+        eprintln!(
+            "SKIPPED fuzz-clusters: this driver miscompiles the clustered ladder, and faults \
+             compiling some of it — see notes/FINDINGS.md"
+        );
+        return;
+    }
+
+    let mut scanned = 0_u64;
+
+    for domain in ALL_DOMAINS {
+        for seed in 0..64_u64 {
+            let mut rng = fuzz::Rng::new(seed.wrapping_mul(0x2545_F491_4F6C_DD1D));
+            let mut program =
+                fuzz::generate(&mut rng, domain, limits.subgroup_size, WORKGROUP_SIZE);
+
+            // Both directions, and every cluster width the device can hold: a ladder of one step
+            // and a ladder of four are different modules, and the mask is what separates them.
+            program.finish = if seed % 2 == 0 {
+                fuzz::Finish::Scan
+            } else {
+                fuzz::Finish::ScanExclusive
+            };
+            program.lanes = (limits.subgroup_size >> (1 + seed % 3)).max(1);
+
+            let input = corpus(domain, program.input_len());
+
+            match fuzz::check(&gpu, &program, &input).expect("dispatched") {
+                Outcome::Agreed => scanned += 1,
+                Outcome::Refused(_) | Outcome::Unrepresentable => {}
+                Outcome::Disagreed {
+                    program,
+                    expected,
+                    actual,
+                    at,
+                } => {
+                    panic!(
+                        "{domain:?} seed {seed} disagreed at index {at}: expected {}, got {}\n{}",
+                        expected.get(at).copied().unwrap_or_default(),
+                        actual.get(at).copied().unwrap_or_default(),
+                        describe(&program)
+                    );
+                }
+            }
+        }
+    }
+
+    eprintln!("fuzz-clusters: {scanned} clustered scans agreed");
+    assert!(
+        scanned > 0,
+        "no clustered scan was compared, so the ladder proved nothing"
     );
 }
 
@@ -388,31 +560,38 @@ fn the_fuzzer_notices_when_a_scan_is_wrong() {
         return;
     }
 
+    // Two mappings, because they are two different modules: one subgroup instruction, and a ladder
+    // of shuffles and selects. A reference that modelled the first correctly says nothing about the
+    // second — which is how the clustered scan came to be checked by hand-written tests only.
+    let widths = [limits.subgroup_size, (limits.subgroup_size / 2).max(1)];
+
     for finish in [fuzz::Finish::Scan, fuzz::Finish::ScanExclusive] {
-        for domain in ALL_DOMAINS {
-            let mut rng = fuzz::Rng::new(7);
-            let mut program =
-                fuzz::generate(&mut rng, domain, limits.subgroup_size, WORKGROUP_SIZE);
-            program.finish = finish;
-            // A scan has no clustered form, so the vector has to be at least the subgroup.
-            program.lanes = limits.subgroup_size;
+        for lanes in widths {
+            for domain in ALL_DOMAINS {
+                let mut rng = fuzz::Rng::new(7);
+                let mut program =
+                    fuzz::generate(&mut rng, domain, limits.subgroup_size, WORKGROUP_SIZE);
+                program.finish = finish;
+                program.lanes = lanes;
 
-            let input = corpus(domain, program.input_len());
-            let mut wrong = input.clone();
-            if let Some(first) = wrong.first_mut() {
-                *first = domain.encode(200);
+                let input = corpus(domain, program.input_len());
+                let mut wrong = input.clone();
+                if let Some(first) = wrong.first_mut() {
+                    *first = domain.encode(200);
+                }
+
+                let spirv = program.build().expect("built");
+                let actual = gpu
+                    .run_u32(&spirv, &input, program.workgroups())
+                    .expect("ran");
+                let expected = fuzz::reference(&program, &wrong);
+
+                assert_ne!(
+                    expected.values, actual,
+                    "a {finish:?} over {lanes} lanes in {domain:?} did not notice a changed \
+                     element, so the comparison that guards every scan in this file cannot fail"
+                );
             }
-
-            let spirv = program.build().expect("built");
-            let actual = gpu
-                .run_u32(&spirv, &input, program.workgroups())
-                .expect("ran");
-            let expected = fuzz::reference(&program, &wrong);
-
-            assert_ne!(
-                expected.values, actual,
-                "a {finish:?} in {domain:?} did not notice a changed element, so the comparison                  that guards every scan in this file cannot fail"
-            );
         }
     }
 }

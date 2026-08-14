@@ -4,7 +4,6 @@
 //! copied into each kernel — this is the sixty lines that `Kernel::new` replaces.
 
 use super::Shape;
-use crate::encode;
 use crate::lanes::{Element, LaneError};
 use crate::module::{Id, Module, Section, Version, op};
 use crate::spec::{
@@ -56,7 +55,6 @@ pub(super) fn build<T: Element>(shape: Shape) -> Result<Parts, LaneError> {
     let uint3 = module.type_vector(uint, 3)?;
 
     let element_pointer = module.type_pointer(StorageClass::StorageBuffer, element)?;
-    let uint3_pointer = module.type_pointer(StorageClass::Input, uint3)?;
 
     // One struct per buffer rather than one shared: §2.8 lets aggregates repeat precisely so they
     // can be decorated apart, and a caller that later wants different strides per binding should
@@ -84,29 +82,16 @@ pub(super) fn build<T: Element>(shape: Shape) -> Result<Parts, LaneError> {
         buffers.push(variable);
     }
 
-    let local_id = module.global_variable(uint3_pointer, StorageClass::Input)?;
-    let workgroup_id = module.global_variable(uint3_pointer, StorageClass::Input)?;
+    // Declared, decorated and named in the interface in one call each. Below SPIR-V 1.4 that
+    // interface lists Input and Output only, so the buffers are deliberately absent — and it is
+    // rendered rather than emitted, because a kernel that reaches for a built-in while its body is
+    // being built adds to it long after this line. See `module::entry`.
+    let local_id = module.builtin_input(BuiltIn::LocalInvocationId, uint3)?;
+    let workgroup_id = module.builtin_input(BuiltIn::WorkgroupId, uint3)?;
     module.name(local_id, "local_id")?;
     module.name(workgroup_id, "workgroup_id")?;
-    module.decorate(
-        local_id,
-        Decoration::BuiltIn,
-        &[BuiltIn::LocalInvocationId.word()],
-    )?;
-    module.decorate(
-        workgroup_id,
-        Decoration::BuiltIn,
-        &[BuiltIn::WorkgroupId.word()],
-    )?;
 
-    // Emitted after the variables it names and still landing ahead of them, because the sections
-    // are buffered apart. Below SPIR-V 1.4 the interface lists Input and Output only, so the
-    // buffers are deliberately absent.
-    let mut entry = vec![ExecutionModel::GlCompute.word(), main.word()];
-    encode::literal_string(&mut entry, "main");
-    entry.push(local_id.word());
-    entry.push(workgroup_id.word());
-    module.emit(Section::EntryPoint, op::ENTRY_POINT, &entry)?;
+    module.entry_point(ExecutionModel::GlCompute, main, "main")?;
     module.emit(
         Section::ExecutionMode,
         op::EXECUTION_MODE,

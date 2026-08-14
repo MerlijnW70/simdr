@@ -9,11 +9,19 @@
 //! - Wider: fold the strips together inside each lane first — `strips - 1` scalar operations —
 //!   then one subgroup instruction over the partials.
 //!
+//! A **scan** takes the same three mappings and only the first is an instruction: a
+//! subgroup-wide vector is one `InclusiveScan`, a wider one is a scan per strip with a running
+//! total carried between them, and a narrower one is a ladder — SPIR-V's clustered form is a
+//! *reduce*, so there is no clustered scan to ask for.
+//!
 //! Needs `GroupNonUniform` and `GroupNonUniformArithmetic`, plus `GroupNonUniformClustered`
 //! whenever a vector is narrower than the subgroup. The caller declares them; nothing here does.
+//! The clustered ladder is the exception in both directions: it declares
+//! `GroupNonUniformShuffleRelative` for the shuffles it is built from, and it needs neither of the
+//! arithmetic capabilities, because every instruction in it is a scalar one.
 
 use super::{Element, LaneError, Lanes, Mapping, Vector};
-use crate::module::{Id, Reduction};
+use crate::module::{Id, Reduction, op};
 use crate::spec::Capability;
 
 impl Lanes<'_> {
@@ -32,17 +40,20 @@ impl Lanes<'_> {
 
     /// Running totals: each lane receives the sum of itself and every lane before it.
     ///
+    /// All three mappings, and only one of them is an instruction. A subgroup-wide vector is one
+    /// `InclusiveScan`; a wider one is a scan per strip with a running total carried between them;
+    /// a narrower one is a ladder, because SPIR-V's clustered form is a *reduce* and there is no
+    /// clustered scan to ask for.
+    ///
     /// # Errors
     ///
-    /// [`LaneError::NoSuchForm`] unless the vector is exactly the subgroup's width. SPIR-V's
-    /// clustered form is a *reduce*, so a narrower vector has no clustered scan; and a
-    /// strip-mined scan would have to carry a running total between strips, which is a different
-    /// algorithm rather than a different operand.
+    /// [`LaneError::NoMapping`] if `LANES` cannot sit on this subgroup, [`LaneError::Build`] if an
+    /// instruction cannot be emitted.
     pub fn prefix_sum<T: Element, const LANES: u32>(
         &mut self,
         vector: Vector<T, LANES>,
     ) -> Result<Vector<T, LANES>, LaneError> {
-        self.scan_with::<T, LANES>(Reduction::InclusiveScan, "prefix_sum", vector)
+        self.scan_with::<T, LANES>(Reduction::InclusiveScan, vector)
     }
 
     /// The same, with each lane's own element left out: lane 0 receives the additive identity.
@@ -63,26 +74,27 @@ impl Lanes<'_> {
         &mut self,
         vector: Vector<T, LANES>,
     ) -> Result<Vector<T, LANES>, LaneError> {
-        self.scan_with::<T, LANES>(Reduction::ExclusiveScan, "prefix_sum_exclusive", vector)
+        self.scan_with::<T, LANES>(Reduction::ExclusiveScan, vector)
     }
 
-    /// Both scans, which differ only in the group operation they name.
+    /// Both scans, at all three mappings — they differ in the group operation they name, and in
+    /// the clustered case in which of two values each lane keeps.
     ///
-    /// `operation` is carried through to the error rather than hard-coded, so a caller told why its
-    /// vector has no scan is told which scan it asked for.
+    /// It used to take the caller's name as well, to tell a refused caller which scan it had asked
+    /// for. No mapping is refused any more, so there is nothing left to name.
     fn scan_with<T: Element, const LANES: u32>(
         &mut self,
         reduction: Reduction,
-        operation: &'static str,
         vector: Vector<T, LANES>,
     ) -> Result<Vector<T, LANES>, LaneError> {
         match self.mapping::<LANES>()? {
             Mapping::WholeSubgroup => {}
-            Mapping::Clusters { .. } => {
-                return Err(LaneError::NoSuchForm {
-                    operation,
-                    because: "SPIR-V's clustered form is a reduce, so a scan would run across                               lanes belonging to a different vector",
-                });
+            // **A ladder, because there is no clustered scan to ask for.** `log2(size)` steps of
+            // shuffle, compare and select, with the mask keeping each cluster's running total
+            // inside itself — see [`Lanes::scan_clusters`].
+            Mapping::Clusters { size } => {
+                let exclusive = matches!(reduction, Reduction::ExclusiveScan);
+                return self.scan_clusters::<T, LANES>(size, exclusive, vector);
             }
             // **Built now, and it is the running total that makes it work.** Lane `l` holds the
             // elements at `l`, `l + width`, `l + 2·width`, so strip `s` is vector positions
@@ -162,6 +174,82 @@ impl Lanes<'_> {
         }
 
         self.from_strips(&scanned)
+    }
+
+    /// A scan of a vector narrower than the subgroup, within each cluster.
+    ///
+    /// **The one mapping SPIR-V has no instruction for.** There is a `ClusteredReduce` and no
+    /// clustered scan, so this is a Hillis-Steele ladder: `log2(size)` steps, each adding the
+    /// element `distance` lanes below and keeping it only where that neighbour belongs to the same
+    /// cluster.
+    ///
+    /// ```text
+    ///   for distance in 1, 2, 4, … < size:
+    ///       value += (lane % size) > distance - 1  ?  the value `distance` lanes below  :  nothing
+    /// ```
+    ///
+    /// Both arms are computed and one is discarded, which is what makes it branch-free *and* safe:
+    /// a shuffle leaves the bottom `distance` lanes of the subgroup undefined, and the mask is what
+    /// stops either that or a neighbouring cluster's total reaching the answer.
+    ///
+    /// **Exact, and that is why it is a ladder rather than a subtraction.** The cheap alternative
+    /// is one subgroup-wide scan minus each cluster's starting offset — three instructions instead
+    /// of `3 · log2(size)` — and over floats it takes a large running total back off itself and
+    /// loses precisely the low bits the scan just accumulated. The same reason
+    /// [`Lanes::prefix_sum_exclusive`] exists rather than a subtraction.
+    ///
+    /// The exclusive form is the inclusive one shifted a lane up, with the identity where the
+    /// cluster begins — a shuffle and a select, and no arithmetic that could round.
+    fn scan_clusters<T: Element, const LANES: u32>(
+        &mut self,
+        size: u32,
+        exclusive: bool,
+        vector: Vector<T, LANES>,
+    ) -> Result<Vector<T, LANES>, LaneError> {
+        // Where this invocation sits inside its cluster. `size` divides the width and both are
+        // powers of two, so the remainder is a mask — and it is the position within the *cluster*
+        // rather than within the subgroup, because that is what decides whether the neighbour
+        // `distance` below is a neighbour at all.
+        let lane = self.lane_index()?;
+        let uint = self.module().type_int(32, false)?;
+        let wrap = self.module().constant_u32(size.saturating_sub(1))?;
+        let within = self.module().binary(op::BITWISE_AND, uint, lane, wrap)?;
+
+        let mut value = vector;
+        let mut distance = 1;
+        while distance < size {
+            let below = self.shift_up_across_clusters(value, distance)?;
+            let raised = self.add(value, below)?;
+            let inside = self.beyond::<LANES>(within, distance.saturating_sub(1))?;
+            value = self.select(inside, raised, value)?;
+            distance = distance.saturating_mul(2);
+        }
+
+        if !exclusive {
+            return Ok(value);
+        }
+
+        let shifted = self.shift_up_across_clusters(value, 1)?;
+        // Zero in every element type this crate has: `0.0`, `0`, and a half of the same bits.
+        let identity = self.splat_bits::<T, LANES>(0)?;
+        let inside = self.beyond::<LANES>(within, 0)?;
+        self.select(inside, shifted, identity)
+    }
+
+    /// Whether this lane's position within its cluster is above `edge`, as a per-element mask.
+    ///
+    /// `> edge` rather than `>= edge + 1`: unsigned greater-than is the comparison the lane API
+    /// has, and over integers the two say the same thing.
+    fn beyond<const LANES: u32>(
+        &mut self,
+        within: Id,
+        edge: u32,
+    ) -> Result<crate::lanes::Predicate<LANES>, LaneError> {
+        use crate::lanes::U32;
+
+        let position = self.from_lane_value::<U32, LANES>(within)?;
+        let edge = self.splat_bits::<U32, LANES>(edge)?;
+        self.greater_than(position, edge)
     }
 
     /// Fold the strips inside each lane with `local`, then reduce across the subgroup with
@@ -451,26 +539,19 @@ mod tests {
     }
 
     #[test]
-    fn the_two_scans_accept_and_refuse_exactly_the_same_shapes() {
+    fn the_two_scans_accept_exactly_the_same_shapes() {
         // Both go through one builder, so a caller must not find that one accepts a shape the
-        // other refuses — and the error must name the operation that was actually asked for.
+        // other refuses. Every mapping is accepted now; what differs is what each one costs.
         let mut module = Module::new(Version::V1_3);
         let mut lanes = Lanes::new(&mut module, 32).expect("built");
         let narrow = lanes.splat_bits::<F32, 8>(0).expect("splat");
         let whole = lanes.splat_bits::<F32, 32>(0).expect("splat");
         let wide = lanes.splat_bits::<F32, 128>(0).expect("splat");
 
-        assert!(matches!(
-            lanes.prefix_sum_exclusive(narrow).err(),
-            Some(LaneError::NoSuchForm {
-                operation: "prefix_sum_exclusive",
-                ..
-            })
-        ));
-        assert!(lanes.prefix_sum(narrow).is_err());
-
-        // Written out rather than looped: `LANES` is part of the type, so a whole-subgroup vector
-        // and a strip-mined one cannot share an array.
+        // Written out rather than looped: `LANES` is part of the type, so a clustered vector, a
+        // whole-subgroup one and a strip-mined one cannot share an array.
+        assert!(lanes.prefix_sum(narrow).is_ok());
+        assert!(lanes.prefix_sum_exclusive(narrow).is_ok());
         assert!(lanes.prefix_sum(whole).is_ok());
         assert!(lanes.prefix_sum_exclusive(whole).is_ok());
         assert!(lanes.prefix_sum(wide).is_ok());
@@ -478,24 +559,133 @@ mod tests {
     }
 
     #[test]
-    fn a_scan_is_refused_for_the_one_shape_that_has_no_form_of_it() {
-        // Clusters, and only clusters. SPIR-V's clustered form is a *reduce*: there is no
-        // `ClusteredInclusiveScan`, so a scan of a vector narrower than the subgroup would have to
-        // be built out of a subgroup-wide scan minus each cluster's own starting offset — and
-        // reading that offset needs a shuffle from a lane that differs per lane, which `Lanes`
-        // does not expose. The wide case *is* built; see below.
+    fn a_clustered_scan_is_a_ladder_of_one_step_per_doubling() {
+        // `log2(size)` steps, each a shuffle, a comparison and a select. A loop bound of `<=`
+        // rather than `<` is invisible in the *answer* — the extra step asks whether a lane's
+        // position exceeds `size - 1` and no position does — and is three instructions the module
+        // should not contain, so the count is what says so.
         let mut module = Module::new(Version::V1_3);
         let mut lanes = Lanes::new(&mut module, 32).expect("built");
-        let narrow = lanes.splat_bits::<F32, 8>(0).expect("splat");
+        let value = lanes.splat_bits::<F32, 8>(0).expect("splat");
 
-        assert!(matches!(
-            lanes.prefix_sum(narrow).err(),
-            Some(LaneError::NoSuchForm { .. })
-        ));
-        assert!(matches!(
-            lanes.prefix_sum_exclusive(narrow).err(),
-            Some(LaneError::NoSuchForm { .. })
-        ));
+        lanes.prefix_sum(value).expect("scanned");
+
+        let words = module.finish();
+        assert_eq!(count(&words, op::GROUP_NON_UNIFORM_SHUFFLE_UP), 3);
+        assert_eq!(count(&words, op::SELECT), 3);
+        assert_eq!(
+            count(&words, op::GROUP_NON_UNIFORM_F_ADD),
+            0,
+            "there is no clustered scan instruction to have emitted"
+        );
+    }
+
+    #[test]
+    fn a_cluster_of_one_lane_scans_nothing_and_emits_no_ladder() {
+        // The degenerate end, which the loop has to reach rather than divide by: a single-lane
+        // cluster's inclusive prefix is the element itself.
+        let mut module = Module::new(Version::V1_3);
+        let mut lanes = Lanes::new(&mut module, 32).expect("built");
+        let value = lanes.splat_bits::<F32, 1>(0).expect("splat");
+
+        let scanned = lanes.prefix_sum(value).expect("scanned");
+
+        assert_eq!(scanned.id(), value.id(), "the same value, untouched");
+        assert_eq!(count(&module.finish(), op::SELECT), 0);
+    }
+
+    #[test]
+    fn the_exclusive_clustered_scan_shifts_rather_than_subtracting() {
+        // One shuffle and one select more than the inclusive form, and no arithmetic at all beyond
+        // the ladder's adds. Subtracting each lane's own element is the cheap alternative and the
+        // wrong one: over floats it takes a large running total back off itself and loses the low
+        // bits the scan just accumulated.
+        let ladder = |exclusive: bool| {
+            let mut module = Module::new(Version::V1_3);
+            let mut lanes = Lanes::new(&mut module, 32).expect("built");
+            let value = lanes.splat_bits::<F32, 8>(0).expect("splat");
+            if exclusive {
+                lanes.prefix_sum_exclusive(value).expect("scanned");
+            } else {
+                lanes.prefix_sum(value).expect("scanned");
+            }
+            module.finish()
+        };
+
+        let inclusive = ladder(false);
+        let exclusive = ladder(true);
+
+        assert_eq!(
+            count(&exclusive, op::GROUP_NON_UNIFORM_SHUFFLE_UP),
+            count(&inclusive, op::GROUP_NON_UNIFORM_SHUFFLE_UP) + 1
+        );
+        assert_eq!(
+            count(&exclusive, op::SELECT),
+            count(&inclusive, op::SELECT) + 1
+        );
+        // Nothing is subtracted, and `module::op` has no subtraction in it to have been used —
+        // so this counts the arithmetic that *is* there and finds the exclusive form adding none
+        // of its own.
+        assert_eq!(
+            count(&exclusive, op::F_ADD),
+            count(&inclusive, op::F_ADD),
+            "the exclusive form adds nothing the inclusive one does not"
+        );
+    }
+
+    #[test]
+    fn the_clustered_ladder_masks_with_the_lane_the_specification_defines() {
+        // `SubgroupLocalInvocationId` and not an index into the workgroup. The two agree on every
+        // implementation here, and they agree because subgroups happen to be cut from consecutive
+        // local indices — which Vulkan promises only for a pipeline that asked for full subgroups.
+        use crate::spec::{BuiltIn, Decoration};
+
+        let mut module = Module::new(Version::V1_3);
+        let mut lanes = Lanes::new(&mut module, 32).expect("built");
+        let value = lanes.splat_bits::<F32, 8>(0).expect("splat");
+        lanes.prefix_sum(value).expect("scanned");
+
+        let words = module.finish();
+        let built_ins: Vec<u32> = decode::body(&words)
+            .filter(|instruction| instruction.opcode() == op::DECORATE)
+            .filter_map(|instruction| match instruction.operands() {
+                [_target, decoration, built_in] if *decoration == Decoration::BuiltIn.word() => {
+                    Some(*built_in)
+                }
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            built_ins,
+            vec![BuiltIn::SubgroupLocalInvocationId.word()],
+            "one built-in, and it is the lane's own position"
+        );
+        assert_eq!(count(&words, op::BITWISE_AND), 1, "masked into its cluster");
+    }
+
+    #[test]
+    fn a_clustered_scan_declares_the_shuffles_it_uses_and_no_arithmetic_it_does_not() {
+        // Every instruction in the ladder is scalar or a shuffle, so neither group-arithmetic
+        // capability belongs in the module — and `GroupNonUniformClustered` least of all, since
+        // the mapping is clustered and the instruction is not. A surplus capability is worse than
+        // noise: it makes the module refuse to run on a device that would have run it.
+        let mut module = Module::new(Version::V1_3);
+        let mut lanes = Lanes::new(&mut module, 32).expect("built");
+        let value = lanes.splat_bits::<F32, 8>(0).expect("splat");
+
+        lanes.prefix_sum(value).expect("scanned");
+
+        let words = module.finish();
+        let declared: Vec<u32> = decode::body(&words)
+            .filter(|instruction| instruction.opcode() == op::CAPABILITY)
+            .filter_map(|instruction| instruction.operands().first().copied())
+            .collect();
+
+        assert!(declared.contains(&Capability::GroupNonUniform.word()));
+        assert!(declared.contains(&Capability::GroupNonUniformShuffleRelative.word()));
+        assert!(!declared.contains(&Capability::GroupNonUniformArithmetic.word()));
+        assert!(!declared.contains(&Capability::GroupNonUniformClustered.word()));
     }
 
     #[test]

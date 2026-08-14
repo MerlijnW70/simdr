@@ -128,6 +128,40 @@ fn a_prefix_sum_is_valid_spirv() {
 }
 
 #[test]
+fn a_clustered_scan_is_valid_spirv() {
+    // **The one the validator has to see.** The clustered ladder reaches for
+    // `SubgroupLocalInvocationId` while the body is being built, which is long after the entry
+    // point was declared — and a built-in the body loads but the interface does not name is
+    // exactly what `spirv-val` rejects and what every driver here runs anyway.
+    let mut kernel = Kernel::<F32>::new(shape()).expect("built");
+    let value = kernel.load::<8>(0).expect("loaded");
+    let running = kernel
+        .lanes()
+        .expect("lanes")
+        .prefix_sum(value)
+        .expect("scan");
+    kernel.store(1, running).expect("stored");
+
+    let words = kernel.finish().expect("finished");
+    expect_valid(&words, "kernel-scan-clusters", VULKAN_1_1);
+}
+
+#[test]
+fn a_clustered_exclusive_scan_is_valid_spirv() {
+    let mut kernel = Kernel::<F32>::new(shape()).expect("built");
+    let value = kernel.load::<8>(0).expect("loaded");
+    let running = kernel
+        .lanes()
+        .expect("lanes")
+        .prefix_sum_exclusive(value)
+        .expect("scan");
+    kernel.store(1, running).expect("stored");
+
+    let words = kernel.finish().expect("finished");
+    expect_valid(&words, "kernel-scan-clusters-exclusive", VULKAN_1_1);
+}
+
+#[test]
 fn an_unrolled_loop_is_valid_spirv() {
     let mut kernel = Kernel::<F32>::new(shape()).expect("built");
     let value = kernel.load::<32>(0).expect("loaded");

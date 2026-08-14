@@ -208,22 +208,29 @@ impl Combine {
 ///
 /// The vector belongs to a **subgroup**, not a workgroup: nothing in `Lanes` crosses between them,
 /// so each run of `width` invocations scans on its own and the next starts from zero again.
+///
+/// **And a vector narrower than the subgroup is narrower than that.** A `Simd<f32, 8>` on a 32-wide
+/// device is four independent vectors sharing one subgroup, and the clustered ladder scans each of
+/// them on its own — so the run that scans together is `min(lanes, width)` invocations rather than
+/// the width. Same expression as the reduction's `group_size` above, and for the same reason: a
+/// reference that used the width here would agree with the kernel in the first cluster of every
+/// subgroup and disagree in all the others.
 fn scanned(program: &Program, held: &[Vec<u32>], exclusive: bool) -> Vec<u32> {
     let domain = program.domain;
-    let width = program.subgroup as usize;
+    let group = (program.lanes.min(program.subgroup) as usize).max(1);
     let workgroup = program.workgroup as usize;
     let strips = strips_of(program);
     let invocations = held.len();
 
     let mut values = vec![domain.zero(); invocations * strips];
 
-    for first in (0..invocations).step_by(width.max(1)) {
-        let members = width.min(invocations.saturating_sub(first));
+    for first in (0..invocations).step_by(group) {
+        let members = group.min(invocations.saturating_sub(first));
         let mut running = domain.zero();
 
         for position in 0..members * strips {
-            let lane = position % width.max(1);
-            let strip = position / width.max(1);
+            let lane = position % group;
+            let strip = position / group;
             let invocation = first + lane;
 
             let Some(element) = held.get(invocation).and_then(|held| held.get(strip)) else {

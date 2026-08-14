@@ -53,6 +53,12 @@
 //! hardware considers to come before `j`, so the reference has to model the **lane order** and not
 //! only the arithmetic — see [`interpret`]. Until this, every test of the scan was hand-written,
 //! which is the state the reduction was in when the fuzzer found that bug.
+//!
+//! **All three mappings, since later the same day.** The clustered scans were excluded here while
+//! `Lanes::prefix_sum` refused them, so the rounds that would have exercised the ladder ended in a
+//! reduction instead. The generator offers them at every mapping now, and the reference scans runs
+//! of `min(lanes, width)` invocations rather than of the width — which is the one line that tells a
+//! clustered scan from a whole-subgroup one.
 
 mod domain;
 mod generate;

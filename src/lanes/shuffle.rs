@@ -8,8 +8,14 @@
 //! `OpGroupNonUniformShuffle` reads a lane of the *subgroup*. For a vector as wide as the
 //! subgroup those are the same thing. For a narrower one they are not — a `Simd<f32, 8>` on a
 //! 32-lane machine has four vectors sharing the lanes, and lane 9 belongs to the second of them.
-//! There is no clustered shuffle, so [`Lanes::shift_down`] and friends refuse a clustered
-//! mapping rather than reading a neighbour's data.
+//! There is no clustered shuffle, so [`Lanes::shift_down`] and [`Lanes::broadcast`] refuse a
+//! clustered mapping rather than reading a neighbour's data.
+//!
+//! [`Lanes::butterfly`] is the exception, and it is arithmetic rather than a special case: a
+//! cluster is an aligned run of `LANES` lanes, `LANES` is a power of two, and `l ^ mask` for
+//! `mask < LANES` cannot leave it. The refusal used to cover this too, which made the one shuffle
+//! a clustered vector can have unreachable — and a hand-rolled tree inside a cluster is built from
+//! butterflies.
 //!
 //! Strip-mined vectors are fine: every strip is a full subgroup's worth, and shuffling each one
 //! separately is exactly right.
@@ -68,17 +74,36 @@ impl Lanes<'_> {
     /// is built from and what `simd_swizzle!` lowers to for the shapes that are not a reduce.
     /// Unlike the shifts, every lane reads a lane that exists, so nothing is undefined.
     ///
+    /// **And unlike the shifts, a clustered vector is allowed** — as long as `mask` is inside it.
+    /// Clusters are aligned runs of `LANES` lanes and `LANES` is a power of two, so `l ^ mask` for
+    /// `mask < LANES` flips only bits below the cluster's own width and cannot leave it. There is
+    /// nothing to mask off and no lane to leave undefined; the pairing is exactly the one the
+    /// caller asked for, in every one of the vectors sharing the subgroup at once.
+    ///
+    /// A `mask` at or above `LANES` *would* leave, and is refused by name rather than clamped —
+    /// the caller asking for it has a different vector in mind than the one they are holding.
+    ///
     /// # Errors
     ///
-    /// As [`Lanes::shift_down`].
+    /// [`LaneError::NoSuchForm`] if `mask` reaches outside a clustered vector, otherwise as
+    /// [`Lanes::shift_down`].
     pub fn butterfly<T: Element, const LANES: u32>(
         &mut self,
         vector: Vector<T, LANES>,
         mask: u32,
     ) -> Result<Vector<T, LANES>, LaneError> {
+        if let Mapping::Clusters { size } = self.mapping::<LANES>()?
+            && mask >= size
+        {
+            return Err(LaneError::NoSuchForm {
+                operation: "butterfly",
+                because: "a mask as wide as the vector pairs it with a lane belonging to the next \
+                          vector along",
+            });
+        }
+
         let mask = self.module().constant_u32(mask)?;
-        self.exchange::<T, LANES>(
-            "butterfly",
+        self.shuffle::<T, LANES>(
             vector,
             Exchange::Xor,
             mask,
@@ -106,7 +131,28 @@ impl Lanes<'_> {
         )
     }
 
-    /// One shuffle per strip.
+    /// [`Lanes::shift_up`] without the refusal, for a caller that means to cross the boundary.
+    ///
+    /// **One caller, and it is the clustered scan.** The ladder in [`super::reduce`] reads the
+    /// lane `distance` below and then masks off every lane whose neighbour belongs to a different
+    /// cluster, so the crossing is deliberate and the mask is what undoes it. Every *other* caller
+    /// reaching into a neighbouring vector's lanes is a bug, which is why the public form refuses
+    /// and this one is private.
+    pub(super) fn shift_up_across_clusters<T: Element, const LANES: u32>(
+        &mut self,
+        vector: Vector<T, LANES>,
+        delta: u32,
+    ) -> Result<Vector<T, LANES>, LaneError> {
+        let delta = self.module().constant_u32(delta)?;
+        self.shuffle::<T, LANES>(
+            vector,
+            Exchange::Up,
+            delta,
+            Capability::GroupNonUniformShuffleRelative,
+        )
+    }
+
+    /// One shuffle per strip, once the mapping has been checked.
     fn exchange<T: Element, const LANES: u32>(
         &mut self,
         name: &'static str,
@@ -123,6 +169,17 @@ impl Lanes<'_> {
             });
         }
 
+        self.shuffle::<T, LANES>(vector, kind, operand, capability)
+    }
+
+    /// The instructions themselves, which the mapping does not change: one shuffle per strip.
+    fn shuffle<T: Element, const LANES: u32>(
+        &mut self,
+        vector: Vector<T, LANES>,
+        kind: Exchange,
+        operand: crate::module::Id,
+        capability: Capability,
+    ) -> Result<Vector<T, LANES>, LaneError> {
         let element = self.type_of::<T>()?;
         let scope = self.scope();
         self.module()
@@ -231,7 +288,7 @@ mod tests {
     }
 
     #[test]
-    fn a_clustered_shuffle_is_refused_because_the_lanes_belong_to_other_vectors() {
+    fn a_clustered_shift_is_refused_because_the_lanes_belong_to_other_vectors() {
         let mut module = Module::new(Version::V1_3);
         let mut lanes = Lanes::new(&mut module, 32).expect("built");
         let value = lanes
@@ -239,13 +296,78 @@ mod tests {
             .expect("splat");
 
         assert!(matches!(
-            lanes.butterfly(value, 1).err(),
-            Some(LaneError::NoSuchForm { .. })
-        ));
-        assert!(matches!(
             lanes.shift_down(value, 1).err(),
             Some(LaneError::NoSuchForm { .. })
         ));
+        assert!(matches!(
+            lanes.shift_up(value, 1).err(),
+            Some(LaneError::NoSuchForm { .. })
+        ));
+        assert!(matches!(
+            lanes.broadcast(value, 0).err(),
+            Some(LaneError::NoSuchForm { .. })
+        ));
+    }
+
+    #[test]
+    fn a_clustered_butterfly_is_allowed_up_to_the_vectors_own_width() {
+        // The arithmetic the exception rests on: a cluster is an aligned run of `LANES` lanes and
+        // `LANES` is a power of two, so `l ^ mask` for `mask < LANES` flips only bits below the
+        // cluster's width. 7 is the largest mask an eight-lane vector can pair inside itself, and
+        // 8 is the first that reaches the vector next door.
+        let mut module = Module::new(Version::V1_3);
+        let mut lanes = Lanes::new(&mut module, 32).expect("built");
+        let value = lanes
+            .splat_bits::<F32, 8>(1.0_f32.to_bits())
+            .expect("splat");
+
+        for mask in [1, 2, 4, 7] {
+            assert!(
+                lanes.butterfly(value, mask).is_ok(),
+                "a mask of {mask} stays inside an eight-lane cluster"
+            );
+        }
+        for mask in [8, 9, 16] {
+            assert!(
+                matches!(
+                    lanes.butterfly(value, mask).err(),
+                    Some(LaneError::NoSuchForm {
+                        operation: "butterfly",
+                        ..
+                    })
+                ),
+                "a mask of {mask} leaves an eight-lane cluster and must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_clustered_butterfly_is_the_same_instruction_as_a_full_width_one() {
+        // No mask, no lane index, no extra instruction — the mapping changes what the operand
+        // *means* and not what is emitted. A version that quietly clamped the mask, or that added
+        // a select for the lanes it thought were outside, would show up here.
+        let build = |lanes: u32| {
+            let mut module = Module::new(Version::V1_3);
+            let mut builder = Lanes::new(&mut module, 32).expect("built");
+            match lanes {
+                8 => {
+                    let value = builder.splat_bits::<F32, 8>(0).expect("splat");
+                    builder.butterfly(value, 2).expect("butterfly");
+                }
+                _ => {
+                    let value = builder.splat_bits::<F32, 32>(0).expect("splat");
+                    builder.butterfly(value, 2).expect("butterfly");
+                }
+            }
+            module.finish()
+        };
+
+        assert_eq!(
+            decode::opcodes(&build(8)),
+            decode::opcodes(&build(32)),
+            "the clustered form emits the same instructions in the same order"
+        );
+        assert_eq!(count(&build(8), op::SELECT), 0, "and nothing is masked");
     }
 
     #[test]

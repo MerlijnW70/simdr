@@ -21,8 +21,10 @@ use simdr::lanes::{Element, LaneError};
 /// `GroupOperation`, the two differ by exactly one element, and every unit test that counted
 /// opcodes would pass for either. Only running it says which one came out.
 ///
-/// Whole-subgroup vectors only: SPIR-V's clustered form is a *reduce*, so a narrower vector has no
-/// clustered scan, and a strip-mined one would have to carry a running total between strips.
+/// Whole-subgroup vectors only, which is this kernel's choice rather than the lane API's limit:
+/// the other two mappings scan as well and are the business of `kernels::scan`, which runs them
+/// against a CPU reference. Here `LANES` equals the width so that what is under test is the one
+/// instruction.
 ///
 /// # Errors
 ///

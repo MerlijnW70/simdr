@@ -15,6 +15,7 @@ mod body;
 mod constants;
 mod control;
 mod dot;
+mod entry;
 mod extended;
 mod globals;
 mod layout;
@@ -26,6 +27,7 @@ pub use self::layout::{BuildError, Id, Section, Version};
 pub use self::subgroup::Reduction;
 
 use self::constants::ConstantKey;
+use self::entry::Entry;
 use self::types::TypeKey;
 use crate::encode::{self, Word};
 use crate::spec::Capability;
@@ -43,6 +45,13 @@ pub struct Module {
     extensions: HashSet<String>,
     ext_imports: HashMap<String, Id>,
     current_block: Option<Id>,
+    /// The entry point, and the `Input` and `Output` variables it names — held as data because
+    /// the second of those is still growing while the body is built. See [`entry`].
+    entry: Option<Entry>,
+    interface: Vec<Id>,
+    /// The variable declared for each built-in, so that a second caller asking for the same one
+    /// gets the same variable rather than a second declaration of it.
+    builtins: HashMap<Word, Id>,
 }
 
 impl Module {
@@ -70,6 +79,9 @@ impl Module {
             extensions: HashSet::new(),
             ext_imports: HashMap::new(),
             current_block: None,
+            entry: None,
+            interface: Vec::new(),
+            builtins: HashMap::new(),
         }
     }
 

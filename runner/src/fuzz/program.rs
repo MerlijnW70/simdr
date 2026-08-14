@@ -259,8 +259,10 @@ impl Program {
                 };
                 kernel.store_scalar(1, total)?;
             }
-            // A clustered vector has no scan and `Lanes::prefix_sum` says so by name, which
-            // arrives here as `Outcome::Refused` rather than a wrong answer.
+            // All three mappings scan now: an instruction at the subgroup's width, a carry between
+            // strips above it, and a ladder below. The clustered one used to arrive here as
+            // `Outcome::Refused`, which meant every narrow vector the generator produced skipped
+            // its scan — and the ladder was checked by hand-written tests only.
             Finish::Scan => {
                 let scanned = kernel.lanes()?.prefix_sum(value)?;
                 kernel.store(1, scanned)?;

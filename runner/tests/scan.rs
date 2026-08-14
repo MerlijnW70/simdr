@@ -491,6 +491,58 @@ fn a_clustered_scan_scans_each_cluster_independently() {
 }
 
 #[test]
+fn a_clustered_exclusive_scan_leaves_each_lanes_own_element_out() {
+    // **The form that cannot be recovered by subtraction**, run rather than reasoned about. The
+    // ladder ends in a shuffle and a select: the inclusive answer moved one lane up, with the
+    // identity where the cluster begins.
+    //
+    // The failure this guards against is the two forms having been built the same: they agree at
+    // exactly one element of each cluster — the first, where both are the identity only if the
+    // element is zero — and the input below starts at 1 so that they agree nowhere at all.
+    let Some(gpu) = device("scan clusters exclusive") else {
+        return;
+    };
+    eprintln!("device: {}", gpu.limits().name);
+
+    let width = gpu.limits().subgroup_size as usize;
+    let workgroup = WORKGROUP_SIZE as usize;
+    let input: Vec<f32> = (0..workgroup)
+        .map(|index| (index % 5) as f32 + 1.0)
+        .collect();
+
+    for cluster in [2_usize, 4, 8] {
+        if cluster >= width {
+            eprintln!("SKIPPED clusters of {cluster}: not narrower than a {width}-wide subgroup");
+            continue;
+        }
+
+        let spirv =
+            kernels::scan::scan_clusters_exclusive(gpu.limits().subgroup_size, cluster as u32)
+                .expect("built");
+
+        let output = gpu.run(&spirv, &input, 1).expect("dispatched");
+
+        let expected: Vec<f32> = input
+            .chunks(cluster)
+            .flat_map(|chunk| {
+                chunk.iter().scan(0.0_f32, |running, value| {
+                    let before = *running;
+                    *running += value;
+                    Some(before)
+                })
+            })
+            .collect();
+
+        for (index, (got, want)) in output.iter().zip(&expected).enumerate() {
+            assert_eq!(
+                got, want,
+                "element {index} of {workgroup}, clusters of {cluster} at width {width}"
+            );
+        }
+    }
+}
+
+#[test]
 fn a_mapped_scanner_runs_the_map_on_the_device_and_agrees_with_doing_it_here() {
     // **The crossing that does not happen.** Without `scanner_of` a caller wanting the running
     // total of f(x) has to send the input, run the map, bring the squares home and send them back

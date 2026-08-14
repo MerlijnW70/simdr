@@ -91,18 +91,19 @@ choice of *shape*. `decisions/DR-0005` records the experiment; DR-0002 carries t
 Anything else — 12 lanes on a 32-wide subgroup — has no mapping and is refused by name.
 
 **All three scan, and the clustered one is the expensive row.** SPIR-V has a `ClusteredReduce` and
-no clustered scan, so `kernels::scan::scan_clusters` builds a Hillis-Steele ladder instead:
-`log2(N)` steps of shuffle, compare and select, against one instruction for the other two rows.
+no clustered scan, so `Lanes::prefix_sum` builds a Hillis-Steele ladder instead: `log2(N)` steps of
+shuffle, compare and select, against one instruction for the other two rows.
 
 The cheap alternative is a subgroup-wide scan minus each cluster's starting offset — three
 instructions rather than a dozen — and it is not taken, because in floating point it subtracts a
 large running total back off itself and loses exactly the low bits the scan just accumulated. Same
 reason the exclusive scan is its own group operation and not `inclusive - own`.
 
-That ladder lives in `runner::kernels` rather than in `Lanes::prefix_sum`, and the reason is worth
-saying: the mask needs the invocation's position inside its cluster, and `Lanes` has no way to
-reach one — it is handed a module and a width, not an invocation. `notes/NEXT.md` has what moving
-it would take.
+The ladder's mask needs the invocation's position inside its cluster, and that number is
+`SubgroupLocalInvocationId` — which `Lanes` **declares for itself**, the first time something asks.
+A kernel that only scales still declares no `Input` variable and no `GroupNonUniform` capability;
+`decisions/DR-0007` has why that is the shape, and why the entry point's interface list is data
+until the module is finished rather than words written once.
 
 ## Crossing between subgroups
 
@@ -197,11 +198,11 @@ did not.
 
 | Layer | What it is | What it caught |
 | --- | --- | --- |
-| **Unit tests** | 333 in the emitter, decoding what was emitted; 706 across the workspace | Everything cheap |
-| **`spirv-val`** | Khronos' validator, at `--target-env vulkan1.1` | `OpLoopMerge` in the wrong position — a unit test asserted "merge before branch" and passed while the comparison sat between them. And, the first time it was pointed at `Lanes::dot_unsigned`, that `OpUDot` had been emitted with a **signed** result type: invalid SPIR-V in a shipped public method that had no caller, no unit test and no validator coverage |
+| **Unit tests** | 348 in the emitter, decoding what was emitted; 740 across the workspace | Everything cheap |
+| **`spirv-val`** | Khronos' validator, at `--target-env vulkan1.1` | `OpLoopMerge` in the wrong position — a unit test asserted "merge before branch" and passed while the comparison sat between them. And, the first time it was pointed at `Lanes::dot_unsigned`, that `OpUDot` had been emitted with a **signed** result type: invalid SPIR-V in a shipped public method that had no caller, no unit test and no validator coverage. It is also the only layer that can see an entry point whose interface omits a built-in the body loads: drop that one line and 19 of 20 modules are rejected while all three devices go on returning the right answers |
 | **Execution** | Real dispatches on a real GPU, against CPU references | A missing staging write: every computing kernel returned garbage and the empty-kernel test still passed |
 | **Other widths** | The same suite at **4, 8, 16, 32 and 64** lanes, across three devices | Ten tests that had conflated "32 lanes" with "the subgroup", four of which could not build at all because a vote has no clustered form. Then, at 8: a fuzzer generating shuffles that leave the subgroup, and three tests assuming uninitialised device memory is zero. Then, at 4: `kernels::scale` — *the control kernel* — reading and writing eight times its buffer, which had been undefined behaviour returning zeros at width 8 for a day before it became an access violation at 4. And that was not the last of them: eleven more of the same shape were still there four days later, found by the row below rather than by running at 4 again |
-| **Differential fuzzing** | Generated programs across **all eight** element types, ending in a reduction *or a scan*, each interpreted on the CPU and compared exactly | `reduce_min` folding strips with a *maximum* — right for every mapping but the strip-mined one, so hand tests never saw it |
+| **Differential fuzzing** | Generated programs across **all eight** element types, ending in a reduction *or a scan*, at all three mappings, each interpreted on the CPU and compared exactly | `reduce_min` folding strips with a *maximum* — right for every mapping but the strip-mined one, so hand tests never saw it. Then, the day the clustered scans stopped being refused and started being generated: an integrated AMD driver that **faults inside `vkCreateComputePipelines`** on a module `spirv-val` accepts and two other implementations run correctly |
 | **Mutation coverage** | `noha prober` over the emitter and the runner's pure half | Eight real gaps in one night, five of them in the *fuzzer* — including a generated program that dispatched nothing and therefore agreed with everything. Later, fifteen more in the half-float rounding path, which an *exhaustive* round-trip test could not reach because it only ever fed `from_f32` values that came from a half — and those never round |
 | **Dispatch bounds** | `dispatch::extent` reads the workgroup size, the element stride and the strip count out of the module and refuses a dispatch that cannot fit | **Eleven tests reading past their input**, across five files. Each paired a kernel built for 32 lanes with a buffer of one workgroup — correct on the two GPUs here, and an eighth of what the kernel reads at four lanes. Every one of them had been passing on lavapipe by getting the first sixty-four elements right and going off the end for the rest |
 

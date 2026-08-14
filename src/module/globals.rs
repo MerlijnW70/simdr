@@ -2,7 +2,7 @@
 
 use super::{BuildError, Id, Module, Section, op};
 use crate::encode::Word;
-use crate::spec::{Decoration, StorageClass};
+use crate::spec::{BuiltIn, Decoration, StorageClass};
 
 impl Module {
     /// Attach `decoration` to `target`.
@@ -61,6 +61,35 @@ impl Module {
             &[pointer_type.word(), id.word(), storage.word()],
         )?;
         Ok(id)
+    }
+
+    /// The `Input` variable carrying `built_in`, declaring it if this is the first ask.
+    ///
+    /// Three things have to happen together for a built-in to be usable, and forgetting the third
+    /// is a module the validator rejects rather than a wrong number: the variable is declared, it
+    /// is decorated, and it is named in the entry point's interface. This does all three, and does
+    /// them **once** — a second caller asking for the same built-in gets the same variable, because
+    /// two variables decorated with one built-in is not a duplicate, it is invalid.
+    ///
+    /// `value_type` is the type the specification gives the built-in — a scalar `u32` for
+    /// `SubgroupLocalInvocationId`, a three-component vector for `LocalInvocationId`. It is the
+    /// caller's because this layer has no table of them, and the cache is keyed on the built-in
+    /// alone: asking twice with different types would be asking for something that does not exist.
+    ///
+    /// # Errors
+    ///
+    /// [`BuildError`] if the declaration, the decoration or the interface cannot be emitted.
+    pub fn builtin_input(&mut self, built_in: BuiltIn, value_type: Id) -> Result<Id, BuildError> {
+        if let Some(&variable) = self.builtins.get(&built_in.word()) {
+            return Ok(variable);
+        }
+
+        let pointer = self.type_pointer(StorageClass::Input, value_type)?;
+        let variable = self.global_variable(pointer, StorageClass::Input)?;
+        self.decorate(variable, Decoration::BuiltIn, &[built_in.word()])?;
+        self.require_interface(variable)?;
+        self.builtins.insert(built_in.word(), variable);
+        Ok(variable)
     }
 }
 
@@ -185,6 +214,67 @@ mod tests {
                 variable.word(),
                 StorageClass::StorageBuffer.word()
             ]
+        );
+    }
+
+    #[test]
+    fn a_builtin_is_declared_decorated_and_named_in_the_interface_at_once() {
+        // The three halves of a usable built-in. A module that declares and decorates one but
+        // leaves it out of the interface is invalid — and it is invalid in a way that runs
+        // correctly on the drivers here, which is the combination this crate exists to avoid.
+        use crate::spec::ExecutionModel;
+
+        let mut module = Module::new(Version::V1_3);
+        let main = module.alloc_id().expect("%1");
+        module
+            .entry_point(ExecutionModel::GlCompute, main, "main")
+            .expect("declared");
+        let uint = module.type_int(32, false).expect("u32");
+
+        let variable = module
+            .builtin_input(BuiltIn::SubgroupLocalInvocationId, uint)
+            .expect("declared");
+
+        let words = module.finish();
+        let decorated = crate::decode::body(&words)
+            .filter(|instruction| instruction.opcode() == op::DECORATE)
+            .any(|instruction| {
+                instruction.operands()
+                    == [
+                        variable.word(),
+                        Decoration::BuiltIn.word(),
+                        BuiltIn::SubgroupLocalInvocationId.word(),
+                    ]
+            });
+        let interfaced = crate::decode::body(&words)
+            .find(|instruction| instruction.opcode() == op::ENTRY_POINT)
+            .is_some_and(|instruction| instruction.operands().contains(&variable.word()));
+
+        assert!(decorated, "the built-in decoration is missing");
+        assert!(interfaced, "the entry point does not name the variable");
+    }
+
+    #[test]
+    fn the_same_builtin_asked_for_twice_is_one_variable() {
+        // Two variables decorated with one built-in is not a duplicate declaration, it is an
+        // invalid module — and the second caller is a different operation in a different file,
+        // which is exactly the pair that cannot see each other.
+        let mut module = Module::new(Version::V1_3);
+        let uint = module.type_int(32, false).expect("u32");
+
+        let first = module
+            .builtin_input(BuiltIn::SubgroupLocalInvocationId, uint)
+            .expect("declared");
+        let second = module
+            .builtin_input(BuiltIn::SubgroupLocalInvocationId, uint)
+            .expect("again");
+
+        assert_eq!(first, second);
+        assert_eq!(
+            crate::decode::body(&module.finish())
+                .filter(|instruction| instruction.opcode() == op::VARIABLE)
+                .count(),
+            1
         );
     }
 }

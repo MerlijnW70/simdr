@@ -89,6 +89,16 @@ fn the_reductions_are_valid_at_every_width() {
             "butterfly_pair",
             width,
         );
+        // The clustered butterfly, which is the same instruction with an operand the mapping gives
+        // a different meaning. `valid_at` reports the widths where a cluster is not narrower than
+        // the subgroup rather than failing on them.
+        for cluster in [2_u32, 4, 8] {
+            valid_at(
+                kernels::reduce::butterfly_cluster_sum(width, cluster),
+                &format!("butterfly_cluster-{cluster}"),
+                width,
+            );
+        }
         valid_at(
             kernels::reduce::fold_halves(width, 64),
             "fold_halves",
@@ -166,10 +176,18 @@ fn the_scan_is_valid_at_every_width() {
         );
         // The clustered ladder: a shuffle, a comparison and a select per step, and the only
         // kernel here whose instruction count depends on an argument rather than the width.
+        // Both forms, because the exclusive one declares the same built-in through a second path
+        // and a module that loads `SubgroupLocalInvocationId` without naming it in the entry
+        // point's interface is invalid — and runs correctly on every device here.
         for cluster in [2_u32, 4, 8, 16] {
             valid_at(
                 kernels::scan::scan_clusters(width, cluster),
                 &format!("scan_clusters-{cluster}"),
+                width,
+            );
+            valid_at(
+                kernels::scan::scan_clusters_exclusive(width, cluster),
+                &format!("scan_clusters_exclusive-{cluster}"),
                 width,
             );
         }

@@ -272,6 +272,70 @@ fn butterfly_tree_sum_at<const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, La
     kernel.finish()
 }
 
+/// The same tree, inside each cluster of a vector narrower than the subgroup.
+///
+/// **The kernel the butterfly's refusal used to make unwritable.** A `Simd<f32, 8>` on a 32-wide
+/// device is four vectors sharing the subgroup, and `Lanes::butterfly` refused every one of them —
+/// so the mapping that exists to run several small vectors at once could be reduced by the
+/// hardware and not swizzled at all. A mask below the cluster's width cannot leave it, which is
+/// arithmetic rather than a special case, and this is what it buys: `log2(cluster)` steps, four
+/// independent trees, one instruction each.
+///
+/// It is also the stronger of the two comparisons the file's header describes. `lane_sum` over the
+/// same vector emits a single `ClusteredReduce`; this emits a tree of shuffles and adds. Nothing is
+/// shared between them but the answer.
+///
+/// # Errors
+///
+/// [`LaneError::NoMapping`] if `cluster` is not a power of two that divides the subgroup, otherwise
+/// if the module cannot be built.
+pub fn butterfly_cluster_sum(subgroup: u32, cluster: u32) -> Result<Vec<u32>, LaneError> {
+    match cluster {
+        1 => butterfly_cluster_sum_at::<1>(subgroup),
+        2 => butterfly_cluster_sum_at::<2>(subgroup),
+        4 => butterfly_cluster_sum_at::<4>(subgroup),
+        8 => butterfly_cluster_sum_at::<8>(subgroup),
+        16 => butterfly_cluster_sum_at::<16>(subgroup),
+        32 => butterfly_cluster_sum_at::<32>(subgroup),
+        lanes => Err(LaneError::NoMapping {
+            lanes,
+            width: subgroup,
+        }),
+    }
+}
+
+/// The builder for [`butterfly_cluster_sum`], at a known cluster width.
+///
+/// The step count is the *vector's* `log2` and not the subgroup's — which is the whole difference
+/// from [`butterfly_tree_sum_at`], and the mistake that would look like a working kernel returning
+/// the subgroup's total in every lane.
+fn butterfly_cluster_sum_at<const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    use simdr::lanes::F32;
+
+    if LANES > subgroup {
+        return Err(LaneError::NoMapping {
+            lanes: LANES,
+            width: subgroup,
+        });
+    }
+
+    let steps = LANES.trailing_zeros();
+    let mut kernel = Kernel::<F32>::new(shape(subgroup))?;
+    let value = kernel.load::<LANES>(0)?;
+
+    let total = {
+        let mut lanes = kernel.lanes()?;
+        lanes.repeat(steps, value.id(), |lanes, carried, step| {
+            let held = lanes.from_lane_value::<F32, LANES>(carried)?;
+            let partner = lanes.butterfly(held, 1 << step)?;
+            Ok(lanes.add(held, partner)?.id())
+        })?
+    };
+
+    kernel.store_scalar(1, total)?;
+    kernel.finish()
+}
+
 /// [`lane_sum`] over a vector as wide as this device's subgroup.
 ///
 /// The distinction the second device made necessary. `lane_sum::<T, 32>` is a *cluster* on a
