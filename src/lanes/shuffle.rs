@@ -15,11 +15,18 @@
 //! | --- | --- | --- |
 //! | [`Lanes::butterfly`] | yes, for `mask < LANES` | a cluster is an aligned run of a power-of-two size, so `l ^ mask` cannot leave it |
 //! | [`Lanes::broadcast`] | yes, for `source < LANES` | the lane to read is `(l & !(LANES - 1)) + source`, and `OpGroupNonUniformShuffle` takes a dynamic id |
-//! | [`Lanes::shift_up`] | no | it really does read the vector next door, and what belongs at a cluster's edge is a question this API has not answered |
+//! | [`Lanes::rotate_up`] | yes, for any `delta` | every lane reads a lane inside its own vector, so there is no edge at all |
+//! | [`Lanes::shift_up`] | no | it really does read the vector next door, and the hardware would hand it over without a word |
 //! | [`Lanes::shift_down`] | no | the same |
 //!
-//! The first two were refused as well until the refusal was read rather than trusted, which left
+//! The first three were refused as well until the refusal was read rather than trusted, which left
 //! the mapping that exists to run four small vectors at once unable to swizzle any of them.
+//!
+//! **The shifts stay refused, and the rotate is why that is a decision rather than a gap.** What a
+//! cluster's edge should mean has two bad answers — call it undefined, which promises less than the
+//! hardware does and leaves a caller with a value it cannot use; or mask it to something, which
+//! invents a semantics SPIR-V does not have and pays for it in every call. The third answer is that
+//! the operation a caller wants at an edge is the one that has none.
 //!
 //! Strip-mined vectors are fine: every strip is a full subgroup's worth, and shuffling each one
 //! separately is exactly right.
@@ -144,6 +151,75 @@ impl Lanes<'_> {
             vector,
             Exchange::Index,
             source,
+            Capability::GroupNonUniformShuffle,
+        )
+    }
+
+    /// Read each element from the lane `delta` below this one, **wrapping inside the vector**.
+    ///
+    /// What `Simd::rotate_elements_right` means, and the answer to a question this API had left
+    /// open. [`Lanes::shift_up`] leaves the bottom `delta` lanes undefined — SPIR-V says so — and
+    /// refuses a clustered vector, because there the lanes it would read are another vector's and
+    /// the hardware would hand them over without a word. A rotate has neither problem: **every lane
+    /// reads a lane inside its own vector**, so there is no edge to define and nothing to mask.
+    ///
+    /// The source lane is `(l & !(size - 1)) | ((l + size - delta) & (size - 1))` — the vector's
+    /// first lane, plus the position `delta` back from this one, wrapped. `size` is a power of two,
+    /// which is what makes both halves a mask; and for a subgroup-wide vector the first half is
+    /// zero and it collapses to the wrap alone.
+    ///
+    /// `delta` is reduced modulo the vector's width rather than refused: a rotate by the width is
+    /// the identity, and by `width + 1` is a rotate by one. A rotate by zero emits **nothing**.
+    ///
+    /// The other direction is this one by `LANES - delta`, and is not a second method: a caller
+    /// knows `LANES`, it is in the type, and a method with no caller is a method nothing verifies.
+    ///
+    /// # Errors
+    ///
+    /// [`LaneError::NoSuchForm`] for a strip-mined vector, where a rotate moves elements *between*
+    /// strips — a shuffle per strip plus a rotation of the strips themselves, which is a different
+    /// algorithm rather than a different operand. Otherwise [`LaneError::Build`].
+    pub fn rotate_up<T: Element, const LANES: u32>(
+        &mut self,
+        vector: Vector<T, LANES>,
+        delta: u32,
+    ) -> Result<Vector<T, LANES>, LaneError> {
+        let size = match self.mapping::<LANES>()? {
+            Mapping::WholeSubgroup => self.width(),
+            Mapping::Clusters { size } => size,
+            Mapping::Strips { .. } => {
+                return Err(LaneError::NoSuchForm {
+                    operation: "rotate_up",
+                    because: "a rotate of a strip-mined vector moves elements between strips, \
+                              which is a shuffle per strip and a rotation of the strips as well",
+                });
+            }
+        };
+
+        // Nothing to do, and nothing emitted: a rotate by a multiple of the width is the identity,
+        // and a module that said otherwise would describe work the kernel does not do.
+        let delta = delta % size.max(1);
+        if delta == 0 {
+            return Ok(vector);
+        }
+
+        let lane = self.lane_index()?;
+        let uint = self.type_of::<U32>()?;
+        let wrap = self.module().constant_u32(size.saturating_sub(1))?;
+        let round_down = self.module().constant_u32(!size.wrapping_sub(1))?;
+        let back = self.module().constant_u32(size.saturating_sub(delta))?;
+
+        let first = self
+            .module()
+            .binary(op::BITWISE_AND, uint, lane, round_down)?;
+        let moved = self.module().i_add(uint, lane, back)?;
+        let within = self.module().binary(op::BITWISE_AND, uint, moved, wrap)?;
+        let read = self.module().binary(op::BITWISE_OR, uint, first, within)?;
+
+        self.shuffle::<T, LANES>(
+            vector,
+            Exchange::Index,
+            read,
             Capability::GroupNonUniformShuffle,
         )
     }
@@ -346,6 +422,76 @@ mod tests {
         assert_eq!(count(&words, op::GROUP_NON_UNIFORM_SHUFFLE_UP), 1);
         assert_eq!(count(&words, op::GROUP_NON_UNIFORM_SHUFFLE_XOR), 1);
         assert_eq!(count(&words, op::GROUP_NON_UNIFORM_SHUFFLE), 1);
+    }
+
+    #[test]
+    fn a_rotate_wraps_inside_the_vector_and_leaves_no_lane_undefined() {
+        // Four scalar instructions and one shuffle: round the lane down to its vector, step back,
+        // wrap, put the two halves together. Every lane reads a lane of its own vector, which is
+        // the whole difference from a shift.
+        for lanes_wide in [false, true] {
+            let mut module = Module::new(Version::V1_3);
+            let mut builder = Lanes::new(&mut module, 32).expect("built");
+            if lanes_wide {
+                let value = builder.splat_bits::<F32, 32>(0).expect("splat");
+                builder.rotate_up(value, 3).expect("rotated");
+            } else {
+                let value = builder.splat_bits::<F32, 8>(0).expect("splat");
+                builder.rotate_up(value, 3).expect("rotated");
+            }
+
+            let words = module.finish();
+            assert_eq!(count(&words, op::GROUP_NON_UNIFORM_SHUFFLE), 1);
+            assert_eq!(
+                count(&words, op::GROUP_NON_UNIFORM_SHUFFLE_UP),
+                0,
+                "not a shift"
+            );
+            assert_eq!(
+                count(&words, op::BITWISE_AND),
+                2,
+                "the vector's base, and the wrap"
+            );
+            assert_eq!(count(&words, op::BITWISE_OR), 1);
+            assert_eq!(count(&words, op::SELECT), 0, "nothing is masked away");
+        }
+    }
+
+    #[test]
+    fn a_rotate_by_the_vectors_own_width_emits_nothing() {
+        // The identity, and the module says so by containing none of it. `delta` is reduced rather
+        // than refused, so a rotate by 8, 16 or 24 of an eight-lane vector is the same nothing.
+        for delta in [0_u32, 8, 16] {
+            let mut module = Module::new(Version::V1_3);
+            let mut lanes = Lanes::new(&mut module, 32).expect("built");
+            let value = lanes.splat_bits::<F32, 8>(0).expect("splat");
+
+            let rotated = lanes.rotate_up(value, delta).expect("rotated");
+
+            assert_eq!(
+                rotated.id(),
+                value.id(),
+                "a rotate by {delta} is the vector"
+            );
+            assert_eq!(count(&module.finish(), op::GROUP_NON_UNIFORM_SHUFFLE), 0);
+        }
+    }
+
+    #[test]
+    fn a_rotate_of_a_strip_mined_vector_is_refused_by_name() {
+        // It would have to move elements *between* strips, which is a shuffle per strip and a
+        // rotation of the strips as well — a different algorithm, not a different operand.
+        let mut module = Module::new(Version::V1_3);
+        let mut lanes = Lanes::new(&mut module, 32).expect("built");
+        let wide = lanes.splat_bits::<F32, 128>(0).expect("splat");
+
+        assert!(matches!(
+            lanes.rotate_up(wide, 1).err(),
+            Some(LaneError::NoSuchForm {
+                operation: "rotate_up",
+                ..
+            })
+        ));
     }
 
     #[test]

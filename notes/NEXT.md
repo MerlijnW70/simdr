@@ -904,12 +904,27 @@ to be what made this three lines.
 lanes 3, 11, 19 and 27. The wrong implementation reads `source` as a subgroup lane, and agrees with
 this one for the first cluster of every subgroup.
 
-**5. The shifts are the two that genuinely cross, and the question is what a cluster's edge means.**
-`shift_up`/`shift_down` really do read a neighbouring vector's lanes, and the clustered ladder shows
-what masking them costs — one compare and one select per call. What it does not show is what should
-land in the bottom `delta` lanes: the subgroup form leaves them undefined and says so, and doing the
-same at a cluster's edge would be consistent but is a claim about *our* API rather than about SPIR-V.
-Written down rather than guessed at, exactly as item 5 of the second list was.
+**5. What a cluster's edge means — answered, and the answer was a third operation.**
+`shift_up`/`shift_down` really do read a neighbouring vector's lanes. The two obvious answers were
+both bad: call the edge *undefined*, which promises less than the hardware does and leaves a caller
+holding a value it cannot use; or mask it to something, which invents a semantics SPIR-V does not
+have and pays for it in every call. The project has refused that second trade twice already — see
+the `FMax` note under item 4 of the first list.
+
+The third answer is that the operation a caller wants at an edge is the one that has none.
+**`Lanes::rotate_up` wraps inside the vector**: every lane reads a lane of its own vector, so there
+is nothing undefined and nothing to mask, and it is allowed for a clustered vector and a
+subgroup-wide one from the same four instructions — `(l & !(size - 1)) | ((l + size - delta) & (size
+- 1))`, where a subgroup-wide vector's first half is zero and it collapses to the wrap alone.
+
+`OpBitwiseOr` is **197**, below the and: the bitwise instructions run *downwards* in the grammar, so
+the number beside `BITWISE_AND` is not the one it needs. Out of `spirv-as`, per DR-0001 — the second
+time today that rule earned its keep.
+
+The shifts stay refused for a clustered vector, and that is now a decision with a reason rather than
+a gap. A rotate by a multiple of the width emits nothing, and a strip-mined rotate is refused by
+name: it moves elements *between* strips, which is a shuffle per strip plus a rotation of the strips
+themselves — a different algorithm, not a different operand.
 
 ### Tier 3 — verification debt
 

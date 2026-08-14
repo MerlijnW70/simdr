@@ -422,6 +422,15 @@ fn the_atomic_kernels_are_valid_at_every_width() {
             width,
         );
         valid_at(kernels::unrun::equals(width, 3), "equals", width);
+        // The rotate, at both mappings from one source: a clustered vector and a subgroup-wide
+        // one differ only in the `size` inside its masks.
+        for cluster in [2_u32, 8, 32] {
+            valid_at(
+                kernels::unrun::rotate_in_cluster(width, cluster, 3),
+                &format!("rotate-{cluster}"),
+                width,
+            );
+        }
     }
 }
 

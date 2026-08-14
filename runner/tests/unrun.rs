@@ -499,3 +499,60 @@ fn a_strip_mined_vote_on_a_value_sees_strips_that_differ_from_each_other() {
         "one element of one lane's second strip differs, in the first subgroup only"
     );
 }
+
+#[test]
+fn a_rotate_wraps_inside_its_own_vector_where_a_shift_would_not() {
+    // **The operation a cluster's edge was waiting for.** `shift_up` leaves the bottom `delta`
+    // lanes undefined and refuses a clustered vector outright, because the lanes it would read
+    // belong to the vector next door and the hardware hands them over without a word. A rotate
+    // reads only inside its own vector, so it is defined for every lane and allowed for both
+    // mappings — and this checks the wrap, which is the half a shift does not have.
+    let Some(gpu) = device("rotate") else {
+        return;
+    };
+    let limits = gpu.limits().clone();
+
+    let width = limits.subgroup_size;
+    let count = WORKGROUP_SIZE as usize;
+    let input = ramp(count);
+
+    for (cluster, delta) in [
+        (2_u32, 1_u32),
+        (4, 1),
+        (4, 3),
+        (8, 5),
+        (16, 4),
+        (32, 1),
+        (64, 7),
+    ] {
+        if cluster > width {
+            continue;
+        }
+
+        let output = gpu
+            .run_u32(
+                &kernels::rotate_in_cluster(width, cluster, delta).expect("built"),
+                &input,
+                1,
+            )
+            .expect("dispatched");
+
+        // Vector `v` occupies lanes `v * cluster .. (v + 1) * cluster`, and element `i` of it comes
+        // from element `i - delta` of the same vector, wrapping. Written as the source index rather
+        // than as a rotation of a slice, so the expectation is the addressing rather than a library
+        // function that might rotate the other way.
+        let size = cluster as usize;
+        let expected: Vec<u32> = (0..count)
+            .map(|lane| {
+                let base = lane / size * size;
+                let within = (lane + size - delta as usize % size) % size;
+                input[base + within]
+            })
+            .collect();
+
+        assert_eq!(
+            output, expected,
+            "a rotate of {delta} inside every {cluster}-lane vector"
+        );
+    }
+}

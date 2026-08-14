@@ -59,7 +59,7 @@
 //! reduction instead. The generator offers them at every mapping now, and the reference scans runs
 //! of `min(lanes, width)` invocations rather than of the width — which is the one line that tells a
 //! clustered scan from a whole-subgroup one.
-
+//!
 //! **And the two operations the API audit added, since later on 2026-08-14.** `Op::SelectEqual`
 //! reaches `Lanes::equal` — the elementwise comparison this crate had gone a month without — and
 //! `Op::AddIfAllEqual` reaches the vote about a *value*, the second uniform branch here. Both

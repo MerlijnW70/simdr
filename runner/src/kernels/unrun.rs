@@ -205,6 +205,45 @@ pub fn subgroup_agrees_wide<const LANES: u32>(subgroup: u32) -> Result<Vec<u32>,
     kernel.finish()
 }
 
+/// `out[i] = in[i - delta]` within the vector, **wrapping** — the rotate.
+///
+/// The operation a cluster's edge was waiting for. `shift_up` leaves the bottom `delta` lanes
+/// undefined and refuses a clustered vector outright; a rotate has no edge, so it is defined
+/// everywhere and allowed everywhere a vector is one strip.
+///
+/// `cluster` picks the vector's width, so this runs the whole-subgroup form and the clustered one
+/// from the same source — which is the point: they are one instruction sequence with a different
+/// `size` in the masks.
+///
+/// # Errors
+///
+/// [`LaneError::NoMapping`] if `cluster` is not a power of two that divides the subgroup, otherwise
+/// if the module cannot be built.
+pub fn rotate_in_cluster(subgroup: u32, cluster: u32, delta: u32) -> Result<Vec<u32>, LaneError> {
+    fn build<const LANES: u32>(subgroup: u32, delta: u32) -> Result<Vec<u32>, LaneError> {
+        use simdr::lanes::U32;
+
+        let mut kernel = Kernel::<U32>::new(shape(subgroup))?;
+        let value = kernel.load::<LANES>(0)?;
+        let rotated = kernel.lanes()?.rotate_up(value, delta)?;
+        kernel.store(1, rotated)?;
+        kernel.finish()
+    }
+
+    match cluster {
+        2 => build::<2>(subgroup, delta),
+        4 => build::<4>(subgroup, delta),
+        8 => build::<8>(subgroup, delta),
+        16 => build::<16>(subgroup, delta),
+        32 => build::<32>(subgroup, delta),
+        64 => build::<64>(subgroup, delta),
+        lanes => Err(LaneError::NoMapping {
+            lanes,
+            width: subgroup,
+        }),
+    }
+}
+
 /// `out[i] = 1` where `in[i]` equals `wanted`, else `0` — the elementwise comparison.
 ///
 /// `Lanes::equal` is the comparison a `Simd` layer is asked for first and this library had none.
