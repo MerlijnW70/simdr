@@ -52,6 +52,34 @@ pub enum Op {
         /// The upper bound, never below `low`.
         high: u32,
     },
+    /// Replace every element equal to `to` with `then`, and leave the rest alone.
+    ///
+    /// The elementwise **equality**, which the lane API had no spelling for until the audit above
+    /// asked for it. A comparison and a select, the same shape as [`Op::ClampBelow`] — and the one
+    /// operation here whose two integer domains reach the *same* instruction, `OpIEqual`, where
+    /// every other comparison splits into a signed and an unsigned form.
+    ///
+    /// `to` is drawn from inside the corpus's range, because an equality nothing ever satisfies is
+    /// an identity, and an identity agrees with every reference including a wrong one.
+    SelectEqual {
+        /// The value an element must equal to be replaced.
+        to: u32,
+        /// What replaces it.
+        then: u32,
+    },
+    /// Add a constant, but only where **every lane of the subgroup holds the same value**.
+    ///
+    /// The vote about a value rather than about a predicate, and the second uniform branch here.
+    /// [`Op::AddIfAnyAbove`] asks whether a comparison held somewhere; this asks whether the lanes
+    /// agree, which no comparison can express — the value a lane would compare against is the one
+    /// it is trying to learn.
+    ///
+    /// Reachable only where the vector is at least as wide as the subgroup, like the other vote:
+    /// `all_equal` refuses a clustered vector, where the answer would cover four vectors at once.
+    AddIfAllEqual {
+        /// What to add where the subgroup agrees.
+        add: u32,
+    },
     /// Add a constant, but only where some element of the subgroup exceeds `when_any_above`.
     ///
     /// A uniform branch: the condition is a vote, so the whole subgroup takes it or none of it

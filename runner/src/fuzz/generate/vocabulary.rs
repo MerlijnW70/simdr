@@ -30,6 +30,8 @@ pub(super) enum Kind {
     RolledCounterAdd,
     ButterflyAdd,
     AddIfAnyAbove,
+    AddIfAllEqual,
+    SelectEqual,
     ShiftUp,
 }
 
@@ -44,9 +46,10 @@ pub(super) const ELEMENTWISE: &[Kind] = &[
     Kind::RepeatAdd,
     Kind::RolledAdd,
     Kind::RolledCounterAdd,
+    Kind::SelectEqual,
 ];
 
-/// The above, plus the three that need a vector at least as wide as the subgroup.
+/// The above, plus the four that need a vector at least as wide as the subgroup.
 ///
 /// A shuffle or a vote on a vector that shares its lanes with three others is refused by the lane
 /// API, and the generator respects that rather than leaning on `build` to say no — a run made
@@ -61,8 +64,10 @@ pub(super) const EVERYTHING: &[Kind] = &[
     Kind::RepeatAdd,
     Kind::RolledAdd,
     Kind::RolledCounterAdd,
+    Kind::SelectEqual,
     Kind::ButterflyAdd,
     Kind::AddIfAnyAbove,
+    Kind::AddIfAllEqual,
     Kind::ShiftUp,
 ];
 
@@ -91,6 +96,18 @@ pub(super) fn fill(rng: &mut Rng, domain: Domain, subgroup: u32, kind: Kind) -> 
                 high: low.saturating_add(1 + rng.below(u64::from(domain.ceiling())) as u32),
             }
         }
+        // Drawn from inside the corpus's own range, so that some elements match and some do not.
+        // A target nothing equals makes the step an identity, and an identity agrees with every
+        // reference including a wrong one — the same trap `MinConstant` documents above.
+        Kind::SelectEqual => Op::SelectEqual {
+            to: rng.below(u64::from(domain.ceiling())) as u32,
+            then: rng.below(u64::from(domain.ceiling())) as u32,
+        },
+        // The vote about a value. On a corpus of distinct elements it almost never passes, which
+        // is the point: a reference that got the *condition* backwards would add everywhere.
+        Kind::AddIfAllEqual => Op::AddIfAllEqual {
+            add: 1 + rng.below(8) as u32,
+        },
         Kind::RepeatAdd => Op::RepeatAdd {
             times: rng.below(5) as u32,
             add: 1 + rng.below(8) as u32,

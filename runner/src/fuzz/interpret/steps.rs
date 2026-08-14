@@ -64,6 +64,49 @@ pub(super) fn apply(program: &Program, held: &[Vec<u32>], step: Op) -> Vec<Vec<u
                 domain.add(carried, domain.encode(iteration))
             })
         }),
+        Op::SelectEqual { to, then } => {
+            let target = domain.encode(to);
+            let then = domain.encode(then);
+            elementwise(held, |value| {
+                if domain.equals(value, target) {
+                    then
+                } else {
+                    value
+                }
+            })
+        }
+        Op::AddIfAllEqual { add } => {
+            let add = domain.encode(add);
+
+            // Per *subgroup*, like the other vote — and over every element the subgroup holds,
+            // strips included, because that is what `all_equal` asks: a strip-mined vector agrees
+            // only when its lanes agree *and* its strips do.
+            held.chunks(width)
+                .flat_map(|subgroup| {
+                    let mut elements = subgroup.iter().flatten();
+                    let first = elements.next().copied();
+                    let agreed = first.is_some_and(|first| {
+                        subgroup
+                            .iter()
+                            .flatten()
+                            .all(|value| domain.equals(*value, first))
+                    });
+
+                    subgroup.iter().map(move |elements| {
+                        elements
+                            .iter()
+                            .map(|value| {
+                                if agreed {
+                                    domain.add(*value, add)
+                                } else {
+                                    *value
+                                }
+                            })
+                            .collect()
+                    })
+                })
+                .collect()
+        }
         Op::AddIfAnyAbove {
             when_any_above,
             add,

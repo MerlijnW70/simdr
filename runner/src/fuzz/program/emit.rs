@@ -47,6 +47,27 @@ pub(super) fn apply<T: Element, const LANES: u32>(
             let high = lanes.splat_bits::<T, LANES>(domain.encode(high))?;
             lanes.clamp(value, low, high)
         }
+        Op::SelectEqual { to, then } => {
+            let target = lanes.splat_bits::<T, LANES>(domain.encode(to))?;
+            let replacement = lanes.splat_bits::<T, LANES>(domain.encode(then))?;
+            let same = lanes.equal(value, target)?;
+            lanes.select(same, replacement, value)
+        }
+        Op::AddIfAllEqual { add } => {
+            // The other uniform branch, and the vote that asks about a value. Written as a select
+            // on the vote for the same reason the one below is: a branch cannot hand a value out
+            // across its merge without an `OpPhi`, and the vote is uniform so both readings agree.
+            let vote = lanes.all_equal_uniform(value)?;
+            let increment = lanes.splat_bits::<T, LANES>(domain.encode(add))?;
+            let raised = lanes.add(value, increment)?;
+
+            let element = lanes.type_of::<T>()?;
+            let mut chosen = Vec::with_capacity(value.strip_count());
+            for (&taken, &left) in raised.strips().iter().zip(value.strips()) {
+                chosen.push(lanes.module().select(element, vote.id(), taken, left)?);
+            }
+            lanes.from_strips(&chosen)
+        }
         Op::AddIfAnyAbove {
             when_any_above,
             add,

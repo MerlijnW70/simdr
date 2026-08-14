@@ -43,6 +43,8 @@ fn the_generator_reaches_every_operation_it_knows() {
                 Op::RolledCounterAdd { .. } => "counter",
                 Op::ButterflyAdd(_) => "butterfly",
                 Op::AddIfAnyAbove { .. } => "branch",
+                Op::AddIfAllEqual { .. } => "agree",
+                Op::SelectEqual { .. } => "equal",
                 Op::ShiftUp(_) => "shift",
             };
             if !seen.contains(&name) {
@@ -56,11 +58,13 @@ fn the_generator_reaches_every_operation_it_knows() {
         seen,
         vec![
             "add",
+            "agree",
             "branch",
             "butterfly",
             "clamp",
             "clamp-both",
             "counter",
+            "equal",
             "max",
             "min",
             "mul",

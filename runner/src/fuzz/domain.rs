@@ -268,6 +268,23 @@ impl Domain {
         }
     }
 
+    /// Whether two values are equal, the way the device's comparison is.
+    ///
+    /// Decoded rather than compared as bits, for the same reason [`Domain::greater`] is: a float
+    /// domain's `+0.0` and `-0.0` are two bit patterns and one value, and `OpFOrdEqual` says they
+    /// are equal. Nothing in this corpus produces a negative zero — which is exactly why the
+    /// comparison is written the way the hardware does it rather than the way the corpus would let
+    /// it get away with.
+    ///
+    /// A NaN is equal to nothing, itself included, and `f32`'s own `==` already says so.
+    #[must_use]
+    pub fn equals(self, left: u32, right: u32) -> bool {
+        if self.is_float() {
+            return self.decode(left) == self.decode(right);
+        }
+        self.truncate(left) == self.truncate(right)
+    }
+
     /// The smaller of two values.
     #[must_use]
     pub fn min(self, left: u32, right: u32) -> u32 {
