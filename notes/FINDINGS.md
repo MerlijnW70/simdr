@@ -2165,3 +2165,48 @@ started looking. Both were latent for as long as the code has existed.
 **A shared runner is a fourth implementation, not just automation.** That is the strongest argument
 for CI here, and it is not the one the item was written for — item 4 was about the suite being run
 by hand on one machine. It found a portability bug on its first green device.
+
+## The step row was out by five times, and the two devices disagree about why
+
+`runner/examples/reducer.rs` built its breakdown out of probes: a chain of empty kernels for the
+per-step cost, a bare submit-and-wait for the submission, a `Session` write for the upload. The
+rows came to **118%** of the call they described, and the file said so without being able to say
+which row was wrong.
+
+`Reducer::sum_timed` writes a timestamp into the chain's own command buffer after every dispatch,
+so each pass is measured beside the passes it actually runs beside. On an RTX 4080 over 2²⁰:
+
+| | probe | in place |
+| --- | --- | --- |
+| the chained steps | ~70 µs, 24% of the call | **~12 µs, 4%** |
+
+**Out by roughly five times**, and in the direction the probe was always going to err: a chain of
+empty kernels gives a barrier nothing to overlap with, so every step pays its full latency where a
+real one hides behind the pass before it. The row was labelled an upper bound after the fold-by-
+sixteen pass found it overestimating by four; this says by five and says it from inside the call.
+
+### The profile's shape belongs to the device, not the algorithm
+
+Each pass after the first reads a sixteenth of what the one before it wrote, so a bandwidth-bound
+chain should fall away to nothing and a latency-bound one should not. Both happen, on the same
+chain, on two devices in the same machine:
+
+| pass | RTX 4080 | integrated Radeon |
+| --- | --- | --- |
+| 1 of 5 | 3.6 µs — 30% | 115.8 µs — 92% |
+| 2 of 5 | 2.0 µs — 17% | 6.6 µs — 5% |
+| 3 of 5 | 2.0 µs — 17% | 1.5 µs — 1% |
+| 4 of 5 | 2.0 µs — 17% | 1.1 µs — 1% |
+| 5 of 5 | 2.0 µs — 17% | 1.0 µs — 1% |
+| all five | **11.8 µs** | **126.0 µs** |
+
+The Radeon is bandwidth-bound and falls away exactly as the arithmetic predicts. The 4080 is flat,
+because at its bandwidth the later passes are too small to cost anything but the dispatch itself —
+a floor per dispatch rather than work.
+
+That is the same floor the fold-by-sixteen pass was chasing, and it is why removing ten dispatches
+was worth anything on the 4080 at all. It also explains why the same change was worth so little:
+the floor is ~2 µs, and ten of them is ~20 µs against a 400 µs call.
+
+**Neither device's answer generalises.** The example prints what the device in front of it says,
+rather than repeating either of these.

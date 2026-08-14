@@ -10,6 +10,14 @@ use crate::{Error, Gpu};
 use ash::vk;
 use std::time::{Duration, Instant};
 
+/// What one submission took, and what happened inside it.
+pub(super) struct Recorded {
+    /// The whole thing, on the device's clock where it has one and the host's otherwise.
+    pub(super) whole: Duration,
+    /// One duration per mark the caller wrote, in order. Empty unless it asked for marks.
+    pub(super) spans: Vec<Duration>,
+}
+
 impl Gpu {
     /// Copy `bytes` from one buffer to another, and wait for it.
     ///
@@ -21,7 +29,7 @@ impl Gpu {
         // and it waits before returning — so the caller's `from` and `to`, which this function's
         // own contract says are live and unused, are live for the whole of it.
         unsafe {
-            self.record_and_wait(|device, command| {
+            self.record_and_wait(0, |device, command, _| {
                 let region = [vk::BufferCopy::default().size(bytes)];
                 device.cmd_copy_buffer(command, from.handle, to.handle, &region);
                 Ok(())
@@ -40,14 +48,16 @@ impl Gpu {
     /// # Safety
     ///
     /// Whatever `record` refers to must outlive the submission.
-    pub(super) unsafe fn record_and_wait<F>(&self, record: F) -> Result<Duration, Error>
+    /// `marks` is how many intermediate timestamps `record` will write, and the query pool is
+    /// sized for exactly that. A closure that writes none passes zero and is handed `None`.
+    pub(super) unsafe fn record_and_wait<F>(&self, marks: u32, record: F) -> Result<Recorded, Error>
     where
-        F: FnOnce(&ash::Device, vk::CommandBuffer) -> Result<(), Error>,
+        F: FnOnce(&ash::Device, vk::CommandBuffer, Option<&Timestamps>) -> Result<(), Error>,
     {
         let device = self.device();
         // SAFETY: the device outlives this call — it is owned by the `Gpu` this is a method on,
         // and `Gpu::drop` cannot run while a `&self` borrow of it exists.
-        let timestamps = unsafe { Timestamps::new(self) }?;
+        let timestamps = unsafe { Timestamps::new(self, marks) }?;
 
         let pool_info =
             vk::CommandPoolCreateInfo::default().queue_family_index(self.queue_family());
@@ -80,7 +90,7 @@ impl Gpu {
             // timestamp write may be recorded in, and the query pool is `timestamps`' own.
             unsafe { timestamps.begin(self, command) };
         }
-        record(device, command)?;
+        record(device, command, timestamps.as_ref())?;
         if let Some(timestamps) = timestamps.as_ref() {
             // SAFETY: as the opening write — still recording, same pool, and the caller's `record`
             // cannot have ended the buffer because it is handed one that is already open.
@@ -110,17 +120,19 @@ impl Gpu {
 
         // The device's answer wins where there is one. `None` means the query pool existed but
         // gave nothing usable, which is a fallback rather than a failure.
-        let elapsed = match timestamps {
+        let (elapsed, spans) = match timestamps {
             Some(timestamps) => {
                 // SAFETY: the fence above has been waited on, so the writes these queries record
                 // have completed and the results are available rather than in flight.
                 let measured = unsafe { timestamps.read(self) }?;
+                // SAFETY: the same wait, and the marks were written into the same pool.
+                let spans = unsafe { timestamps.spans(self) }?;
                 // SAFETY: the same wait means no submission still refers to the query pool, and
-                // nothing reads `timestamps` after this — `measured` is already a plain `Duration`.
+                // nothing reads `timestamps` after this — both results are already plain values.
                 unsafe { timestamps.destroy(self) };
-                measured.unwrap_or(host)
+                (measured.unwrap_or(host), spans)
             }
-            None => host,
+            None => (host, Vec::new()),
         };
 
         // SAFETY: the fence is signalled and has been waited on, so the command buffer is no
@@ -130,6 +142,9 @@ impl Gpu {
             device.destroy_fence(fence, None);
             device.destroy_command_pool(pool, None);
         }
-        Ok(elapsed)
+        Ok(Recorded {
+            whole: elapsed,
+            spans,
+        })
     }
 }

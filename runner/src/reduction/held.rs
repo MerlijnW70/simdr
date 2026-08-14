@@ -38,6 +38,7 @@ use super::Reduction;
 use crate::buffer::Buffer;
 use crate::dispatch::{Ends, Pipeline, Staged, answer_in_destination, deliver_floats};
 use crate::{Error, Gpu};
+use std::time::Duration;
 
 /// How much of the answer buffer comes home: one `f32`.
 ///
@@ -204,6 +205,27 @@ impl Reducer<'_> {
         self.pipelines.len()
     }
 
+    /// The same sum, reporting how long each pass took on the device's own clock.
+    ///
+    /// **This is what a breakdown should be made of.** `runner/examples/reducer.rs` used to time
+    /// each row on its own — a chain of empty kernels for the dispatch cost, a bare submit-and-wait
+    /// for the submission, a `Session` write for the upload — and the rows came to 123% of the call
+    /// they described, because each probe paid fixed costs the real call pays once between them
+    /// all.
+    ///
+    /// These are timestamps written *into the chain's own command buffer*, between the dispatches
+    /// that actually run. Pass `i` is measured beside the passes it runs beside.
+    ///
+    /// The vector is empty on a device with no usable timestamp queries, which is a thing to
+    /// report rather than a zero to print.
+    ///
+    /// # Errors
+    ///
+    /// As [`Reducer::sum`].
+    pub fn sum_timed(&mut self, input: &[f32]) -> Result<(Reduction, Vec<Duration>), Error> {
+        self.run(input)
+    }
+
     /// Sum every element of `input`, reusing the pipelines and the buffers.
     ///
     /// `input.len()` must equal [`Reducer::elements`]. A shorter slice would leave the tail of the
@@ -215,6 +237,11 @@ impl Reducer<'_> {
     /// [`Error::TooLarge`] if `input` is not the length this was built for, otherwise as
     /// [`Gpu::run`].
     pub fn sum(&mut self, input: &[f32]) -> Result<Reduction, Error> {
+        self.run(input).map(|(reduction, _)| reduction)
+    }
+
+    /// Both of the above: the answer, and where the time went.
+    fn run(&mut self, input: &[f32]) -> Result<(Reduction, Vec<Duration>), Error> {
         if input.len() != self.elements {
             return Err(Error::TooLarge {
                 words: input.len(),
@@ -232,7 +259,7 @@ impl Reducer<'_> {
 
         // SAFETY: every buffer and pipeline here is owned by `self` and outlives the call, and the
         // submission waits on a fence before returning.
-        let output = unsafe {
+        let (output, spans) = unsafe {
             // Straight from the caller's slice, and — where the device has memory both sides can
             // reach — straight into the buffer the first pass reads. `deliver_floats` picks, and
             // returns the copy that is left to record, which on such a device is none.
@@ -258,7 +285,7 @@ impl Reducer<'_> {
             //
             // The answer is **one word**, not the buffer: a reduction produces a single number and
             // this used to bring whole megabytes home to call `.first()` on them.
-            self.gpu.replay(
+            let spans = self.gpu.replay_timed(
                 &self.pipelines,
                 &self.workgroups,
                 upload,
@@ -268,7 +295,7 @@ impl Reducer<'_> {
                     bytes: ANSWER_BYTES,
                 }),
             )?;
-            staging.read(self.gpu, 1)?
+            (staging.read(self.gpu, 1)?, spans)
         };
 
         let total = output
@@ -277,11 +304,14 @@ impl Reducer<'_> {
             .map(f32::from_bits)
             .ok_or(Error::NoPipeline)?;
 
-        Ok(Reduction {
-            total,
-            dispatches: self.pipelines.len(),
-            host_combined: 1,
-        })
+        Ok((
+            Reduction {
+                total,
+                dispatches: self.pipelines.len(),
+                host_combined: 1,
+            },
+            spans,
+        ))
     }
 }
 

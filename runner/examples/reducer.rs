@@ -83,6 +83,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     breakdown(&gpu, largest_held)?;
+    measured_in_place(&gpu)?;
     mapped(&gpu)?;
     Ok(())
 }
@@ -404,4 +405,81 @@ fn thousands(value: usize) -> String {
         out.push(digit);
     }
     out
+}
+
+/// The same question asked of the chain itself, with a timestamp between every pass.
+///
+/// **Everything above is probes.** Each row is timed on its own — a chain of empty kernels for the
+/// step cost, a bare submit-and-wait for the submission, a `Session` write for the upload — and
+/// each pays fixed costs the real call pays once between them all. They come to more than the
+/// whole, and the table says so.
+///
+/// This is the call. `Reducer::sum_timed` writes a timestamp into the command buffer after every
+/// dispatch, so pass `i` is measured beside the passes it actually runs beside. Nothing is
+/// reconstructed and nothing is subtracted.
+fn measured_in_place(gpu: &Gpu) -> Result<(), Box<dyn std::error::Error>> {
+    println!(
+        "
+
+the same reduction, timed from inside its own command buffer:
+"
+    );
+
+    // The larger of the two sizes above, which is where a chain has enough passes to divide.
+    let Some(&(elements, _)) = SIZES.last() else {
+        return Ok(());
+    };
+    let mut reducer = gpu.reducer(elements)?;
+    let input = vec![1.0_f32; elements];
+
+    // Once to warm the driver, then the run that is reported.
+    reducer.sum_timed(&input)?;
+    let (reduction, spans) = reducer.sum_timed(&input)?;
+
+    if spans.is_empty() {
+        println!(
+            "  this device reports no usable timestamp queries, so there is nothing to say —
+             `timestampValidBits` is zero on some queues and the whole feature is optional."
+        );
+        return Ok(());
+    }
+
+    let dispatched: Duration = spans.iter().sum();
+    println!("{:>28} {:>12} {:>10}", "pass", "on device", "share");
+    for (index, taken) in spans.iter().enumerate() {
+        let share = taken.as_secs_f64() / dispatched.as_secs_f64() * 100.0;
+        println!(
+            "{:>28} {:>12} {share:>9.0}%",
+            format!("{} of {}", index + 1, spans.len()),
+            micros(*taken)
+        );
+    }
+    println!(
+        "{:>28} {:>12} {:>10}",
+        "---- the dispatches ----",
+        micros(dispatched),
+        ""
+    );
+
+    println!(
+        "
+  {} dispatches, and they are **not** the whole call: the host still writes its input
+         and waits for the submission, and neither of those is inside the command buffer. What this
+         says is how the *device* time divides, which the table above could only guess at — and it
+         guessed high. The step row up there is an upper bound taken from a chain of empty kernels,
+         and against this it is out by roughly five times.
+
+         **The shape of the profile is the device's, not the algorithm's**, and the two here
+         disagree completely. Each pass after the first reads a sixteenth of what the one before it
+         wrote, so a bandwidth-bound chain falls away to nothing and a latency-bound one does not.
+         The integrated Radeon falls away — 92% in the first pass, then 5%, then 1% — and the RTX
+         4080 is nearly flat, because at its bandwidth the later passes are too small to cost
+         anything but the dispatch itself.
+
+         Same chain, same arithmetic, opposite answers to 'where does the time go'. Which is why
+         this prints what the device says rather than repeating a number measured somewhere else.",
+        reduction.dispatches
+    );
+
+    Ok(())
 }

@@ -657,11 +657,16 @@ cost `Gpu::sum` 62%.
 `runner/examples/bindings.rs` prints the table; `notes/FINDINGS.md` has the argument. Third item on
 this list refuted by its own measurement.
 
-**10. The breakdown reads 123% of the call.** Its rows are timed in isolation and the call got a
-third shorter around them, so they no longer add up to anything. Device timestamps recorded
-*inside* the real chain would make the rows the call itself rather than probes that resemble it —
-and this project has now mismeasured five times, of which the last was precisely a cost measured
-alone behaving differently in company.
+**10. The breakdown reads 123% of the call — done, and the guilty row was out by five times.**
+`Reducer::sum_timed` writes a timestamp into the chain's own command buffer after every dispatch,
+so each pass is measured beside the passes it runs beside. The probe said the chained steps cost
+~70 µs of a 296 µs call; in place they are **~12 µs**. A chain of empty kernels gives a barrier
+nothing to overlap with, which is the direction that probe was always going to err in.
+
+It also found something neither probe nor arithmetic could: **the profile's shape belongs to the
+device.** The integrated Radeon is bandwidth-bound and falls away 92% → 5% → 1% across the passes;
+the 4080 is flat at ~2 µs a pass, because at its bandwidth the tail is too small to cost anything
+but the dispatch. Same chain, opposite answers. `notes/FINDINGS.md` has both columns.
 
 **11. A buffer the caller already owns.** Unchanged and still deferred; the argument is above under
 its own heading.

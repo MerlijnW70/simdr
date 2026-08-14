@@ -29,6 +29,7 @@ use super::step::{Ends, Pass, answer_in_destination};
 use crate::buffer::Buffer;
 use crate::{Error, Gpu};
 use ash::vk;
+use std::time::Duration;
 
 impl Gpu {
     /// Run every pass in order over one pair of device-local buffers, and read the result back.
@@ -260,14 +261,43 @@ impl Gpu {
         before: Option<Staged<'_>>,
         after: Option<Staged<'_>>,
     ) -> Result<(), Error> {
-        // The duration `record_and_wait` reports is the host's view of the whole submission, which
-        // is not what a chain's caller wants — `Gpu::sum` reports dispatch *counts* and leaves
-        // timing to the examples. Discarded here rather than threaded out to nobody.
+        // SAFETY: forwarded unchanged; this function's contract is `replay_timed`'s.
+        unsafe { self.replay_timed(pipelines, workgroups, before, after) }.map(|_| ())
+    }
+
+    /// The same submission, reporting how long each pass took **on the device's own clock**.
+    ///
+    /// One timestamp per pass, written into the command buffer between the dispatches rather than
+    /// around them. That is the whole difference from timing a pass on its own: a probe pays its
+    /// own submission, its own fence and its own cold caches, and a chain's third dispatch pays
+    /// none of those because the two before it already did.
+    ///
+    /// `runner/examples/reducer.rs` had a breakdown built out of probes, and its rows came to
+    /// **123%** of the call they were describing. These are the call.
+    ///
+    /// The returned vector is one duration per pass, in order, and **empty on a device with no
+    /// usable timestamp queries** — `timestampValidBits` is zero on some queues and the feature is
+    /// optional. Empty means "this device cannot say", not "it took no time".
+    ///
+    /// # Safety
+    ///
+    /// As [`Gpu::replay`].
+    pub(crate) unsafe fn replay_timed(
+        &self,
+        pipelines: &[Pipeline],
+        workgroups: &[u32],
+        before: Option<Staged<'_>>,
+        after: Option<Staged<'_>>,
+    ) -> Result<Vec<Duration>, Error> {
+        // One mark per pass, so a caller that wants to know where a chain's time went can be told
+        // in the terms of the chain that actually ran. `Gpu::replay` throws the answer away and
+        // `Gpu::replay_timed` hands it back; both record the same command buffer.
+        let marks = pipelines.len() as u32;
         // SAFETY: `record_and_wait` asks that whatever the closure names outlive the submission.
         // It names the pipelines and the buffers in `before`/`after`, all of which are the
         // caller's and live for this call by its own contract, and the wait happens inside.
         let recorded = unsafe {
-            self.record_and_wait(|device, command| {
+            self.record_and_wait(marks, |device, command, clock| {
                 if let Some(upload) = before {
                     // Nothing has run yet, so there is nothing to wait for — only to make visible.
                     // The barrier after it is what the first dispatch needs.
@@ -299,6 +329,17 @@ impl Gpu {
                         &[],
                     );
                     device.cmd_dispatch(command, (*groups).max(1), 1, 1);
+
+                    // A mark per pass, written at the *bottom* of the pipe so it lands after this
+                    // dispatch has finished rather than after it was issued. This is what makes a
+                    // breakdown the call itself: each pass is measured beside the passes it
+                    // actually runs beside, paying whatever they make it pay.
+                    if let Some(clock) = clock {
+                        // SAFETY: covered by the block this closure runs inside — the command
+                        // buffer is recording, and the index is below the count `marks` promised
+                        // the pool.
+                        clock.mark(self, command, index as u32);
+                    }
                 }
 
                 if let Some(download) = after {
@@ -315,7 +356,7 @@ impl Gpu {
             })
         };
 
-        recorded.map(|_| ())
+        recorded.map(|recorded| recorded.spans)
     }
 }
 

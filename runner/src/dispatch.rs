@@ -180,7 +180,7 @@ impl Gpu {
         // It names only `pipeline`, which this function's contract says is live, and the call
         // waits for the submission before returning.
         unsafe {
-            self.record_and_wait(|device, command| {
+            self.record_and_wait(0, |device, command, _| {
                 device.cmd_bind_pipeline(
                     command,
                     vk::PipelineBindPoint::COMPUTE,
@@ -216,6 +216,7 @@ impl Gpu {
                 }
                 Ok(())
             })
+            .map(|recorded| recorded.whole)
         }
     }
 }
