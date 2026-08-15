@@ -116,6 +116,25 @@ pub trait Signed: Element {
     const ABS: Glsl;
 }
 
+/// An element whose **bits** may be shifted.
+///
+/// A third trait for the reason [`Signed`] is a second one, and found the same way round. The
+/// shifts took `T: Element`; `F32` is an `Element`; and `Lanes::shift_left` on a vector of floats
+/// **built a module `spirv-val` rejects** — SPIR-V's shifts take integer operands and give an
+/// integer result. Nothing refused it, nothing validated it, and it was reachable from safe code
+/// with a plausible spelling, which is `OpUDot`'s shape exactly.
+///
+/// The argument against the alternatives is the one written above: a [`LaneError`] would have made
+/// a nonsense call a case to handle, and a bitcast would have made it silently mean something else.
+/// Refusing at the type is neither, and it means the call cannot be written rather than that it is
+/// caught — the same trade `decisions/DR-0006` makes by giving `Grid` no third axis.
+///
+/// [`LaneError`]: crate::lanes::LaneError
+pub trait Integer: Element {}
+
+impl Integer for I32 {}
+impl Integer for U32 {}
+
 /// 32-bit float.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct F32;

@@ -31,7 +31,7 @@
 //! though both are the same truncation. That is the kind of asymmetry that assembles cleanly when
 //! it is wrong, and `tests/kernels.rs` hands each of them to the validator.
 
-use super::element::{Element, Signed};
+use super::element::{Element, Integer, Signed};
 use crate::module::{BuildError, Id, Module, op};
 use crate::spec::{Capability, Glsl};
 
@@ -248,6 +248,14 @@ fn sign_extend(bits: u32, width: u32) -> u32 {
     let spare = 32 - width.clamp(1, 32);
     (((bits << spare) as i32) >> spare) as u32
 }
+
+// The narrow integers shift like the wide ones — `OpShiftLeftLogical` and its two right-hand twins
+// take an integer of any width. `F16` is absent for the reason `F32` is: see [`Integer`], whose
+// bound exists because a shift of a float built a module `spirv-val` rejects.
+impl Integer for I8 {}
+impl Integer for U8 {}
+impl Integer for I16 {}
+impl Integer for U16 {}
 
 #[cfg(test)]
 mod tests {

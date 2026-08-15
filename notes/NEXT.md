@@ -1311,9 +1311,17 @@ them in full:
   no device required.
 
 What is left here is the rest of the surface: the bit shifts, `abs`, the conversions and the integer
-dot products are all exactly checkable in the integer domains and none of them is generated. They
-need domain-aware pools — a shift has no float form — which is the one piece of machinery the
-generator does not have.
+dot products are all exactly checkable in the integer domains and none of them is generated.
+
+**And the reason is sharper than "the generator has no domain-aware pools".** Preparing that pass
+found that `Lanes::shift_left` took `T: Element`, `F32` is an `Element`, and a shift of a vector of
+floats built a module `spirv-val` rejects — `OpUDot`'s shape exactly, in three public operations.
+It is `T: Integer` now, so the call cannot be written, with a `compile_fail` doctest as the only
+artefact that can assert what a program *cannot be*.
+
+Which is also the blocker: `Program::build` emits through one function generic over `Element`, and a
+shift needs `Integer`. Generating one means emitting **per domain** rather than filtering a pool.
+That is a real piece of design, not a table entry.
 
 **2. The reduction and scan chains are the shape DR-0008 rules in** — one question over a whole
 buffer, one submission. `Gpu::sum` at 11.2× over 8 192 elements, `Gpu::scanner_of` at 2.0–3.0×,

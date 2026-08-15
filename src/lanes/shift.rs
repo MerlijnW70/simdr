@@ -18,17 +18,53 @@
 //! **A shift of more than the type's width is undefined**, and nothing here checks it: the amount
 //! is an id by the time it arrives, so a check would mean emitting a comparison and a select on
 //! every call. SPIR-V says the same thing about the same instruction.
+//!
+//! # The element has to be an integer, and for a while it did not
+//!
+//! These took `T: Element`. `F32` is an `Element`, so `lanes.shift_left` on a vector of floats
+//! compiled, built, and produced a module **`spirv-val` rejects** — SPIR-V's shifts take integer
+//! operands and give an integer result, which is not a leniency question a driver might wave
+//! through. Nothing refused it and nothing validated it: reachable from safe code, spelled
+//! plausibly, illegal. That is `OpUDot`'s shape exactly, and `runner/tests/validated.rs` opens by
+//! describing it.
+//!
+//! [`Integer`] is the bound now, so the call cannot be written rather than being caught. The
+//! argument is [`Signed`]'s, one trait up: a `LaneError` would have made a nonsense call a case to
+//! handle, and a bitcast would have made it silently mean something else.
+//!
+//! [`Signed`]: super::Signed
 
-use super::{Element, I32, LaneError, Lanes, U32, Vector};
+use super::{I32, Integer, LaneError, Lanes, U32, Vector};
 use crate::module::op;
 
 impl Lanes<'_> {
     /// `value << amount`, elementwise.
     ///
+    /// A float element does not compile, which is the point of [`Integer`] and the only way to
+    /// state it as a check — a test can assert what a program *does*, and this is about what it
+    /// cannot be:
+    ///
+    /// ```compile_fail
+    /// use simdr::kernel::{Kernel, Shape};
+    /// use simdr::lanes::{F32, U32};
+    ///
+    /// let mut kernel = Kernel::<F32>::new(Shape::new(32, 64, 2))?;
+    /// let value = kernel.load::<32>(0)?;
+    /// let mut lanes = kernel.lanes()?;
+    /// let by = lanes.splat_bits::<U32, 32>(3)?;
+    ///
+    /// // `F32` is an `Element` and not an `Integer`. Before that bound existed this built a
+    /// // module `spirv-val` rejects.
+    /// let shifted = lanes.shift_left(value, by)?;
+    /// # Ok::<(), simdr::lanes::LaneError>(())
+    /// ```
+    ///
+    /// The same shape with a `U32` is `the_shifts_are_valid_spirv` in `tests/instructions.rs`.
+    ///
     /// # Errors
     ///
     /// [`LaneError`] if the instructions cannot be emitted.
-    pub fn shift_left<T: Element, const LANES: u32>(
+    pub fn shift_left<T: Integer, const LANES: u32>(
         &mut self,
         value: Vector<T, LANES>,
         amount: Vector<U32, LANES>,
@@ -44,7 +80,7 @@ impl Lanes<'_> {
     /// # Errors
     ///
     /// As [`Lanes::shift_left`].
-    pub fn shift_right_logical<T: Element, const LANES: u32>(
+    pub fn shift_right_logical<T: Integer, const LANES: u32>(
         &mut self,
         value: Vector<T, LANES>,
         amount: Vector<U32, LANES>,
@@ -60,7 +96,7 @@ impl Lanes<'_> {
     /// # Errors
     ///
     /// As [`Lanes::shift_left`].
-    pub fn shift_right_arithmetic<T: Element, const LANES: u32>(
+    pub fn shift_right_arithmetic<T: Integer, const LANES: u32>(
         &mut self,
         value: Vector<T, LANES>,
         amount: Vector<U32, LANES>,
@@ -73,7 +109,7 @@ impl Lanes<'_> {
     /// Its own helper rather than [`Lanes::zip`]'s, because the two operands have *different*
     /// element types — the value is a `T` and the amount is always a `u32` — and `zip` is written
     /// for the case where they agree.
-    fn shift<T: Element, const LANES: u32>(
+    fn shift<T: Integer, const LANES: u32>(
         &mut self,
         opcode: u16,
         value: Vector<T, LANES>,

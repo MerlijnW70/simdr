@@ -51,7 +51,7 @@ mod vote;
 
 pub use self::arithmetic::Predicate;
 pub use self::dot::{pack, signed_bytes, unsigned_bytes};
-pub use self::element::{Element, F32, I32, Signed, U32};
+pub use self::element::{Element, F32, I32, Integer, Signed, U32};
 pub use self::error::LaneError;
 pub use self::mapping::Mapping;
 pub use self::narrow::{F16, I8, I16, U8, U16};
