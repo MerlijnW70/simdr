@@ -34,7 +34,7 @@ jobs:
     name: emitter — no device needed
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -95,7 +95,7 @@ jobs:
           - vector: 512
             width: 16
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
 
       - name: install lavapipe and spirv-tools
@@ -141,7 +141,7 @@ jobs:
     name: the version Cargo.toml claims
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # `rust-version` was asserted in `Cargo.toml` and never tested against anything. It said
       # 1.97 — the version that happened to be installed — and the workspace builds on 1.88, so
       # the claim was nine releases too conservative and nobody could have known. This is what
