@@ -1514,3 +1514,50 @@ one workgroup, which is right at a batch of one and wrong at every larger size.
 
 That is a better starting point than the file had before, and it is still not a caller. This entry
 stays open.
+
+## Where the work goes now — 2026-08-16, after the sandbox
+
+The generator draws from <!--count:fuzz-operations-->23 operations, against the
+<!--count:lane-operations-->64 public functions `src/lanes/` declares. That ratio is the one number
+this list is written against, and it is now checked at both ends rather than typed.
+
+### Tier 1 — the hole the deletion opened, closed
+
+**1. The packed dot products at all three mappings — done, and in the suite this time.** Deleting
+the sandbox took the only check that ran `OpSDot`, `OpUDot`, `OpSUDot` and `OpSDotAccSat` anywhere
+but whole-subgroup, because every kernel in `runner::kernels::dot` is built through
+`whole_subgroup!`. `runner/tests/mappings.rs` is that check, in the tree that runs on every push,
+and it builds its own modules precisely because the macro is what it is testing around.
+
+Checked by breaking it: reading `OpSUDot`'s second operand as signed disagrees at **all three**
+mappings on the first seed. And it batches — one workgroup per seed, the offset the whole batch's —
+which is the shape the sandbox left behind rather than the code it left behind.
+
+**2. The fuzzer keeps watching without being asked.** Every push already sweeps it at 256 rounds a
+domain on lavapipe at 4, 8 and 16. `.github/workflows/fuzz.yml` runs 8 000 a domain at 03:00 UTC and
+on demand, and fails when fewer than eight domains report — a domain refused every round has no
+coverage and looks exactly like one that always agreed.
+
+Two levels of the same argument: the short run says the harness works, the long run is the search.
+30 000 programs are what found `reduce_min` folding its strips with a maximum.
+
+### Tier 2 — unchanged, and worth restating against what is now checked
+
+**3. The vocabulary's remaining reach.** The dot products are the family with the most history and
+the least *generated* coverage — the twelve combinations agree, and no generated program has ever
+put a rotate and a rolled loop around one. It stays hard for the reason it always was: the input is
+four bytes in a word and the accumulator's type changes mid-program, which is the first step that
+would not fit the single-accumulator straight line the generator is built on.
+
+**4. The batch API still has no caller.** The sandbox was one and was thrown away on purpose; what
+it left is the shape, in `notes/FINDINGS.md`. `runner/tests/mappings.rs` uses that shape and does
+not need an API for it — one test is not a second caller.
+
+**5. A buffer the caller already owns**, and **6. a third vendor.** Carried over, unchanged.
+
+### And the thing that is not on any tier
+
+The emitter has no external callers, and every promise it makes is checked by something in this
+repository rather than by anything outside it. `USING.md` is the first attempt at writing down what
+somebody outside would be relying on and what holds each of those up — not a feature, and the one
+piece of work here whose absence nothing in the tree can detect.

@@ -59,6 +59,23 @@
     clippy::indexing_slicing
 )]
 
+/// Compiles the examples in `USING.md`, so a guide that stops working stops the build.
+///
+/// **The document is for callers outside this repository, which is exactly why it needs this.**
+/// Nothing else here can tell that a snippet in a markdown file has gone stale — `tests/documented.rs`
+/// checks the numbers it states and the names it quotes, and a code block is neither. It is the
+/// same gap `README.md`'s examples sit in — and they are **not** pulled in here, because most of
+/// them are fragments that illustrate a shape rather than programs that compile. Pointing this at
+/// the README fails 30-odd blocks at once, which is a true statement about what those blocks are
+/// and not a fault worth fixing by rewriting them. `USING.md` is written to compile, so it is held
+/// to it.
+///
+/// `cfg(doctest)` rather than `doc`: the guide is not this crate's front page and this adds no
+/// public surface. What it adds is that `cargo test` runs every `rust` block in it.
+#[cfg(doctest)]
+#[doc = include_str!("../USING.md")]
+struct Using;
+
 pub mod decode;
 pub mod encode;
 pub mod half;

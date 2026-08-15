@@ -19,7 +19,7 @@ Stated first because the gap is only visible against it.
 | the zero-dependency boundary, the decision records' presence, the fail-closed sites | `noha gate` | 56 + <!--count:decisions-->9 + 1 checks |
 | every public operation has a consumer; **every opcode is emitted by something**; every pipeline builder bounds its dispatch; the mutation config matches the tree | `tests/integrity.rs` | <!--count:integrity-tests-->17 tests |
 | **the numbers these documents state**; **every file and every member they name**; every decision record naming what enforces it | `tests/documented.rs` | <!--count:documented-tests-->11 tests |
-| formatting, lints, **doc links**, the MSRV, the skip counts per width | CI | <!--count:ci-jobs-->3 jobs, the device one a matrix of three widths |
+| formatting, lints, **doc links**, the MSRV, the skip counts per width; **a long differential sweep nightly** | CI | <!--count:ci-jobs-->4 jobs across two workflows, two of them a matrix |
 | behaviour | two GPUs and lavapipe | widths 4, 8, 16, 32, 64 |
 
 **The first row is stronger than it looks, and it retires a whole class of question.** A guard nothing

@@ -1,0 +1,92 @@
+# A long differential sweep, on a schedule, because the short one is not the same check.
+#
+# Every push runs the fuzzer at 256 rounds per domain — enough to catch a broken generator and not
+# enough to be a search. `notes/NEXT.md` calls the differential fuzzer the most valuable thing in
+# this tree, and what makes it valuable is that nobody chose what it looks for: 30 000 generated
+# programs found `reduce_min` folding its strips with a maximum, an `OpUDot` that had been invalid
+# since the day it shipped, and a driver that faults compiling a valid module. None of those came
+# from a benchmark and none of them came from 256 rounds.
+#
+# **The workload is throughput-shaped by construction** — thousands of independent questions with no
+# caller waiting on any one of them — which is exactly the shape `decisions/DR-0008` says is worth
+# running at all. So it runs overnight rather than in front of somebody.
+#
+# It is a *separate* workflow rather than a schedule on `ci.yml` on purpose: a nightly run of the
+# whole matrix would say nothing new about formatting or the MSRV, and a failure here has to be
+# readable as one thing — the fuzzer disagreed with the reference — rather than as one red mark
+# among five.
+
+name: fuzz
+
+on:
+  schedule:
+    # 03:00 UTC. A time nobody is waiting on the answer.
+    - cron: "0 3 * * *"
+  # And on demand, because a run somebody cannot start is a run nobody trusts.
+  workflow_dispatch:
+    inputs:
+      rounds:
+        description: rounds per domain
+        required: false
+        default: "8000"
+
+permissions:
+  contents: read
+
+jobs:
+  sweep:
+    name: lavapipe — a long sweep at ${{ matrix.width }} lanes
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # Four and sixteen: the two ends of what lavapipe can be pinned to, and the two widths that
+        # have found things. Eight is skipped here because it is the default the push builds
+        # already sweep, and this job is for the reach the short run does not have.
+        include:
+          - vector: 128
+            width: 4
+          - vector: 512
+            width: 16
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: install lavapipe and spirv-tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers libvulkan1 vulkan-tools spirv-tools
+
+      # Discovered rather than assumed, and failing when it is not there. `common::device` skips
+      # loudly when no device opens, so a missing driver would leave a sweep reporting green over
+      # nothing — which is the one outcome a fuzzer must never be able to produce.
+      - name: find the software driver
+        run: |
+          icd=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json 2>/dev/null | head -n1)
+          if [ -z "$icd" ]; then
+            echo "::error::no lavapipe ICD found — the sweep would skip and pass over nothing"
+            exit 1
+          fi
+          echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
+
+      - name: sweep at subgroup ${{ matrix.width }}
+        env:
+          LP_NATIVE_VECTOR_WIDTH: ${{ matrix.vector }}
+          SPIRV_VAL: /usr/bin/spirv-val
+          SIMDR_FUZZ_ROUNDS: ${{ inputs.rounds || '8000' }}
+        run: |
+          set -o pipefail
+          cargo test -p runner --release --test fuzzing -- --test-threads=1 --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/fuzz.log"
+
+          # **The sweep has to have run.** Every domain prints one line saying how many rounds
+          # agreed, and a run that produced none of them is a run that found nothing because it did
+          # nothing. `SIMDR_FUZZ_ROUNDS` refusing to parse is already an error rather than a silent
+          # default — this is the other half of the same guard, on the other side of the harness.
+          domains=$(grep -c '^fuzz .* over .* seeds' "$RUNNER_TEMP/fuzz.log" || true)
+          echo "$domains domains swept at subgroup ${{ matrix.width }}"
+          if [ "$domains" -ne 8 ]; then
+            echo "::error::${{ matrix.width }}-wide sweep reported $domains domains and there are eight — a domain that is refused every round has no coverage and looks exactly like one that always agreed"
+            exit 1
+          fi

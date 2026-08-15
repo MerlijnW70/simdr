@@ -87,7 +87,7 @@ type Counter = (&'static str, fn() -> Option<usize>);
 /// Adding a row is half a change. The other half is a sentence somewhere that states it, without
 /// which [`every_counter_is_stated_by_some_document`] fails — because a counter nothing reads is the
 /// shape the seven dead opcodes had.
-const COUNTERS: [Counter; 9] = [
+const COUNTERS: [Counter; 10] = [
     ("opcodes", || count_lines("src/module/op.rs", "pub const ")),
     ("lane-operations", || Some(lane_operations())),
     ("test-functions", || Some(test_functions())),
@@ -99,6 +99,7 @@ const COUNTERS: [Counter; 9] = [
         count_lines("tests/documented.rs", "#[test]")
     }),
     ("ci-jobs", ci_jobs),
+    ("fuzz-operations", fuzz_operations),
     ("examples", || Some(examples().len())),
     ("device-examples", || {
         Some(
@@ -159,12 +160,24 @@ fn decision_records() -> BTreeSet<String> {
 
 /// The jobs CI runs, which is not the number of runs — the device job is a matrix over three widths.
 ///
-/// Counted from the `jobs:` line down so that the `push:` and `pull_request:` under `on:` are not
-/// mistaken for two more; both sit at the same indentation and only their position tells them apart.
+/// Counted from each file's `jobs:` line down so that the `push:` and `pull_request:` under `on:`
+/// are not mistaken for two more; both sit at the same indentation and only their position tells
+/// them apart.
+///
+/// **Across every workflow rather than out of `ci.yml`.** This read one file until the scheduled
+/// fuzz sweep arrived in a second one, which would have been a job nothing counted — the blind spot
+/// this whole file exists to close, in the check that closes it.
 fn ci_jobs() -> Option<usize> {
-    let text = fs::read_to_string(root().join(".github/workflows/ci.yml")).ok()?;
-    Some(
-        text.lines()
+    let mut found = 0;
+    let mut any = false;
+
+    walk(&root().join(".github").join("workflows"), &mut |path, _| {
+        let Ok(text) = fs::read_to_string(path) else {
+            return;
+        };
+        any = true;
+        found += text
+            .lines()
             .skip_while(|line| line.trim_end() != "jobs:")
             .filter(|line| {
                 let Some(rest) = line.strip_prefix("  ") else {
@@ -178,8 +191,27 @@ fn ci_jobs() -> Option<usize> {
                         .chars()
                         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
             })
-            .count(),
-    )
+            .count();
+    });
+
+    any.then_some(found)
+}
+
+/// How many operations the fuzzer's generator can draw.
+///
+/// Read from `EVERY_KIND`'s declared length, which the compiler checks against its entries and
+/// which a test beside it holds equal to the union of the pools. So this is a number with two
+/// checks already behind it, and stating it is the third — `notes/NEXT.md` measures the fuzzer's
+/// reach against the lane API's surface, and a stale numerator makes a growing one look like
+/// progress in the wrong direction.
+fn fuzz_operations() -> Option<usize> {
+    let text = fs::read_to_string(root().join("runner/src/fuzz/generate/vocabulary.rs")).ok()?;
+    let rest = text.split("const EVERY_KIND: [Kind; ").nth(1)?;
+    rest.chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .ok()
 }
 
 /// Every example in the workspace, found by looking for directories named `examples` rather than by
