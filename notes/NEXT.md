@@ -1153,15 +1153,31 @@ could not be named. It is a CI step now.
 
 ### Tier 2 — what the same question leaves open
 
-**7. Nothing asks the "where is it called from" question automatically.** Four checks were found by
-reading; there is no reason to think reading found all of them. The shape to look for: a validation
-that lives at one entry point of a family. `Gpu`'s dispatch family had six members and one check;
-`Lanes`'s shuffle family had four members and one bound.
+**7. Nothing asked the "where is it called from" question automatically — it does now.** This item
+said to wait for a third instance, because two is a coincidence and the check would be shaped around
+them. The third arrived the same day: `Module::memory_barrier`, emitting an `OpMemoryBarrier` whose
+semantics Vulkan forbids, with no caller and no validator behind it.
 
-A crude version is mechanical — *for each `pub fn` that submits work or emits a module, does it
-reach the validation its siblings reach* — and it is the kind of question `tests/integrity.rs`
-already answers for two other lists. Worth doing when a third instance of this turns up, and not
-before: two data points is a coincidence and the check would be shaped around them.
+`tests/integrity.rs` asks it on every run: every `pub fn` in `src/` must be named by something
+outside the file that declares it. Five are excused with a reason each — `require_extension`, which
+`require_capability` reaches in the same file, and the four `subgroup_*` wrappers that are readable
+spellings of what `subgroup_reduce` emits — and each excuse expires by itself, because a second test
+fails if an excused operation gains a caller.
+
+It is a **floor rather than a proof**, in the direction that costs coverage rather than truth: two
+files may declare the same method name — `word` is a `pub const fn` on eight `spec` enums — and a
+reference to either counts for both. Sharpening that means resolving names to modules, which is a
+parser rather than a grep, and nothing yet needs it.
+
+Both directions were checked by breaking them. The first version of the check *missed* a throwaway
+`pub fn` appended to `module/mod.rs`, because it stopped reading at the first `#[cfg(test)]` and the
+probe was after it — which is the check having exactly the blind spot it exists to find, and the
+reason it now reads whole files.
+
+What remains open is the other half of the original item: this asks whether an operation is reached
+at all, not whether it reaches *the validation its siblings reach*. `Gpu`'s dispatch family had six
+members and one bound check; nothing here would have said so, because all six were consumed. That
+question needs a notion of "family" the tree does not currently carry.
 
 **8. `Kernel::load_offset`'s offset is still outside the dispatch bound.** `dispatch::extent`
 under-counts a kernel that reads `in[i + half]`, which is the safe direction and is stated in the

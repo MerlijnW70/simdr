@@ -86,6 +86,41 @@ const NOT_MUTATED: [(&str, &str); 15] = [
     ),
 ];
 
+/// Public operations with no consumer outside the file that defines them, and why each is allowed.
+///
+/// **The list this check exists to keep short.** A `pub fn` nothing calls from anywhere else is not
+/// dead code — it is *untested* code that reads as dead, and the two are the same thing right up
+/// until somebody calls it. This project has been bitten twice:
+///
+/// - `Lanes::dot_unsigned` emitted `OpUDot` with a **signed** result type for a week. Invalid
+///   SPIR-V in a shipped public method with no caller, no unit test of its own and no validator
+///   coverage — three layers, and it fell between all of them.
+/// - `Module::memory_barrier` emitted an `OpMemoryBarrier` whose semantics Vulkan forbids, and the
+///   documentation on `MemorySemantics::None` recommended exactly that mask. Nobody had ever built
+///   one, so nobody had ever been told.
+///
+/// Both were found by asking this question by hand, months apart. Asking it here means it is asked
+/// on every run instead of when somebody remembers.
+///
+/// The entries below are the ones where "nothing calls it" is the right answer, and each says why.
+/// [`nothing_is_excused_from_needing_a_consumer_and_has_one`] deletes an excuse that has expired.
+const NO_CONSUMER: [(&str, &str); 5] = [
+    (
+        "require_extension",
+        "called by require_capability in the same file, which is the only place that knows a \
+         capability needs one; every narrow-type kernel reaches it that way and tests/kernels.rs \
+         validates what comes out",
+    ),
+    (
+        "subgroup_f_add",
+        "a readable spelling of what the typed path emits through subgroup_reduce; the opcode is \
+         validated by every float reduction and the four wrappers are pinned apart by one unit test",
+    ),
+    ("subgroup_f_max", "as subgroup_f_add"),
+    ("subgroup_f_min", "as subgroup_f_add"),
+    ("subgroup_i_add", "as subgroup_f_add"),
+];
+
 /// Every `.rs` file under `src/` and `runner/src/`, as forward-slashed paths from the root.
 fn sources_on_disk() -> BTreeSet<String> {
     let mut found = BTreeSet::new();
@@ -93,6 +128,122 @@ fn sources_on_disk() -> BTreeSet<String> {
     walk(&root().join("runner").join("src"), &mut found);
     walk(&root().join("cli").join("src"), &mut found);
     found
+}
+
+/// Every `.rs` file in the workspace, tests and examples included.
+///
+/// Wider than [`sources_on_disk`] on purpose: a public operation reached only by a test *is*
+/// reached, and for the emitter a validator test is the most valuable consumer there is. What this
+/// must not do is miss a directory — a root left out here would report every operation it consumes
+/// as unconsumed, which is a failing direction rather than a silent one.
+fn workspace_files() -> BTreeSet<String> {
+    let mut found = sources_on_disk();
+    for relative in [
+        "tests",
+        "examples",
+        "runner/tests",
+        "runner/examples",
+        "cli/tests",
+    ] {
+        walk(&root().join(relative), &mut found);
+    }
+    found
+}
+
+/// Every `pub fn` the emitter declares, as `(name, the file that declares it)`.
+///
+/// Scoped to `src/` rather than the whole workspace because that is the crate with the discipline
+/// this is protecting — `#![forbid(unsafe_code)]`, no panics on any input, and a public surface
+/// somebody outside this repository could call. `runner` is `publish = false` and exists to be
+/// consumed by tests; widening to it is a later decision, not an oversight.
+///
+/// **The whole file, tests included, and that is deliberate.** The first version stopped at the
+/// first `#[cfg(test)]` on the grounds that a helper inside one is not shipped surface — and a
+/// throwaway `pub fn` appended *after* the test module was not flagged, because everything after
+/// that marker had become invisible. Every file here puts its tests last, so trimming bought
+/// nothing and cost a blind spot exactly where somebody adding code in an unusual place would land.
+///
+/// The cost of not trimming is that a `pub fn` inside a test module counts as surface. There is one
+/// in this tree — `subgroup::test_support::operands_of` — and it is consumed by the sibling files'
+/// tests, so it needs no excuse. A future one that is not would ask for a line in [`NO_CONSUMER`],
+/// which is a sentence to write rather than a wrong answer.
+fn public_functions() -> Vec<(String, String)> {
+    let mut found = Vec::new();
+
+    for path in sources_on_disk().iter().filter(|p| p.starts_with("src/")) {
+        let Ok(text) = fs::read_to_string(root().join(path)) else {
+            continue;
+        };
+
+        for line in text.lines().map(str::trim_start) {
+            let Some(rest) = line
+                .strip_prefix("pub fn ")
+                .or_else(|| line.strip_prefix("pub const fn "))
+            else {
+                continue;
+            };
+
+            // The name ends where the generics or the arguments begin.
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if !name.is_empty() {
+                found.push((name, path.clone()));
+            }
+        }
+    }
+
+    found
+}
+
+/// Which files mention each identifier **in code**.
+///
+/// Tokenised into whole identifiers rather than searched as substrings, which is the difference
+/// between `add` being mentioned by `add` and by `padding`.
+///
+/// Two exclusions, and both are the check being about the right thing:
+///
+/// - **Comments do not count.** This tree documents its own API heavily and a doc comment naming an
+///   operation is prose, not a consumer. Counting it would let a function be "reached" by the
+///   sentence explaining that nothing reaches it.
+/// - **This file does not count.** [`NO_CONSUMER`] names every operation it excuses, so without
+///   this the excuse list would be the consumer that makes each excuse expire — and the check would
+///   report itself green for having been written.
+fn mentions() -> Vec<(String, BTreeSet<String>)> {
+    workspace_files()
+        .into_iter()
+        .filter(|path| path != "tests/integrity.rs")
+        .filter_map(|path| {
+            let text = fs::read_to_string(root().join(&path)).ok()?;
+            let words = text
+                .lines()
+                .map(|line| line.trim_start())
+                .filter(|line| !line.starts_with("//"))
+                .flat_map(|line| line.split(|c: char| !(c.is_alphanumeric() || c == '_')))
+                .filter(|word| !word.is_empty())
+                .map(str::to_owned)
+                .collect();
+            Some((path, words))
+        })
+        .collect()
+}
+
+/// Whether anything outside `defined_in` names `function`.
+///
+/// **A floor rather than a proof, and in the safe direction.** Two files may declare the same
+/// method name — `word` is a `pub const fn` on eight `spec` enums — and this cannot tell one from
+/// the other, so a reference to any of them counts for all of them. That direction reports a
+/// consumer where there may be none, which makes the check weaker and never wrong: it is the same
+/// trade `dispatch::extent` makes about a module it cannot read.
+fn consumed_outside(
+    function: &str,
+    defined_in: &str,
+    mentions: &[(String, BTreeSet<String>)],
+) -> bool {
+    mentions
+        .iter()
+        .any(|(path, words)| path != defined_in && words.contains(function))
 }
 
 /// Collect `.rs` paths under `directory`, recursively.
@@ -349,6 +500,102 @@ fn the_unsafe_scanner_finds_unsafe_where_there_is_some_and_not_where_there_is_no
         "pub(crate) unsafe fn destroy(self, gpu: &Gpu) {"
     ));
     assert!(contains_unsafe_code("unsafe impl Send for Handle {}"));
+}
+
+#[test]
+fn every_public_operation_has_a_consumer_outside_its_own_file() {
+    // **The audit that found `OpUDot`, asked on every run instead of when somebody remembers.**
+    //
+    // It has been done by hand twice, months apart, and found something both times — the second
+    // time an `OpMemoryBarrier` whose semantics Vulkan forbids, recommended by this crate's own
+    // documentation. What a unit test beside a function establishes is that the emitter agrees with
+    // its author about the word stream. Whether that stream is *legal*, and whether the operation
+    // does what its name says, are questions only a consumer asks — a kernel, a validator run, a
+    // device test.
+    //
+    // So an operation nothing reaches is not covered by six layers. It is covered by none of them,
+    // and it looks identical in the counts to one that is covered by all six.
+    let mentions = mentions();
+    let excused: BTreeSet<&str> = NO_CONSUMER.iter().map(|&(name, _)| name).collect();
+
+    let unreached: Vec<String> = public_functions()
+        .into_iter()
+        .filter(|(name, _)| !excused.contains(name.as_str()))
+        .filter(|(name, path)| !consumed_outside(name, path, &mentions))
+        .map(|(name, path)| format!("{path}: {name}"))
+        .collect();
+
+    assert!(
+        unreached.is_empty(),
+        "these public operations are named by nothing outside the file that declares them, so no \
+         kernel, no validator run and no device test reaches any of them — which is the state \
+         `Lanes::dot_unsigned` was in while it emitted invalid SPIR-V. Give each one a consumer, \
+         or add it to NO_CONSUMER with the reason it does not need one:\n{unreached:#?}"
+    );
+}
+
+#[test]
+fn nothing_is_excused_from_needing_a_consumer_and_has_one() {
+    // The other direction, and the one that keeps the list honest rather than growing. An excuse
+    // whose operation has since gained a caller is a line that reads as true and is not — the same
+    // failure `every_excused_file_still_exists_and_still_contains_unsafe` catches for the FFI list.
+    let mentions = mentions();
+    let declared = public_functions();
+
+    for (name, reason) in NO_CONSUMER {
+        let Some((_, path)) = declared.iter().find(|(declared, _)| declared == name) else {
+            panic!("NO_CONSUMER excuses `{name}` ({reason}) and no `pub fn` by that name exists");
+        };
+
+        assert!(
+            !consumed_outside(name, path, &mentions),
+            "`{name}` is excused from needing a consumer ({reason}) and something outside \
+             {path} now names it, so the excuse has expired and the line should go"
+        );
+    }
+}
+
+#[test]
+fn the_consumer_scanner_finds_one_where_there_is_one_and_not_where_there_is_none() {
+    // Without this the check above is vacuous in the worst way: a scanner that answered "consumed"
+    // for everything would report nothing unreached and pass for ever, exactly as a validator that
+    // never returns `Err` would. Same hole `validated.rs` fills with a module that must be
+    // rejected, and `the_unsafe_scanner_finds_unsafe_where_there_is_some` fills for the FFI list.
+    //
+    // Against real declarations rather than invented strings, for the reason that test gives: the
+    // invented ones are what a scanner is accidentally written to match.
+    let mentions = mentions();
+    let declared = public_functions();
+
+    let find = |wanted: &str| {
+        declared
+            .iter()
+            .find(|(name, _)| name == wanted)
+            .map(|(name, path)| consumed_outside(name, path, &mentions))
+    };
+
+    assert_eq!(
+        find("reduce_sum"),
+        Some(true),
+        "`Lanes::reduce_sum` is reached by kernels, tests and the fuzzer, and the scanner cannot \
+         see any of them"
+    );
+    assert_eq!(
+        find("subgroup_f_min"),
+        Some(false),
+        "`Module::subgroup_f_min` is named by nothing outside its own file — if that has changed, \
+         take it out of NO_CONSUMER; if it has not, the scanner is finding consumers that are not \
+         there"
+    );
+
+    // And the surface is being read at all. A parser that returned nothing would make both
+    // assertions above unreachable and every other check here vacuous.
+    assert!(
+        declared.len() >= 150,
+        "only {} public functions found in src/, which is fewer than this crate has — the \
+         declaration parser has stopped matching",
+        declared.len()
+    );
 }
 
 #[test]

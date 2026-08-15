@@ -401,7 +401,20 @@ FFI, so it contains `unsafe`" and **both directions of that are checkable**:
   file with no `unsafe` and therefore inside the gate. Nothing enforced the shape until now;
 - the emitter still declares `#![forbid(unsafe_code)]`, which is the one line the whole arrangement
   rests on;
-- and every `Thing::member` written in backticks in `decisions/` still exists in the source.
+- every `Thing::member` written in backticks in `decisions/` still exists in the source;
+- and **every `pub fn` in the emitter is named by something outside the file that declares it**.
+
+That last one is the audit above, turned into a test. It had been run by hand twice, months apart,
+and found something both times: `OpUDot` with a signed result type, and an `OpMemoryBarrier` whose
+semantics Vulkan forbids. A `pub fn` nothing calls is not dead code — it is *untested* code that
+reads as dead, and a unit test written beside it establishes only that the emitter agrees with its
+author. Five operations are excused with a reason each, and the excuse expires automatically: if one
+of them gains a caller, the test that says "this needs no consumer" fails.
+
+Both directions were checked by breaking them, which is how this project believes a gate. A
+throwaway `pub fn` appended to `module/mod.rs` is named and refused; a reference added to an excused
+one fails the expiry test. The first version of the check missed the throwaway — it stopped reading
+at the first `#[cfg(test)]`, and the probe had been appended after it.
 
 With the config present it also compares the mutation tool's source list against the tree in both
 directions. All of it because hand-maintained lists had drifted while reporting green.
