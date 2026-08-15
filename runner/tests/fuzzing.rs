@@ -767,3 +767,88 @@ fn a_corpus_shorter_than_the_program_is_named_rather_than_absorbed() {
     let whole = vec![0_u32; needed];
     assert!(fuzz::check(&gpu, &program, &whole).is_ok());
 }
+
+/// Every shape the generator makes, handed to `spirv-val`.
+///
+/// **The fuzzer built thousands of modules a run and validated none of them.** Every one went
+/// straight to a driver, which is the exact situation `validated.rs` opens by describing:
+/// "drivers are lenient about things the validator is not — `dot_unsigned` emitted `OpUDot` with a
+/// signed result type and ran correctly on two devices for weeks, and the very first `spirv-val`
+/// run against it caught it."
+///
+/// The kernel library got that layer. The generator, which produces the module shapes *nobody
+/// designed* — a rolled loop feeding a clustered scan, a broadcast under a vote, four steps whose
+/// combination no author chose — did not. It is the one place here that can build a module no
+/// person has read, and it was the one place with no validator behind it.
+///
+/// # It needs no device, and that is the point
+///
+/// `Program::build` is the emitter alone, so this sweeps **every width** rather than the one that
+/// happens to be plugged in — including the widths no device in this machine reports. A clustered
+/// mapping at 64 and a strip-mined one at 4 are different instruction sequences, and `ClusterSize`
+/// has validation rules of its own.
+#[test]
+fn every_generated_shape_is_valid_spirv() {
+    let Some(_) = common::validator() else {
+        eprintln!("SKIPPED fuzz-validated: spirv-val not found (set SPIRV_VAL)");
+        return;
+    };
+
+    // Six seeds a domain a width. Enough that all three mappings and every finish appear — which is
+    // asserted below rather than hoped for — and few enough that a subprocess per module stays
+    // inside a normal `cargo test`.
+    const SEEDS: u64 = 6;
+    let mut mappings = std::collections::BTreeSet::new();
+    let mut finishes = std::collections::BTreeSet::new();
+    let mut validated = 0_u32;
+
+    for width in [4_u32, 8, 16, 32, 64] {
+        for domain in ALL_DOMAINS {
+            for seed in 0..SEEDS {
+                let program =
+                    fuzz::generate(&mut fuzz::Rng::new(seed), domain, width, WORKGROUP_SIZE);
+
+                // A refusal is the mapping working, exactly as in the sweeps above: `MAX_STRIPS`
+                // bounds how far a vector may exceed a narrow subgroup.
+                let Ok(words) = program.build() else {
+                    continue;
+                };
+
+                mappings.insert(program.lanes.cmp(&program.subgroup) as i8);
+                finishes.insert(
+                    format!("{:?}", program.finish)
+                        .split(' ')
+                        .next()
+                        .map_or_else(|| String::from("?"), str::to_owned),
+                );
+                validated += 1;
+
+                common::expect_valid(
+                    &words,
+                    &format!("fuzz-{domain:?}-{width}-{seed}"),
+                    common::VULKAN_1_1,
+                );
+            }
+        }
+    }
+
+    // **Without this the test is vacuous in the worst way.** A generator that produced one shape
+    // forever would validate hundreds of modules and prove one thing — which is the failure
+    // `coverage.rs` exists for, one layer up.
+    assert_eq!(
+        mappings.len(),
+        3,
+        "the validated programs cover {} of the three mappings, so at least one instruction \
+         sequence went unvalidated",
+        mappings.len()
+    );
+    assert!(
+        finishes.len() >= 5,
+        "only {:?} finishes reached the validator",
+        finishes
+    );
+    eprintln!(
+        "fuzz-validated: {validated} generated modules, {} finishes",
+        finishes.len()
+    );
+}
