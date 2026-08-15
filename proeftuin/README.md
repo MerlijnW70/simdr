@@ -154,13 +154,19 @@ patterns are a few hundred of 65 536 and a sweep would find them by luck.
 
 ## What the third tool found next door
 
-Looking for the float conversions turned up an opcode instead. **`op::F_CONVERT` is declared,
+Looking for the float conversions turned up an opcode instead. **`op::F_CONVERT` was declared,
 documented — *"`OpFConvert` — a float's value at a different width"* — and emitted by nothing.** The
-only reference to it in the tree is its own declaration.
+only reference to it in the tree was its own declaration.
 
-That is the shape `Module::memory_barrier` had, and the audit that found *that* one cannot find this
-one: `tests/integrity.rs` asks whether every `pub fn` is named outside its own file, and an opcode is
-a `pub const`. The check has a type it does not cover.
+That is the shape `Module::memory_barrier` had, and the audit that found *that* one could not find
+this one: `tests/integrity.rs` asks whether every `pub fn` is named outside its own file, and an
+opcode is a `pub const`. The check had a kind it did not cover.
+
+It does now — `every_opcode_is_emitted_by_something` — and asking the question of all of them found
+**seven**, not one: `F_CONVERT`, `LOGICAL_NOT`, `GROUP_NON_UNIFORM_I_MUL` and the four atomic minimum
+and maximum opcodes, each half of an operation nobody had asked for. All seven were deleted. `op.rs`
+declares **95** numbers now and every one of them reaches a module, which is what `decisions/DR-0001`
+asks for: a number nothing emits is a copy of the grammar that `spirv-val` never sees.
 
 Also absent: `OpConvertFToS` and `OpConvertFToU` are not in `op.rs` at all, so float-to-integer is
 not an operation this emitter offers. That is a gap in the surface rather than in the testing of it,

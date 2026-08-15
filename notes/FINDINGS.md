@@ -3494,3 +3494,17 @@ the signed-zero mistake a second time.
 Exhaustive rather than sampled, for the reason the conversion probes are boundaries rather than
 samples: the interesting patterns are a few hundred of 65 536, and a sweep finds them by luck and
 proves it by luck too.
+
+### And then they were deleted
+
+The seven were excused for about an hour and then removed, which is the reading `decisions/DR-0001`
+actually supports. Keeping a number nothing emits keeps a copy of the grammar that `spirv-val` never
+sees; deleting it costs a doc comment and a minute of `spirv-as` on the day somebody wants it back —
+**which is the day it becomes checkable.** The excuse list is empty now and the check is an absolute:
+every one of the 95 opcodes this emitter declares reaches a module.
+
+The list stays in place at length zero, because an exception should be a line somebody writes rather
+than a silence, and because the expiry test beside it fires the moment an excused opcode gains an
+emitter. Its scanner test needed a new negative case for the same reason the list emptied: there is
+no dead opcode left to point at, so it asks about a name no opcode has — which is the shape a new
+dead one would arrive in.

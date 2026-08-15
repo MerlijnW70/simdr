@@ -742,37 +742,22 @@ fn the_pipeline_scanner_finds_the_doors_that_are_there() {
 
 /// Opcodes declared in `src/module/op.rs` that nothing emits.
 ///
-/// **`decisions/DR-0001` is why an unemitted number is worse than a missing one.** The rule is that
-/// every opcode was read out of Khronos' grammar rather than remembered, and the thing that keeps it
-/// true is that a wrong number produces a module `spirv-val` rejects. A number nothing emits is a
-/// copy of the grammar with no check behind it: it can be wrong for as long as it exists, and the
-/// day somebody reaches for it they inherit the mistake with the convenience.
+/// **It is empty, and that is the state to keep it in.** Seven entries lived here for about an hour:
+/// `F_CONVERT`, `LOGICAL_NOT`, `GROUP_NON_UNIFORM_I_MUL` and the four atomic minimum and maximum
+/// opcodes, each of them half of an operation nobody had asked for. They were deleted rather than
+/// excused, so every number this file holds now reaches a module.
 ///
-/// So each of these is a decision waiting to be made — build the operation, or delete the number and
-/// read it again when it is wanted, which `spirv-as` answers in a minute.
-const NO_EMITTER: [(&str, &str); 7] = [
-    (
-        "F_CONVERT",
-        "`OpFConvert` is a float at a different width, and no `f16`↔`f32` conversion is offered — \
-         `convert_u32::<F16>` reaches `OpConvertUToF` directly instead",
-    ),
-    (
-        "LOGICAL_NOT",
-        "`Module` offers `logical_and` and `logical_or`, and nothing negates a boolean",
-    ),
-    (
-        "GROUP_NON_UNIFORM_I_MUL",
-        "`Element` names `GROUP_ADD`, `GROUP_MAX` and `GROUP_MIN`; there is no product reduction",
-    ),
-    (
-        "ATOMIC_S_MIN",
-        "`Module` offers `atomic_i_add`, `atomic_exchange`, `atomic_increment`, `atomic_load` and \
-         `atomic_store` — no minimum and no maximum, in either signedness",
-    ),
-    ("ATOMIC_U_MIN", "as `ATOMIC_S_MIN`"),
-    ("ATOMIC_S_MAX", "as `ATOMIC_S_MIN`"),
-    ("ATOMIC_U_MAX", "as `ATOMIC_S_MIN`"),
-];
+/// **`decisions/DR-0001` is why that was the right way round.** The rule is that every opcode was
+/// read out of Khronos' grammar rather than remembered, and what keeps it true is that a wrong
+/// number produces a module `spirv-val` rejects. A number nothing emits is a copy of the grammar
+/// with **no check behind it**: it can be wrong for as long as it exists, and whoever reaches for it
+/// first inherits the mistake along with the convenience. Deleting costs a doc comment and a minute
+/// of `spirv-as` on the day somebody wants it back — which is the day it becomes checkable.
+///
+/// The list stays because an exception should be a line somebody writes rather than a silence, and
+/// because [`nothing_is_excused_from_being_emitted_and_is`] expires one the moment its opcode gains
+/// an emitter.
+const NO_EMITTER: [(&str, &str); 0] = [];
 
 /// Where the opcode numbers live.
 const OPCODES: &str = "src/module/op.rs";
@@ -850,15 +835,21 @@ fn the_opcode_scanner_finds_the_numbers_that_are_there() {
         "only {} opcodes parsed out of {OPCODES}, so the scanner is reading the wrong shape",
         declared.len()
     );
-    for expected in ["I_ADD", "GROUP_NON_UNIFORM_I_ADD", "BITCAST", "F_CONVERT"] {
+    for expected in ["I_ADD", "GROUP_NON_UNIFORM_I_ADD", "BITCAST", "S_CONVERT"] {
         assert!(
             declared.iter().any(|name| name == expected),
             "{expected} is declared and the scanner did not see it"
         );
     }
 
-    // And that it tells an emitted one from a dead one, rather than answering the same either way.
+    // And that it tells an emitted opcode from an unemitted one, rather than answering the same
+    // either way. The negative used to be `F_CONVERT`, which was dead; now that nothing here is,
+    // it has to be a name no opcode has — which is the shape a *new* dead one would arrive in.
     let mentions = mentions();
     assert!(consumed_outside("I_ADD", OPCODES, &mentions));
-    assert!(!consumed_outside("F_CONVERT", OPCODES, &mentions));
+    assert!(!consumed_outside(
+        "OP_NO_SUCH_INSTRUCTION",
+        OPCODES,
+        &mentions
+    ));
 }

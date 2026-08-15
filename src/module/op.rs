@@ -99,8 +99,6 @@ pub const CONVERT_U_TO_F: u16 = 112;
 pub const U_CONVERT: u16 = 113;
 /// `OpSConvert` — an integer's value at a different width, truncating or sign-extending.
 pub const S_CONVERT: u16 = 114;
-/// `OpFConvert` — a float's value at a different width.
-pub const F_CONVERT: u16 = 115;
 /// `OpBitcast` — the same bits under a different type of the same width.
 ///
 /// The right instruction for `u32` to `i32`: at equal widths there is no numeric conversion to
@@ -140,8 +138,6 @@ pub const BITWISE_OR: u16 = 197;
 pub const LOGICAL_OR: u16 = 166;
 /// `OpLogicalAnd` — boolean and.
 pub const LOGICAL_AND: u16 = 167;
-/// `OpLogicalNot` — boolean negation.
-pub const LOGICAL_NOT: u16 = 168;
 /// `OpSelect` — pick between two values per component.
 pub const SELECT: u16 = 169;
 /// `OpIEqual` — integer equality.
@@ -186,8 +182,6 @@ pub const GROUP_NON_UNIFORM_SHUFFLE_DOWN: u16 = 348;
 pub const GROUP_NON_UNIFORM_I_ADD: u16 = 349;
 /// `OpGroupNonUniformFAdd` — floating-point add across the group.
 pub const GROUP_NON_UNIFORM_F_ADD: u16 = 350;
-/// `OpGroupNonUniformIMul` — integer multiply across the group.
-pub const GROUP_NON_UNIFORM_I_MUL: u16 = 351;
 /// `OpGroupNonUniformSMin` — signed minimum across the group.
 pub const GROUP_NON_UNIFORM_S_MIN: u16 = 353;
 /// `OpGroupNonUniformUMin` — unsigned minimum across the group.
@@ -221,14 +215,6 @@ pub const ATOMIC_EXCHANGE: u16 = 229;
 pub const ATOMIC_I_INCREMENT: u16 = 232;
 /// `OpAtomicIAdd` — add, and yield what was there.
 pub const ATOMIC_I_ADD: u16 = 234;
-/// `OpAtomicSMin` — signed minimum, in place.
-pub const ATOMIC_S_MIN: u16 = 236;
-/// `OpAtomicUMin` — unsigned minimum, in place.
-pub const ATOMIC_U_MIN: u16 = 237;
-/// `OpAtomicSMax` — signed maximum, in place.
-pub const ATOMIC_S_MAX: u16 = 238;
-/// `OpAtomicUMax` — unsigned maximum, in place.
-pub const ATOMIC_U_MAX: u16 = 239;
 /// `OpPhi` — a value that depends on which block control arrived from.
 pub const PHI: u16 = 245;
 /// `OpControlBarrier` — every invocation in the scope waits here.

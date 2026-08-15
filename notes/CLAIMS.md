@@ -17,7 +17,7 @@ Stated first because the gap is only visible against it.
 | every **branch** in the source | mutation gate | 93 targets, 639 mutants, **100%** |
 | every emitted module's **legality** | `spirv-val` | the kernel library at 5 widths, plus 232 generated programs |
 | the zero-dependency boundary, the decision records' presence, the fail-closed sites | `noha gate` | 56 + 8 + 93 checks |
-| every public operation has a consumer; every pipeline builder bounds its dispatch; the mutation config matches the tree | `tests/integrity.rs` | 14 tests |
+| every public operation has a consumer; **every opcode is emitted by something**; every pipeline builder bounds its dispatch; the mutation config matches the tree | `tests/integrity.rs` | 17 tests |
 | formatting, lints, **doc links**, the MSRV, the skip counts per width | CI | 5 jobs |
 | behaviour | two GPUs and lavapipe | widths 4, 8, 16, 32, 64 |
 
@@ -206,14 +206,15 @@ has to come back through — and the validator is the only layer downstream of i
    is a `pub const`, so the same shape was invisible in the same tree.
    `every_opcode_is_emitted_by_something` asks it now: `F_CONVERT`, `LOGICAL_NOT`,
    `GROUP_NON_UNIFORM_I_MUL` and the four atomic min/max opcodes are declared and emitted by nothing
-   — each of them half of an operation nobody has asked for. They are excused by name with a reason
-   apiece so an eighth cannot appear quietly, and `notes/FINDINGS.md` records why an unemitted number
-   is worse than a missing one: `spirv-val` is what keeps `decisions/DR-0001` honest, and it can only
-   check a number that reaches a module.
+   — each of them half of an operation nobody had asked for. `notes/FINDINGS.md` records why an
+   unemitted number is worse than a missing one: `spirv-val` is what keeps `decisions/DR-0001`
+   honest, and it can only check a number that reaches a module.
 
-   **The open half is what to do with the seven.** Build the operations, or delete the numbers and
-   read them out of the grammar again when they are wanted. Deleting is the consistent reading of
-   DR-0001 and costs the doc comments; excusing them is where they are now.
+   **All seven were deleted** rather than left excused, which is the consistent reading of DR-0001.
+   The excuse list stays in place at length zero — an exception should be a line somebody writes
+   rather than a silence — so the check is now an absolute: each of the **95** opcodes `op.rs`
+   declares reaches a module. Reading them out of the grammar again costs a minute on the day
+   somebody wants one back, and that is the day it becomes checkable.
 1. **Assert the counts.** Trivial, and the one in the README has now been wrong three times. The fix
    is not to bump the number a fourth time — it is to make the test print it.
 2. **Sweep `src/module/` for type bounds wider than the instruction allows**, the way `src/lanes/`
