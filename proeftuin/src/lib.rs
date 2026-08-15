@@ -27,6 +27,7 @@
 pub(crate) mod spirv_val;
 
 pub mod conversions;
+pub mod halves;
 
 use runner::kernels::WORKGROUP_SIZE;
 use runner::{Error, Gpu};

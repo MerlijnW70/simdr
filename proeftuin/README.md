@@ -127,3 +127,41 @@ Not a bug: there is no `i32` holding that number, so a bitcast is a defensible c
 sentence that was true of the inputs anybody draws, which is the shape `notes/FINDINGS.md` catalogues
 under *a relationship decided twice* — here between prose and an opcode table. `src/lanes/mod.rs`
 carries the table now, and a qualifier on the first sentence.
+
+## The third tool: every `f16` pattern there is
+
+`src/half.rs` opens by saying *"every one of the 65 536 half bit patterns is round-tripped through
+`to_f32` and back"* — on the **CPU**. Nothing checked that a device agrees, and the layer that might
+have cannot: the fuzzer's `Domain::Half` has a **ceiling of 8** and refuses any round whose
+arithmetic leaves ±2048, because that is what lets its comparison be exact. Denormals, infinities,
+NaNs, negative zero and every rounding boundary are outside it *by construction*.
+
+So the 16-bit storage path was exercised at values below 8 and nowhere else, on the one type whose
+whole difficulty is at the edges.
+
+**What is asserted and what is only reported is the design here**, and the project has been caught
+by that line before: a test once asserted that a sum of sixty-four negative zeros keeps its sign,
+which IEEE 754 says and Vulkan *does not require*. Two GPUs and a local lavapipe preserved it;
+Ubuntu's Mesa folded it to `+0.0`.
+
+* **Asserted** — a half that is loaded and stored comes back with the same bits. No arithmetic
+  happens, so no rounding mode, denormal flush or NaN quieting is licensed to touch it.
+* **Reported** — NaNs, counted apart, because a device may reshape a payload and Vulkan permits it.
+
+All 65 536 patterns survive on the RTX 4080, the integrated Radeon and lavapipe at 4 and 16 —
+denormals, ±0, ±inf and NaN included. Exhaustive rather than sampled, because the interesting
+patterns are a few hundred of 65 536 and a sweep would find them by luck.
+
+## What the third tool found next door
+
+Looking for the float conversions turned up an opcode instead. **`op::F_CONVERT` is declared,
+documented — *"`OpFConvert` — a float's value at a different width"* — and emitted by nothing.** The
+only reference to it in the tree is its own declaration.
+
+That is the shape `Module::memory_barrier` had, and the audit that found *that* one cannot find this
+one: `tests/integrity.rs` asks whether every `pub fn` is named outside its own file, and an opcode is
+a `pub const`. The check has a type it does not cover.
+
+Also absent: `OpConvertFToS` and `OpConvertFToU` are not in `op.rs` at all, so float-to-integer is
+not an operation this emitter offers. That is a gap in the surface rather than in the testing of it,
+and it is stated here so the difference is on the record.

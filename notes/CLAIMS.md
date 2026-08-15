@@ -201,6 +201,12 @@ has to come back through — and the validator is the only layer downstream of i
 
 ## What to do about it, worst first
 
+0. **The `pub fn` check has a type it does not cover.** `every_public_operation_has_a_consumer_outside_its_own_file`
+   asks it of functions, and an opcode is a `pub const` — so `op::F_CONVERT` sits in `src/module/op.rs`,
+   declared and documented as *"`OpFConvert` — a float's value at a different width"*, with **the only
+   reference in the tree being its own declaration**. That is exactly the shape the check was written
+   for, in a kind it cannot see. Found by the sandbox while looking for float conversions;
+   `proeftuin/README.md` has it.
 1. **Assert the counts.** Trivial, and the one in the README has now been wrong three times. The fix
    is not to bump the number a fourth time — it is to make the test print it.
 2. **Sweep `src/module/` for type bounds wider than the instruction allows**, the way `src/lanes/`
