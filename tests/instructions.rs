@@ -442,24 +442,29 @@ fn the_shifts_are_valid_for_every_integer_they_accept() {
 /// One module rather than one per operation, deliberately: they compose, so a single stream reaches
 /// all of them and any one being wrong fails the same run.
 ///
-/// # One axis, and the other one is stated rather than implied
+/// # Both axes, and the mapping is what makes the second one matter
 ///
-/// This sweeps the **element type** at a single 32-wide subgroup, because that is the axis that was
-/// missing. It does not sweep the *width*: `Kernel` takes the subgroup in its `Shape` and `LANES` is
-/// a const generic, so varying both would mean a macro over the pairs. `runner/tests/validated.rs`
-/// covers widths 4 to 64 for the narrow kernels it has — which are the seven operations above.
+/// The first version of this swept the element type at one 32-wide subgroup and said so. The width
+/// is swept too now, because a width is not a parameter to these instructions — it *chooses the
+/// instruction sequence*. The same `butterfly` call is one shuffle whole-subgroup, a masked shuffle
+/// clustered, and one per strip above that; the same `prefix_sum` is a single instruction, a
+/// Hillis–Steele ladder, and a carry between strips.
 ///
-/// So the honest reading is that the **type × operation** grid is filled here and the
-/// **type × width** grid is not. A narrow butterfly on a four-wide subgroup is a clustered shuffle
-/// and is still validated nowhere.
-fn the_lane_surface_is_valid_for<T: Element>(name: &str) {
-    let mut kernel = Kernel::<T>::new(shape()).expect("built");
-    let value = kernel.load::<32>(0).expect("loaded");
+/// So the grid is type × width × **mapping**, and the three mappings have three bodies below rather
+/// than one with a flag, because the difference between them is the content: a clustered vector may
+/// not shift or vote, and a strip-mined one may not rotate.
+///
+/// `LANES` is a const generic and the subgroup is a runtime number, which is why the width axis went
+/// unswept for so long — there is no loop to write. `at_every_width!` is the macro over the pairs
+/// that fills it.
+fn the_lane_surface_is_valid_for<T: Element, const LANES: u32>(name: &str, width: u32) {
+    let mut kernel = Kernel::<T>::new(Shape::new(width, 64, 2)).expect("built");
+    let value = kernel.load::<LANES>(0).expect("loaded");
 
     let (folded, scanned) = {
         let mut lanes = kernel.lanes().expect("lanes");
-        let one = lanes.splat_bits::<T, 32>(1).expect("one");
-        let two = lanes.splat_bits::<T, 32>(2).expect("two");
+        let one = lanes.splat_bits::<T, LANES>(1).expect("one");
+        let two = lanes.splat_bits::<T, LANES>(2).expect("two");
 
         // Elementwise: the arithmetic, and the three extended instructions whose GLSL number
         // differs between the signed and unsigned forms of the same width.
@@ -490,9 +495,13 @@ fn the_lane_surface_is_valid_for<T: Element>(name: &str) {
         let biggest = lanes.reduce_max(scanned).expect("max");
         let smallest = lanes.reduce_min(scanned).expect("min");
 
-        let total = lanes.from_lane_value::<T, 32>(total).expect("as vector");
-        let biggest = lanes.from_lane_value::<T, 32>(biggest).expect("as vector");
-        let smallest = lanes.from_lane_value::<T, 32>(smallest).expect("as vector");
+        let total = lanes.from_lane_value::<T, LANES>(total).expect("as vector");
+        let biggest = lanes
+            .from_lane_value::<T, LANES>(biggest)
+            .expect("as vector");
+        let smallest = lanes
+            .from_lane_value::<T, LANES>(smallest)
+            .expect("as vector");
 
         let folded = lanes.add(total, biggest).expect("add");
         let folded = lanes.add(folded, smallest).expect("add");
@@ -507,19 +516,157 @@ fn the_lane_surface_is_valid_for<T: Element>(name: &str) {
     kernel.store(1, combined).expect("stored");
     expect_valid(
         &kernel.finish().expect("finished"),
-        &format!("kernel-surface-{name}"),
+        &format!("kernel-surface-{name}-{width}"),
         VULKAN_1_1,
     );
+}
+
+/// The cross-lane operations a vector **narrower** than the subgroup may have.
+///
+/// A separate body rather than a flag on the one above, because the difference *is* the content: a
+/// clustered vector shares its subgroup with others, so the shifts are refused by name — the lanes
+/// below a cluster's first belong to a neighbour — and so are the votes, which answer for every
+/// vector in the subgroup at once.
+///
+/// What is left is the three that stay inside a cluster: a butterfly whose mask cannot leave it, a
+/// broadcast of the cluster's own position, and a rotate that wraps. Plus the reductions and the
+/// scan, which reach `ClusteredReduce` and the Hillis–Steele ladder — two instruction sequences
+/// that exist for no other mapping.
+///
+/// The elementwise operations are not repeated here. They are per-strip and the mapping cannot
+/// reach them, so sweeping them again would add modules and no question.
+fn the_clustered_surface_is_valid_for<T: Element, const LANES: u32>(name: &str, width: u32) {
+    let mut kernel = Kernel::<T>::new(Shape::new(width, 64, 2)).expect("built");
+    let value = kernel.load::<LANES>(0).expect("loaded");
+
+    let folded = {
+        let mut lanes = kernel.lanes().expect("lanes");
+
+        let partner = lanes.butterfly(value, 1).expect("butterfly");
+        let first = lanes.broadcast(partner, 0).expect("broadcast");
+        let rotated = lanes.rotate_up(first, 1).expect("rotate");
+        let scanned = lanes.prefix_sum(rotated).expect("scan");
+
+        let total = lanes.reduce_sum(scanned).expect("sum");
+        let biggest = lanes.reduce_max(scanned).expect("max");
+        let smallest = lanes.reduce_min(scanned).expect("min");
+
+        let total = lanes.from_lane_value::<T, LANES>(total).expect("as vector");
+        let biggest = lanes
+            .from_lane_value::<T, LANES>(biggest)
+            .expect("as vector");
+        let smallest = lanes
+            .from_lane_value::<T, LANES>(smallest)
+            .expect("as vector");
+
+        let folded = lanes.add(total, biggest).expect("add");
+        let folded = lanes.add(folded, smallest).expect("add");
+        lanes.add(folded, scanned).expect("add")
+    };
+
+    kernel.store(1, folded).expect("stored");
+    expect_valid(
+        &kernel.finish().expect("finished"),
+        &format!("kernel-cluster-{name}-{width}"),
+        VULKAN_1_1,
+    );
+}
+
+/// The cross-lane operations a **strip-mined** vector may have.
+///
+/// Wider than the subgroup, so each lane holds several elements and every shuffle applies per strip.
+/// The rotate is the one refused here — it would move elements *between* strips, which is a
+/// different algorithm rather than a different operand — and the votes fold their strips together,
+/// which is a step the other two mappings do not have.
+///
+/// The scan is the interesting one: it carries a running total from each strip to the next, and that
+/// carry exists at no other mapping.
+fn the_stripped_surface_is_valid_for<T: Element, const LANES: u32>(name: &str, width: u32) {
+    let mut kernel = Kernel::<T>::new(Shape::new(width, 64, 2)).expect("built");
+    let value = kernel.load::<LANES>(0).expect("loaded");
+
+    let folded = {
+        let mut lanes = kernel.lanes().expect("lanes");
+        let one = lanes.splat_bits::<T, LANES>(1).expect("one");
+
+        let partner = lanes.butterfly(value, 1).expect("butterfly");
+        let up = lanes.shift_up(partner, 1).expect("shift up");
+        let down = lanes.shift_down(up, 1).expect("shift down");
+        let scanned = lanes.prefix_sum(down).expect("scan");
+
+        // The vote that folds its strips: `all_equal` is two questions over a strip-mined vector,
+        // and one over any other.
+        // Emitted and left unused, which is enough: the question here is whether the instruction
+        // and its strip fold are *legal*, and an unread result is as validated as a read one. It
+        // cannot be folded into the value either way — a vote answers with a **bool**, and the
+        // combination below is a `T`.
+        let _ = lanes.all_equal(scanned).expect("all equal");
+
+        // **`splat_id`, not `from_lane_value`.** A reduction answers with one id, and a strip-mined
+        // vector holds several elements per lane — so putting that id back into a vector means
+        // repeating it across the strips. `from_lane_value` builds a *one-strip* vector and is
+        // refused here by name, `TooManyStrips { strips: 1, limit: 2 }`, which is the mapping being
+        // right about a distinction the other two do not have. The first draft of this used it, and
+        // the refusal is what said so.
+        let total = lanes.reduce_sum(scanned).expect("sum");
+        let total = lanes.splat_id::<T, LANES>(total).expect("as vector");
+
+        let folded = lanes.add(total, one).expect("add");
+        let folded = lanes.add(folded, scanned).expect("add");
+        let above = lanes.greater_than(folded, one).expect("greater");
+        lanes.select(above, folded, total).expect("select")
+    };
+
+    kernel.store(1, folded).expect("stored");
+    expect_valid(
+        &kernel.finish().expect("finished"),
+        &format!("kernel-strip-{name}-{width}"),
+        VULKAN_1_1,
+    );
+}
+
+/// Every surface, at every width a device here reports.
+///
+/// `LANES` is a const generic and the subgroup is a runtime number, so the pairs are written out.
+/// That is the whole reason the width axis went unswept: there is no loop to write, and a macro over
+/// the pairs is the only shape that fills it.
+macro_rules! at_every_width {
+    ($type:ty, $name:literal) => {
+        // Whole-subgroup: `LANES` equals the width, and everything is legal.
+        the_lane_surface_is_valid_for::<$type, 4>($name, 4);
+        the_lane_surface_is_valid_for::<$type, 8>($name, 8);
+        the_lane_surface_is_valid_for::<$type, 16>($name, 16);
+        the_lane_surface_is_valid_for::<$type, 32>($name, 32);
+        the_lane_surface_is_valid_for::<$type, 64>($name, 64);
+
+        // Clustered: half the width, so two vectors share every subgroup. A one-wide subgroup has
+        // no cluster to make, which is why this starts at 8.
+        the_clustered_surface_is_valid_for::<$type, 4>($name, 8);
+        the_clustered_surface_is_valid_for::<$type, 8>($name, 16);
+        the_clustered_surface_is_valid_for::<$type, 16>($name, 32);
+        the_clustered_surface_is_valid_for::<$type, 32>($name, 64);
+
+        // Strip-mined: twice the width, so each lane holds two elements.
+        the_stripped_surface_is_valid_for::<$type, 8>($name, 4);
+        the_stripped_surface_is_valid_for::<$type, 16>($name, 8);
+        the_stripped_surface_is_valid_for::<$type, 32>($name, 16);
+        the_stripped_surface_is_valid_for::<$type, 64>($name, 32);
+    };
 }
 
 #[test]
 fn the_lane_surface_is_valid_for_every_narrow_integer() {
     // The four the shift sweep turned up as never validated beyond a handful of operations. `U32`
-    // is here as the control: it is the width everything else is checked at, so a failure in one of
+    // is here as the control: it is the type everything else is checked at, so a failure in one of
     // the four and not in it is a *narrow* problem rather than a broken test.
-    the_lane_surface_is_valid_for::<U32>("u32");
-    the_lane_surface_is_valid_for::<U8>("u8");
-    the_lane_surface_is_valid_for::<I8>("i8");
-    the_lane_surface_is_valid_for::<U16>("u16");
-    the_lane_surface_is_valid_for::<I16>("i16");
+    //
+    // **Both axes now.** The first version swept the type at one width and said so; this fills the
+    // grid — five widths, three mappings, five types, and the mappings are what makes the width
+    // matter. A clustered butterfly is a masked shuffle, a strip-mined scan carries between strips,
+    // and a whole-subgroup one is a single instruction. Same call, three instruction sequences.
+    at_every_width!(U32, "u32");
+    at_every_width!(U8, "u8");
+    at_every_width!(I8, "i8");
+    at_every_width!(U16, "u16");
+    at_every_width!(I16, "i16");
 }

@@ -172,9 +172,21 @@ votes and the scans all accept a narrow element and were validated at 32 bits an
 while narrow is where SPIR-V is fussiest, since the group opcodes differ between the signed and
 unsigned forms of one width and `shaderSubgroupExtendedTypes` is a permission no module can declare.
 
-`the_lane_surface_is_valid_for_every_narrow_integer` fills that grid, and states its own limit: it
-sweeps **type × operation** at one width. The **type × width** grid is still open — a narrow
-butterfly on a four-wide subgroup is a clustered shuffle, and is validated nowhere.
+`the_lane_surface_is_valid_for_every_narrow_integer` fills that grid — **65 modules**: five types
+across five widths and all three mappings, because a width is not a parameter to these instructions,
+it *chooses the instruction sequence*. The same `butterfly` call is one shuffle whole-subgroup, a
+masked one clustered and one per strip above that; the same `prefix_sum` is a single instruction, a
+Hillis–Steele ladder and a carry between strips.
+
+**The validator earned its place while the test was being written**, twice. `from_lane_value` puts
+one id into a *one-strip* vector, so a strip-mined reduction result needs `splat_id` instead — the
+lane API refused it by name, `TooManyStrips { strips: 1, limit: 2 }`. And `splat_id::<T>` takes a raw
+`Id` and believes the caller about its type, so splatting a **vote's boolean** into a `Vector<T>`
+compiles: `spirv-val` rejected it with *"Expected both objects to be of Result Type: Select"*.
+
+That second one is worth keeping as a shape of its own. `splat_id` and `from_lane_value` are the
+seam where a type parameter is a **claim rather than a check** — the escape hatch a reduction result
+has to come back through — and the validator is the only layer downstream of it.
 
 ## What to do about it, worst first
 
