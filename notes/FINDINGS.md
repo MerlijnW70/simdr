@@ -2685,3 +2685,57 @@ for a different program — silently, since the reference returns values rather 
 It is `Op::ShiftUp` now, with no operand at all. The invariant was in two comments and is in the
 type. The opposite case keeps its `u32`: `Op::RotateUp` *can* be checked at any distance, because a
 rotate wraps and every lane reads inside its own vector.
+
+## The sweep run mechanically, and the barrier it rejected — 2026-08-15
+
+The audit that found `OpUDot` asked which public operations reach no `spirv-val` test, and it was
+done by reading. Asked again, this time by grep — *which public functions have no reference outside
+the file that defines them* — it turned up ten more. Four were the `subgroup_f_add`/`f_max`/`f_min`/
+`i_add` wrappers, whose opcodes the typed path already emits through `subgroup_reduce`, and whose
+own unit test pins all four apart. The other six had never been validated at all:
+
+| | what it emits |
+| --- | --- |
+| `Module::subgroup_elect`, `subgroup_broadcast`, `subgroup_broadcast_first` | instructions **nothing else in the crate emits** — the lane API's `broadcast` is a shuffle, deliberately |
+| `Module::atomic_store` | the only atomic with no result id, and the last one in the state the exchange and the load were found in |
+| `Module::spec_constant_bool` | the one specialization shape whose *default decides the opcode* rather than an operand |
+| `Module::memory_barrier`, `Lanes::exp`, `Lanes::if_uniform_value`, `Kernel::store_row_at` | one instruction family each, composed by nothing |
+
+**Eight of the nine were valid.** That is worth stating rather than skipping: the value of the check
+is the difference between "nothing has looked" and "something looked and it was right", and only one
+of those is a claim.
+
+The ninth was not.
+
+### `OpMemoryBarrier` may not order nothing
+
+```
+error: [VUID-StandaloneSpirv-MemorySemantics-10869]
+       MemoryBarrier: MemorySemantics must not use Relaxed memory order with MemoryBarrier
+```
+
+`MemorySemantics::None` encodes to `Relaxed`, and this crate's own documentation recommended it —
+*"ordering nothing is cheaper than ordering nothing while saying otherwise"*. That sentence is
+correct about **atomics**, where `Relaxed` is legal and is what `Kernel::atomic_add_at` uses on
+every device here. It is false about a barrier, where the same mask is not a cheaper barrier but an
+invalid module.
+
+So the two operations that take identical-looking scope and semantics operands accept different
+values, and nothing said so, because nothing had ever built the second one.
+
+The emitter cannot refuse it: both operands arrive as *ids of constants*, and that layer cannot ask
+what value a constant holds. What it can do is say so where a caller reads, which is now on
+`Module::memory_barrier` and on `MemorySemantics::None` — and assert the boundary rather than
+describe it. `tests/instructions.rs` carries both halves: a barrier with `AcquireRelease` the
+validator accepts, and one with `Relaxed` it rejects. The second is there for the reason
+`a_compute_entry_point_without_a_workgroup_size_is_refused` is: without it, the first could be
+passing because the validator never says no.
+
+### What the two sweeps together say
+
+The first was done by reading and found three. The second was done by grep and found six more, one
+of them invalid. The difference is not care — it is that a list of things to check by eye is a list
+somebody has to keep, and the grep re-derives it from the tree every time.
+
+**An operation with no consumer is not dead code. It is untested code that reads as dead**, and the
+two are the same thing right up until somebody calls it.

@@ -9,9 +9,16 @@
 #   * widths 32 and 64, which need the RTX 4080 and the integrated Radeon;
 #   * the mutation gate, whose configuration is deliberately not in this repository — see
 #     `tests/integrity.rs`, whose config-dependent checks skip loudly when it is absent;
-#   * every measurement in `notes/FINDINGS.md`, none of which means anything on a shared runner.
+#   * every measurement, none of which means anything on a shared runner.
 #
 # So a green run here is not the whole suite. It is the part that travels.
+#
+# **The third of those was listed here and running anyway.** `session.rs` asserted that a held
+# pipeline is three times faster than rebuilding one, which is true on all three implementations in
+# the author's machine and is two wall-clock numbers on a contended virtual machine: it came back
+# at 2.3× and failed a run whose predecessor had passed. `CI` is set here, the test reads it, and
+# the ratio is printed rather than asserted — because a check that fails for a reason unrelated to
+# the code is a check that teaches everyone to ignore red.
 name: CI
 
 on:

@@ -71,14 +71,15 @@ impl<T: Element> Kernel<T> {
     ///
     /// # Errors
     ///
-    /// [`LaneError::BadShape`] if `length` is zero — an array of nothing is not a smaller array,
+    /// [`LaneError::EmptyShared`] if `length` is zero — an array of nothing is not a smaller array,
     /// it is a mistake — otherwise [`LaneError::Build`].
+    ///
+    /// It reported `BadShape { workgroup, buffers: 0 }` until an audit read the message it prints:
+    /// *"a kernel of 64 invocations over 0 buffers describes nothing"*, about a kernel whose
+    /// buffers are fine and one of whose arrays is empty.
     pub fn shared(&mut self, length: u32) -> Result<Shared, LaneError> {
         if length == 0 {
-            return Err(LaneError::BadShape {
-                workgroup: self.shape().workgroup,
-                buffers: 0,
-            });
+            return Err(LaneError::EmptyShared);
         }
 
         let element = self.element();
@@ -234,8 +235,10 @@ mod tests {
 
     #[test]
     fn a_shared_array_of_nothing_is_refused() {
+        // By name, and by its *own* name. This asserted `BadShape` while the message said the
+        // kernel had no buffers — it has two, and the thing with nothing in it is the array.
         let mut kernel = Kernel::<F32>::new(Shape::new(32, 64, 2)).expect("built");
-        assert!(matches!(kernel.shared(0), Err(LaneError::BadShape { .. })));
+        assert_eq!(kernel.shared(0).err(), Some(LaneError::EmptyShared));
     }
 
     #[test]

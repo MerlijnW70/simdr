@@ -47,6 +47,23 @@ impl Module {
     /// Rarely what a caller wants on its own — [`Module::control_barrier`] is the one that also
     /// synchronises execution, and a handover needs both halves.
     ///
+    /// # The semantics may not be `Relaxed`, and this cannot check it
+    ///
+    /// [`crate::spec::MemorySemantics::None`] encodes to `Relaxed`, and
+    /// `VUID-StandaloneSpirv-MemorySemantics-10869` forbids it **here specifically**: a barrier
+    /// that orders nothing is not a cheaper barrier, it is an invalid module. An atomic with the
+    /// same mask is perfectly legal, which is what makes this easy to get wrong — and the
+    /// documentation on `MemorySemantics::None` recommended exactly that mask without saying where
+    /// it does not apply.
+    ///
+    /// Nothing here can refuse it: the operand is the *id* of a constant by the time it arrives,
+    /// and this layer cannot ask what value that constant holds. So it is stated, and
+    /// `tests/instructions.rs` carries both halves — a barrier with `AcquireRelease` that the
+    /// validator accepts, and one with `Relaxed` that it rejects.
+    ///
+    /// This was the last operation in the crate with no caller and no validator behind it, and the
+    /// first time one was pointed at it, it was rejected.
+    ///
     /// # Errors
     ///
     /// [`BuildError`] if the instruction cannot be emitted.

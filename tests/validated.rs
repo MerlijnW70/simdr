@@ -16,7 +16,7 @@ use common::{
 };
 use simdr::module::{Module, Section, Version, op};
 use simdr::spec::{
-    AddressingModel, Capability, ExecutionModel, FunctionControl, MemoryModel, StorageClass,
+    AddressingModel, Capability, ExecutionModel, FunctionControl, MemoryModel, Scope, StorageClass,
 };
 
 #[test]
@@ -80,6 +80,63 @@ fn two_structurally_identical_structs_are_two_valid_types() {
     finish_empty_body(&mut module, main).expect("built");
 
     expect_valid(&module.finish(), "twin-structs", VULKAN_1_0);
+}
+
+#[test]
+fn the_three_subgroup_operations_nothing_else_emits_are_valid_spirv() {
+    // **The same state `OpUDot` was in, three doors further down.** An audit of the public surface
+    // found three operations with no caller, no test but their own, and no validator coverage —
+    // the atomic exchange, the atomic load and the vote about a value — and `tests/kernels.rs`
+    // validates all three. It audited `lanes` and `kernel`. It did not audit `module`, where
+    // `subgroup_elect`, `subgroup_broadcast` and `subgroup_broadcast_first` were in exactly that
+    // state: public, emitting instructions **nothing else in this crate emits**, and asserted
+    // against only by unit tests written beside them.
+    //
+    // A unit test beside a function agrees with its author about the word stream. Whether the word
+    // stream is a legal one is a different question, and this is the layer that answers it — the
+    // one that found `OpUDot` carrying a signed result type in a shipped method.
+    //
+    // The lane API reaches none of these. `Lanes::broadcast` emits `OpGroupNonUniformShuffle`
+    // instead, deliberately: `OpGroupNonUniformBroadcast` requires a **dynamically uniform** id and
+    // a clustered broadcast's is not. So the instruction here is one no other test can reach.
+    let (mut module, main) = compute_skeleton(Version::V1_3).expect("built");
+
+    module
+        .require_capability(Capability::GroupNonUniform)
+        .expect("basic");
+    module
+        .require_capability(Capability::GroupNonUniformBallot)
+        .expect("ballot");
+
+    let boolean = module.type_bool().expect("bool");
+    let float = module.type_float(32).expect("f32");
+    let scope = module.scope(Scope::Subgroup).expect("scope");
+    let value = module.constant_f32(1.5).expect("1.5");
+    let lane = module.constant_u32(3).expect("3");
+
+    let void = module.type_void().expect("void");
+    let signature = module.type_function(void, &[]).expect("signature");
+    module
+        .begin_function(void, main, FunctionControl::None, signature)
+        .expect("function");
+    module.label().expect("entry");
+
+    // All three, in one body, so a module that carries one and not the others cannot pass by
+    // accident. `elect` needs only `GroupNonUniform`; the other two are `GroupNonUniformBallot`,
+    // which is the capability an audit of the feature bits found the runner had been reporting for
+    // the wrong operations.
+    module.subgroup_elect(boolean, scope).expect("elect");
+    module
+        .subgroup_broadcast(float, scope, value, lane)
+        .expect("broadcast");
+    module
+        .subgroup_broadcast_first(float, scope, value)
+        .expect("broadcast first");
+
+    module.return_void().expect("return");
+    module.end_function().expect("end");
+
+    expect_valid(&module.finish(), "subgroup-unreached", VULKAN_1_1);
 }
 
 #[test]

@@ -71,6 +71,14 @@ pub enum LaneError {
     /// Refused rather than treated as one row: a kernel that stacks every row on top of the first
     /// validates, runs, and returns whichever row happened to be written last.
     BadPitch,
+    /// A workgroup array of no elements.
+    ///
+    /// Apart from [`LaneError::BadShape`] because the kernel's shape is not what is wrong: the
+    /// kernel is fine and one array inside it holds nothing. That distinction is the whole message.
+    /// It used to be reported as `BadShape { workgroup, buffers: 0 }`, which prints *"a kernel of 64
+    /// invocations over 0 buffers describes nothing"* about a kernel with two of them — the second
+    /// place in this crate where a field named for one thing was carrying another.
+    EmptyShared,
     /// The operation has no form for how this vector sits on the subgroup.
     ///
     /// A clustered *scan*, for instance: SPIR-V's clustered form is a reduce, so scanning a
@@ -177,6 +185,10 @@ impl fmt::Display for LaneError {
                 f,
                 "a row pitch of 0 would stack every row on the address of the first"
             ),
+            Self::EmptyShared => write!(
+                f,
+                "a shared array of 0 elements has no slot that is not past its end"
+            ),
             Self::NoSuchForm { operation, because } => {
                 write!(f, "{operation} has no form here: {because}")
             }
@@ -231,6 +243,7 @@ mod tests {
             LaneError::BadRows { .. } => "0 rows",
             LaneError::NotAGrid => "Shape::grid",
             LaneError::BadPitch => "pitch of 0",
+            LaneError::EmptyShared => "shared array of 0",
             LaneError::NoSuchForm { .. } => "clustered scan",
             LaneError::LaneOutOfRange { .. } => "outside a group of 8 lanes",
             LaneError::AddressOverflow { .. } => "4294967296",
@@ -262,6 +275,7 @@ mod tests {
             LaneError::BadRows { rows: 0 },
             LaneError::NotAGrid,
             LaneError::BadPitch,
+            LaneError::EmptyShared,
             LaneError::NoSuchForm {
                 operation: "prefix_sum",
                 because: "there is no clustered scan",

@@ -128,3 +128,51 @@ fn a_kernel_over_a_64_wide_subgroup_is_valid_too() {
     let words = kernel.finish().expect("finished");
     expect_valid(&words, "kernel-wide-subgroup", VULKAN_1_1);
 }
+
+#[test]
+fn a_boolean_specialization_constant_is_valid_spirv() {
+    // **The one specialization shape nothing reached.** A sweep of the public surface for
+    // operations with no consumer found `Module::spec_constant_bool`: it had a unit test in
+    // `module/specialize.rs` and no validator behind it, which is the state `OpUDot` was in when
+    // it turned out to be invalid SPIR-V.
+    //
+    // It is also the shape most likely to be wrong, because it is the one that is *not* like the
+    // others: the default decides the **opcode** — `OpSpecConstantTrue` against
+    // `OpSpecConstantFalse` — where every other specialization constant carries its default as an
+    // operand. A `SpecId` decoration on the wrong kind of instruction is exactly the sort of thing
+    // only a validator says anything about.
+    let mut kernel = Kernel::<U32>::new(shape()).expect("built");
+    let value = kernel.load::<32>(0).expect("loaded");
+
+    let raised = {
+        let mut lanes = kernel.lanes().expect("lanes");
+        let element = lanes.type_of::<U32>().expect("u32");
+
+        // Both opcodes in one module, so a mistake in either is visible and neither can pass by
+        // being absent.
+        let enabled = lanes.module().spec_constant_bool(true, 0).expect("true");
+        let disabled = lanes.module().spec_constant_bool(false, 1).expect("false");
+
+        let one = lanes.module().constant_u32(1).expect("1");
+        let zero = lanes.module().constant_u32(0).expect("0");
+        let chosen = lanes
+            .module()
+            .select(element, enabled, one, zero)
+            .expect("chosen");
+        let other = lanes
+            .module()
+            .select(element, disabled, one, zero)
+            .expect("other");
+        let addend = lanes.module().i_add(element, chosen, other).expect("sum");
+
+        let addend = lanes.splat_id::<U32, 32>(addend).expect("splat");
+        lanes.add(value, addend).expect("added")
+    };
+    kernel.store(1, raised).expect("stored");
+
+    expect_valid(
+        &kernel.finish().expect("finished"),
+        "kernel-spec-bool",
+        VULKAN_1_1,
+    );
+}

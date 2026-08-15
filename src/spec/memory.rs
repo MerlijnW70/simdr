@@ -38,7 +38,13 @@ impl StorageClass {
 /// without saying *what memory* orders nothing a driver has to respect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MemorySemantics {
-    /// No ordering at all.
+    /// No ordering at all — SPIR-V spells it `Relaxed`.
+    ///
+    /// **Legal on an atomic and refused on a barrier.**
+    /// `VUID-StandaloneSpirv-MemorySemantics-10869` forbids it on `OpMemoryBarrier`: a barrier that
+    /// orders nothing is an invalid module rather than a cheap one. See
+    /// [`crate::module::Module::memory_barrier`], which is where that was found — by pointing the
+    /// validator at an operation nothing had ever called.
     None,
     /// Everything before is visible to everything after, for workgroup memory.
     ///
@@ -50,7 +56,11 @@ pub enum MemorySemantics {
     /// What an atomic needs when it publishes something *other* than itself — a counter whose
     /// value another invocation uses to decide where to read. An atomic that is only ever summed
     /// up after the dispatch needs none of it, and [`MemorySemantics::None`] is the honest mask
-    /// for that: ordering nothing is cheaper than ordering nothing while saying otherwise.
+    /// for **an atomic** doing that: ordering nothing is cheaper than ordering nothing while
+    /// saying otherwise.
+    ///
+    /// It is also the mask a barrier may not have, which the sentence above did not say for as
+    /// long as nothing had validated a barrier. See [`MemorySemantics::None`].
     AcquireReleaseBuffer,
 }
 

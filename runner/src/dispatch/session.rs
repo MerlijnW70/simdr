@@ -37,6 +37,13 @@ pub struct Session<'gpu> {
     /// dispatch would also make the check cost something on the path whose entire purpose is that
     /// nothing costs anything after setup.
     bounds: super::extent::Bounds,
+    /// How many words each binding holds, in binding order.
+    ///
+    /// Held for the same reason and for a sharper one: the check needs a slice of sizes, and
+    /// gathering one per dispatch would allocate on the hot path. The buffers are fixed when the
+    /// session is built and so are their capacities, so this is read once — the same argument the
+    /// field above makes, applied to the thing that field is compared against.
+    held: Vec<usize>,
     /// The host's way in and out. One, reused, sized to the largest binding.
     ///
     /// `Option` because [`Buffer::destroy`] consumes the buffer and `Drop` has only `&mut self`.
@@ -110,6 +117,7 @@ impl Gpu {
                 Ok(pipeline) => Ok(Session {
                     gpu: self,
                     bounds: super::extent::Bounds::of(spirv),
+                    held: buffers.iter().map(Buffer::capacity).collect(),
                     staging: Some(staging),
                     buffers,
                     pipeline: Some(pipeline),
@@ -219,8 +227,12 @@ impl Session<'_> {
         // fixed at construction and its workgroup count is not, so this is the one path where the
         // caller can ask for a dispatch too large for buffers that were the right size a moment
         // ago. It had no check of any kind until this was written.
-        let held: Vec<usize> = self.buffers.iter().map(Buffer::capacity).collect();
-        if let Some(overrun) = self.bounds.overrun(grid, &held) {
+        //
+        // Both sides of the comparison were read at construction, so what happens here is a walk of
+        // a map with one entry per binding and no allocation at all. The first version of this
+        // gathered the sizes per call, which is a `Vec` on the one path in this crate whose whole
+        // claim is that it does nothing but dispatch.
+        if let Some(overrun) = self.bounds.overrun(grid, &self.held) {
             return Err(overrun.into());
         }
 

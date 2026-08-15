@@ -19,7 +19,7 @@
 
 mod common;
 
-use common::{VULKAN_1_1, expect_valid};
+use common::{VULKAN_1_1, expect_valid, validate, validator};
 use simdr::kernel::{Kernel, Shape};
 use simdr::lanes::{F32, U32};
 
@@ -249,5 +249,122 @@ fn a_write_to_a_slot_the_data_chose_is_valid_spirv() {
         &kernel.finish().expect("finished"),
         "kernel-scatter-pointer",
         VULKAN_1_1,
+    );
+}
+
+#[test]
+fn the_operations_a_second_sweep_found_unreached_are_valid_spirv() {
+    // **The sweep that found `OpUDot`, run again mechanically.** Asking which public functions have
+    // no reference outside the file that defines them turned up six more, and four of them emit
+    // instructions no other test in this tree reaches:
+    //
+    // * `Lanes::exp` — one of the extended set nothing composed.
+    // * `Lanes::if_uniform_value` — the one-armed branch that *yields*, where `if_uniform` runs a
+    //   body for its effects. Its `OpPhi` names two predecessors where the two-armed form names
+    //   one each, which is the half a validator has an opinion about.
+    // * `Module::atomic_store` — the only atomic with no result id, and the last one still in the
+    //   state an earlier audit found the exchange and the load in.
+    // * `Module::memory_barrier` — `OpMemoryBarrier`, which orders without waiting. Its own
+    //   documentation says it is rarely what a caller wants, and nothing here wanted it.
+    //
+    // All four in one module: an instruction that is only valid in company is a thing this suite
+    // has met before, and a module carrying one of the four proves nothing about the others.
+    use simdr::spec::{MemorySemantics, Scope};
+
+    let mut kernel = Kernel::<F32>::new(shape()).expect("built");
+    let value = kernel.load::<32>(0).expect("loaded");
+
+    let shaped = {
+        let mut lanes = kernel.lanes().expect("lanes");
+        let curved = lanes.exp(value).expect("exp");
+
+        // The vote is what makes a `Uniform`, and `if_uniform_value` is the only thing that takes
+        // one and hands a value back.
+        let limit = lanes
+            .splat_bits::<F32, 32>(1.0_f32.to_bits())
+            .expect("limit");
+        let over = lanes.greater_than(curved, limit).expect("compared");
+        let vote = lanes.any_uniform(over).expect("voted");
+
+        let element = lanes.type_of::<F32>().expect("f32");
+        let otherwise = lanes.reduce_sum(curved).expect("sum");
+        lanes
+            .if_uniform_value(vote, element, otherwise, |lanes| lanes.reduce_max(curved))
+            .expect("chose")
+    };
+
+    // The atomic store, and a barrier ordering it. Both take their scope and their semantics as
+    // *ids of constants* rather than literals, which is the trap this crate documents in three
+    // places and which assembles cleanly when it is wrong.
+    //
+    // **The two take different masks, and that is the finding this test produced.** `Relaxed` is
+    // legal on the atomic and forbidden on the barrier — see the refusal below.
+    let slot = kernel.local_index();
+    let pointer = kernel.element_pointer_to(1, slot).expect("pointer");
+    let scope = kernel.module().scope(Scope::Device).expect("scope");
+    let relaxed = kernel
+        .module()
+        .memory_semantics(MemorySemantics::None)
+        .expect("relaxed");
+    let ordered = kernel
+        .module()
+        .memory_semantics(MemorySemantics::AcquireReleaseBuffer)
+        .expect("acquire-release");
+
+    kernel
+        .module()
+        .atomic_store(pointer, scope, relaxed, shaped)
+        .expect("stored atomically");
+    kernel
+        .module()
+        .memory_barrier(scope, ordered)
+        .expect("ordered");
+
+    expect_valid(
+        &kernel.finish().expect("finished"),
+        "instructions-unreached",
+        VULKAN_1_1,
+    );
+}
+
+#[test]
+fn a_memory_barrier_that_orders_nothing_is_refused() {
+    // **What the test above found the first time it ran.** `Module::memory_barrier` had no caller,
+    // no kernel and no validator behind it, and `MemorySemantics::None` — which this crate's own
+    // documentation recommended as "the honest mask" for an operation that publishes nothing — is
+    // `Relaxed`, which `VUID-StandaloneSpirv-MemorySemantics-10869` forbids on `OpMemoryBarrier`
+    // specifically. The same mask on the atomic two lines above is perfectly legal, which is what
+    // makes it easy to get wrong.
+    //
+    // Asserted as a *refusal* rather than fixed and forgotten, for the reason
+    // `validated.rs::a_compute_entry_point_without_a_workgroup_size_is_refused` exists: without
+    // this, the test above could pass because the validator never says no. The emitter cannot
+    // refuse it — the semantics arrive as the id of a constant, and this layer cannot ask what
+    // value that constant holds — so the boundary is stated here and in the two doc comments.
+    if validator().is_none() {
+        eprintln!("SKIPPED barrier-teeth: spirv-val not found (set SPIRV_VAL)");
+        return;
+    }
+
+    use simdr::spec::{MemorySemantics, Scope};
+
+    let mut kernel = Kernel::<F32>::new(shape()).expect("built");
+    let scope = kernel.module().scope(Scope::Device).expect("scope");
+    let relaxed = kernel
+        .module()
+        .memory_semantics(MemorySemantics::None)
+        .expect("relaxed");
+    kernel
+        .module()
+        .memory_barrier(scope, relaxed)
+        .expect("emitted");
+
+    let words = kernel.finish().expect("finished");
+    let outcome = validate(&words, "barrier-relaxed", VULKAN_1_1);
+
+    let message = outcome.expect_err("a relaxed memory barrier is not valid SPIR-V");
+    assert!(
+        message.contains("MemorySemantics"),
+        "refused for something other than the semantics: {message}"
     );
 }

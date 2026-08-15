@@ -95,6 +95,29 @@ fn reading_a_second_row_is_valid_spirv() {
 }
 
 #[test]
+fn writing_a_named_row_is_valid_spirv() {
+    // **The write that matches `load_row_at`, and the one nothing reached.** A mechanical sweep of
+    // the public surface for operations with no consumer found `store_row_at` — its reading twin
+    // is used by the test above and by `kernels::plane`, and the writing one had a unit test in
+    // `kernel/plane.rs` and no validator behind it.
+    //
+    // That is the state `OpUDot` was in when it turned out to be invalid SPIR-V, and a grid store
+    // is a good candidate for it: the row is a caller's id rather than this invocation's, so the
+    // address is a multiply and two adds that no other test composes in this order.
+    let mut kernel = Kernel::<U32>::new(grid(4)).expect("built");
+    let value = kernel.load_row::<32>(0, 512).expect("loaded");
+
+    let first = kernel.module().constant_u32(0).expect("0");
+    kernel.store_row_at(1, 512, first, value).expect("stored");
+
+    expect_valid(
+        &kernel.finish().expect("finished"),
+        "kernel-grid-store-at",
+        VULKAN_1_1,
+    );
+}
+
+#[test]
 fn a_strip_mined_grid_kernel_is_valid_spirv() {
     // Four elements per lane on each axis at once: the column arithmetic strips and the row
     // arithmetic multiplies, and the two have to compose into one index.
