@@ -622,34 +622,34 @@ const NO_DISPATCH: [(&str, &str); 1] = [(
      so there is no dispatch to bound",
 )];
 
-/// The lines of `path` that are code rather than comment, split into words.
+/// Whether any *code* line of `path` contains `needle`.
 ///
-/// The same reading [`mentions`] takes, for the same reason: a bound named only in prose is a claim
-/// about the file rather than a check inside it.
-fn code_words(path: &str) -> BTreeSet<String> {
+/// Comment lines are skipped for the reason [`mentions`] skips them: a bound named only in prose is
+/// a claim about the file rather than a check inside it — and this file's own prose names both of
+/// the things it searches for.
+fn code_names(path: &str, needle: &str) -> bool {
     let Ok(text) = fs::read_to_string(root().join(path)) else {
-        return BTreeSet::new();
+        return false;
     };
     text.lines()
-        .map(|line| line.trim_start())
+        .map(str::trim_start)
         .filter(|line| !line.starts_with("//"))
-        .flat_map(|line| line.split(|c: char| !(c.is_alphanumeric() || c == '_')))
-        .filter(|word| !word.is_empty())
-        .map(str::to_owned)
-        .collect()
+        .any(|line| line.contains(needle))
 }
 
 /// Every source file that builds a `Pipeline`, and whether it also bounds a dispatch.
+///
+/// The **call** rather than the two words apart. A set of words would match any file that imports
+/// `Pipeline` and calls some other `new`, which is a false positive that demands a bound of a file
+/// that dispatches nothing — and the excuse list is exactly where a false positive would be parked
+/// and forgotten.
 fn pipeline_builders() -> Vec<(String, bool)> {
     sources_on_disk()
         .into_iter()
-        .filter_map(|path| {
-            let words = code_words(&path);
-            // `Pipeline::new` splits to these two words adjacent; the pair is what no other
-            // construction in this tree spells.
-            let builds = words.contains("Pipeline") && words.contains("new");
-            let bounds = words.contains("overrun") || words.contains("overrun_uniform");
-            builds.then_some((path, bounds))
+        .filter(|path| code_names(path, "Pipeline::new"))
+        .map(|path| {
+            let bounds = code_names(&path, ".overrun(") || code_names(&path, ".overrun_uniform(");
+            (path, bounds)
         })
         .collect()
 }
