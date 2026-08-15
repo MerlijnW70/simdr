@@ -1174,10 +1174,20 @@ Both directions were checked by breaking them. The first version of the check *m
 probe was after it — which is the check having exactly the blind spot it exists to find, and the
 reason it now reads whole files.
 
-What remains open is the other half of the original item: this asks whether an operation is reached
-at all, not whether it reaches *the validation its siblings reach*. `Gpu`'s dispatch family had six
-members and one bound check; nothing here would have said so, because all six were consumed. That
-question needs a notion of "family" the tree does not currently carry.
+**The other half of the original item is answered too, and the family was already in the tree.**
+This asks whether an operation is reached at all, not whether it reaches *the validation its
+siblings reach* — `Gpu`'s dispatch family had six members and one bound check, and nothing here
+would have said so because all six were consumed.
+
+Every dispatch in this crate goes through `Pipeline::new`, and that call is handed both halves of
+the bound at once: the module, and how much of each buffer the shader may see. So the family is
+"files that build a pipeline", and what its members owe is a mention of `overrun`. Seven build one;
+six bound it; the seventh is `probe_pipelines`, which times pipeline creation and submits nothing,
+excused by name with an excuse that expires by itself.
+
+It is a floor rather than a proof — it asks whether the file names the check, not whether every path
+through it reaches one, and `runner/tests/bounds.rs` asks the sharper question of each door. What it
+adds is the thing that had no mechanism: noticing a **seventh door**.
 
 **8. `Kernel::load_offset`'s offset was outside the dispatch bound — done, and something did need
 it.** The item said the under-count cost nothing because the fold kernels size their dispatch

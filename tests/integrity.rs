@@ -612,3 +612,130 @@ fn the_emitter_forbids_unsafe_outright_so_none_of_it_needs_excusing() {
          exists to prevent"
     );
 }
+
+/// Files that build a pipeline and dispatch nothing through it.
+///
+/// Every other one owes a bound: see the test below for why the pipeline is the family being asked.
+const NO_DISPATCH: [(&str, &str); 1] = [(
+    "runner/src/dispatch/pipeline.rs",
+    "`probe_pipelines` builds pipelines to time creation and destroys them without submitting, \
+     so there is no dispatch to bound",
+)];
+
+/// The lines of `path` that are code rather than comment, split into words.
+///
+/// The same reading [`mentions`] takes, for the same reason: a bound named only in prose is a claim
+/// about the file rather than a check inside it.
+fn code_words(path: &str) -> BTreeSet<String> {
+    let Ok(text) = fs::read_to_string(root().join(path)) else {
+        return BTreeSet::new();
+    };
+    text.lines()
+        .map(|line| line.trim_start())
+        .filter(|line| !line.starts_with("//"))
+        .flat_map(|line| line.split(|c: char| !(c.is_alphanumeric() || c == '_')))
+        .filter(|word| !word.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Every source file that builds a `Pipeline`, and whether it also bounds a dispatch.
+fn pipeline_builders() -> Vec<(String, bool)> {
+    sources_on_disk()
+        .into_iter()
+        .filter_map(|path| {
+            let words = code_words(&path);
+            // `Pipeline::new` splits to these two words adjacent; the pair is what no other
+            // construction in this tree spells.
+            let builds = words.contains("Pipeline") && words.contains("new");
+            let bounds = words.contains("overrun") || words.contains("overrun_uniform");
+            builds.then_some((path, bounds))
+        })
+        .collect()
+}
+
+#[test]
+fn every_file_that_builds_a_pipeline_bounds_what_it_dispatches() {
+    // **The half of the "where is this called from" audit that had no mechanism.**
+    // `notes/NEXT.md` records the shape: `Gpu`'s dispatch family had six members and one bound
+    // check, and nothing would have said so, because all six were consumed and each was reached by
+    // its own tests. What was missing was a notion of *family* — a set of operations that owe the
+    // same check.
+    //
+    // `Pipeline::new` is one, and it is the one that matters: every dispatch in this crate goes
+    // through it, and it is handed both halves of the question at once — the module, and how much
+    // of each buffer the shader may see. So a file that builds a pipeline and never mentions a
+    // bound is a door that was added without one, which is exactly the state `run_bound`,
+    // `Session::dispatch`, `run_chain`, the reducer and the scanner were all in.
+    //
+    // A floor rather than a proof, in the direction that costs coverage rather than truth: it asks
+    // whether the file names the check, not whether every path through it reaches one.
+    // `runner/tests/bounds.rs` asks the sharper question of each door by dispatching past its
+    // buffers, and this is what notices a *seventh* door appearing.
+    let excused: BTreeSet<&str> = NO_DISPATCH.iter().map(|&(path, _)| path).collect();
+
+    let unbounded: Vec<String> = pipeline_builders()
+        .into_iter()
+        .filter(|(path, bounds)| !bounds && !excused.contains(path.as_str()))
+        .map(|(path, _)| path)
+        .collect();
+
+    assert!(
+        unbounded.is_empty(),
+        "these files build a compute pipeline and never mention `overrun`, so whatever they \
+         dispatch is unbounded — which is undefined behaviour on a buffer, and has shown up here \
+         as an access violation on one device and plausible wrong numbers on another. Bound the \
+         dispatch, or add the file to NO_DISPATCH with the reason it submits nothing:\n{unbounded:#?}"
+    );
+}
+
+#[test]
+fn nothing_is_excused_from_bounding_a_dispatch_and_bounds_one() {
+    // The other direction, as everywhere else here: an excuse that has stopped being true reads
+    // exactly like one that is.
+    let builders = pipeline_builders();
+
+    for (path, reason) in NO_DISPATCH {
+        let Some((_, bounds)) = builders.iter().find(|(built, _)| built == path) else {
+            panic!("NO_DISPATCH excuses {path} ({reason}) and nothing there builds a pipeline");
+        };
+
+        assert!(
+            !bounds,
+            "{path} is excused from bounding a dispatch ({reason}) and now names `overrun`, so \
+             the excuse has expired and the line should go"
+        );
+    }
+}
+
+#[test]
+fn the_pipeline_scanner_finds_the_doors_that_are_there() {
+    // Without this the check above is vacuous in the worst way: a scanner matching nothing reports
+    // every file as compliant and reads as a clean run. The six doors are named here so that a
+    // rename which makes the scanner blind fails rather than passes.
+    let builders = pipeline_builders();
+    let found: BTreeSet<&str> = builders.iter().map(|(path, _)| path.as_str()).collect();
+
+    for door in [
+        "runner/src/dispatch.rs",
+        "runner/src/dispatch/bindings.rs",
+        "runner/src/dispatch/chain.rs",
+        "runner/src/dispatch/session.rs",
+        "runner/src/reduction/held.rs",
+        "runner/src/scan/held.rs",
+    ] {
+        assert!(
+            found.contains(door),
+            "{door} dispatches and the scanner did not see it build a pipeline, so this check is \
+             passing over the thing it exists to watch"
+        );
+    }
+
+    // And that the two halves are told apart rather than both answered yes.
+    assert!(
+        builders
+            .iter()
+            .any(|(path, bounds)| path == "runner/src/dispatch/pipeline.rs" && !bounds),
+        "the excused file reads as bounded, so the scanner cannot tell a bound from its absence"
+    );
+}
