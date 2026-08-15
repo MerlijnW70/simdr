@@ -91,7 +91,12 @@ pub(crate) struct Overrun {
     /// `None` when it could not be read and the floor below was used instead — there is no binding
     /// to name there, and naming one anyway would be a guess dressed as a fact.
     pub(crate) binding: Option<u32>,
-    /// How many words the dispatch would touch of it.
+    /// How many words the buffer must hold for this dispatch to stay inside it.
+    ///
+    /// The **extent** rather than the count touched, and the two stopped being the same when the
+    /// pitch came in: a kernel reading a narrow slab of a wide matrix touches only its own columns
+    /// and needs every word up to the last of them, because the rows it skips are inside the
+    /// buffer. For a linear binding they still agree.
     pub(crate) needed: usize,
     /// How many it holds.
     pub(crate) held: usize,

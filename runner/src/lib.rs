@@ -119,7 +119,11 @@ pub enum Error {
         /// `None` when the module's address arithmetic could not be read and the floor of one
         /// element per invocation was used instead: there is no binding to name there.
         binding: Option<u32>,
-        /// How many words of it the dispatch would touch.
+        /// How many words it must hold for this dispatch to stay inside it.
+        ///
+        /// The extent the kernel reaches rather than the count of words it touches. The two differ
+        /// for a buffer addressed as a plane, where the rows between the columns a dispatch covers
+        /// are skipped and still have to be there.
         needed: usize,
         /// How many it holds.
         held: usize,
@@ -157,7 +161,7 @@ impl fmt::Display for Error {
                 held,
             } => write!(
                 f,
-                "this dispatch touches {needed} words of binding {binding} and it holds {held}"
+                "this dispatch reaches {needed} words into binding {binding} and it holds {held}"
             ),
             Self::Overrun {
                 binding: None,
@@ -165,7 +169,7 @@ impl fmt::Display for Error {
                 held,
             } => write!(
                 f,
-                "this dispatch touches at least {needed} words and the buffers hold {held}"
+                "this dispatch reaches at least {needed} words in and the buffers hold {held}"
             ),
             Self::BadLength(BadLength::NotAPowerOfTwo(length)) => write!(
                 f,
