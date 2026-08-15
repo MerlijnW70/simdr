@@ -56,6 +56,28 @@
 //! `Kernel::load_offset_by` stays outside it, and must: its offset is a specialization constant,
 //! which is a number chosen after the module was built and has no literal here to read.
 //!
+//! # Three mutants here survive, and the reason is worth writing down once
+//!
+//! The gate reports `&&` weakened to `||` in [`row_of`]'s last two clauses and in [`shift_in`]'s
+//! filter as unguarded. They are **equivalent mutants** on every module this emitter can produce,
+//! and the argument is about the module rather than about the tests:
+//!
+//! * `row_of` looks for an `OpIAdd` whose right operand is `local.y` and whose left is an `OpIMul`
+//!   over `group.y`. Only the row is either of those — the only `OpIMul` over `group.y` is
+//!   `group.y × rows`, and the only term that uses it is the row itself. So each half of the
+//!   conjunction selects the same one instruction, and their union is that instruction too.
+//! * `shift_in` looks for an `OpIAdd` whose left is the invocation's lane, then keeps only the ones
+//!   whose right operand is a *constant*. Of the sums in an address, exactly one has a constant on
+//!   the right — `local + (strip × workgroup + offset)` — and it is the one the left-hand clause
+//!   already names. Loosening the filter admits `start` and `address`, whose right operands are ids,
+//!   and the constant lookup drops them again.
+//!
+//! The first of the three did **not** survive that argument: weakening the first `&&` admitted every
+//! sum in the address, and taking the lowest id happened to give the row anyway. Requiring the match
+//! to be *unique* is what makes that one observable, and it is the better rule regardless — two
+//! terms of the row's shape is a module this cannot choose between, and choosing anyway is the guess
+//! this file refuses everywhere else.
+//!
 //! # The walk is deliberately short-sighted
 //!
 //! It follows `OpIAdd` and `OpIMul` and stops at everything else, because those two are the whole
@@ -163,22 +185,32 @@ pub(super) fn needs(spirv: &[u32], columns: u64) -> BTreeMap<u32, Needs> {
 /// row is *used* to compute — matching on the shape alone found that one instead, reported no pitch
 /// at all, and quietly went back to counting invocations. `local.y` is what tells them apart, and a
 /// module with no `local.y` in it is the one-row-deep case where the row is `group.y` alone.
+///
+/// **The match has to be unique, not merely first.** A module with two sums of this shape is one
+/// this cannot choose between, and choosing the lower id anyway would be a guess dressed as a fact —
+/// the same objection [`super::Bounds::overrun`] states about a binding it cannot read. So two
+/// matches give no row, therefore no pitch, therefore the invocation reading: less checking rather
+/// than wrong checking, which is the direction this file takes everywhere it cannot see.
 fn row_of(spirv: &[u32], terms: &BTreeMap<u32, Term>) -> Option<u32> {
     let group_y = component_of(spirv, BuiltIn::WorkgroupId, 1)?;
     let Some(local_y) = component_of(spirv, BuiltIn::LocalInvocationId, 1) else {
         return Some(group_y);
     };
 
-    let deep = terms.iter().find_map(|(&id, term)| {
-        let left = terms.get(&term.left)?;
-        (term.opcode == op::I_ADD
-            && term.right == local_y
-            && left.opcode == op::I_MUL
-            && left.left == group_y)
-            .then_some(id)
+    let mut sums = terms.iter().filter(|(_, term)| {
+        terms.get(&term.left).is_some_and(|left| {
+            term.opcode == op::I_ADD
+                && term.right == local_y
+                && left.opcode == op::I_MUL
+                && left.left == group_y
+        })
     });
 
-    Some(deep.unwrap_or(group_y))
+    let (&deep, _) = sums.next()?;
+    if sums.next().is_some() {
+        return None;
+    }
+    Some(deep)
 }
 
 /// Elements from one row of this buffer to the next, when `row` is multiplied into the address.
