@@ -16,9 +16,10 @@ Stated first because the gap is only visible against it.
 | --- | --- | --- |
 | every **branch** in the source | mutation gate | 93 targets, 639 mutants, **100%** |
 | every emitted module's **legality** | `spirv-val` | the kernel library at 5 widths, plus 232 generated programs |
-| the zero-dependency boundary, the decision records' presence, the fail-closed sites | `noha gate` | 56 + 8 + 93 checks |
-| every public operation has a consumer; **every opcode is emitted by something**; every pipeline builder bounds its dispatch; the mutation config matches the tree | `tests/integrity.rs` | 17 tests |
-| formatting, lints, **doc links**, the MSRV, the skip counts per width | CI | 5 jobs |
+| the zero-dependency boundary, the decision records' presence, the fail-closed sites | `noha gate` | 56 + <!--count:decisions-->9 + 1 checks |
+| every public operation has a consumer; **every opcode is emitted by something**; every pipeline builder bounds its dispatch; the mutation config matches the tree | `tests/integrity.rs` | <!--count:integrity-tests-->17 tests |
+| **the numbers these documents state about this repository**; every decision record naming what enforces it | `tests/documented.rs` | <!--count:documented-tests-->7 tests |
+| formatting, lints, **doc links**, the MSRV, the skip counts per width | CI | <!--count:ci-jobs-->3 jobs, the device one a matrix of three widths |
 | behaviour | two GPUs and lavapipe | widths 4, 8, 16, 32, 64 |
 
 **The first row is stronger than it looks, and it retires a whole class of question.** A guard nothing
@@ -42,13 +43,21 @@ occurrence: *"these were 348 and 740 until somebody counted again"*. Third time.
 
 The class splits three ways and the honest answer differs for each:
 
-* **Counts** — tests, kernels, opcodes, files. Trivially assertable, and the one above has now
-  drifted three times. There is no argument for leaving these to prose.
+* **Counts** — tests, kernels, opcodes, files. ~~Trivially assertable, and the one above has now
+  drifted three times. There is no argument for leaving these to prose.~~ **Done, and the fix was
+  not to stop writing numbers down.** The README's answer to three drifts was to delete its count,
+  which works for one sentence and does not scale — a document that may not state a number cannot
+  describe the thing it documents. So the number stays and carries a marker,
+  `<!--` `count:name` `-->` immediately before the digits, which renders as nothing and resolves in
+  `tests/documented.rs` against the tree. Seven counters exist; every marked number in every
+  markdown file in this repository, `proeftuin/` included, is one of them. A marker naming no
+  counter fails rather than rendering as an ordinary number, and a counter no document states fails
+  too — which is the rule that emptied `NO_EMITTER`, one level up.
 * **Timings and multiples** — `11.2×`, `52×`, `~100 µs`, `376 ns`. CI *cannot* check these and says
   so: a shared runner's wall clock is not evidence, which is why `session.rs` prints its ratio there
   rather than asserting it. What can be checked is that the example which produces the number still
-  runs and still prints one. All 16 do today — measured while writing this — and nothing would
-  notice if one stopped.
+  runs and still prints one. All <!--count:examples-->17 do today — measured while writing this,
+  <!--count:device-examples-->16 of them on a device — and nothing would notice if one stopped.
 * **Facts about a device** — widths, features, heap sizes. Assertable where a device is present, and
   already are in places.
 
@@ -102,10 +111,19 @@ artefact and its kind:
 | DR-0008 — a round trip is the unit of cost | `runner/examples/latency.rs`, re-runnable anywhere | **measured** |
 | DR-0001 — numbers from the grammar | `spirv-val` catches a wrong number that makes an *invalid* module, and nothing catches one that makes a valid one | **partial** |
 | DR-0005 — a constant defers a number | an `Id` is an `Id` | **weakest** |
+| DR-0009 — a test outcome is not a result | nothing yet: a rule two harnesses follow and no check compares a third against | **none** |
 
 Three are enforced by the type system and cannot be violated; one by something not existing; one is
-tested and was checked by breaking it; one has an instrument and no schedule. **Two are genuinely
-thin** — and now they say so where a reader will find it, which is what the blanket could not do.
+tested and was checked by breaking it; one has an instrument and no schedule; one has nothing and
+says so. **Two are genuinely thin** — and now they say so where a reader will find it, which is what
+the blanket could not do.
+
+**This table was hand-written and had already gone stale**, which is the finding rather than the
+embarrassment. DR-0009 was recorded the same day and never reached the row it belongs in, and
+nothing about adding a tenth record would have made the nine here wrong — the silent-staleness shape
+this whole document is about, in the document about it. `tests/documented.rs` compares the two now:
+every record in `decisions/` is cited here, and every record carries the `## What enforces this`
+section this table is assembled from.
 
 ## 3. Uniqueness and absence — 165 claims, three mechanised
 
@@ -212,8 +230,8 @@ has to come back through — and the validator is the only layer downstream of i
 
    **All seven were deleted** rather than left excused, which is the consistent reading of DR-0001.
    The excuse list stays in place at length zero — an exception should be a line somebody writes
-   rather than a silence — so the check is now an absolute: each of the **95** opcodes `op.rs`
-   declares reaches a module. Reading them out of the grammar again costs a minute on the day
+   rather than a silence — so the check is now an absolute: each of the **<!--count:opcodes-->95**
+   opcodes `op.rs` declares reaches a module. Reading them out of the grammar again costs a minute on the day
    somebody wants one back, and that is the day it becomes checkable.
 1. **Assert the counts.** Trivial, and the one in the README has now been wrong three times. The fix
    is not to bump the number a fourth time — it is to make the test print it.
