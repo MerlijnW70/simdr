@@ -756,6 +756,64 @@ mod tests {
         );
     }
 
+    /// `spirv` with a second `OpIAdd` over each sum's own left operand, under a fresh result id.
+    ///
+    /// A term built on the *row's base* — `group.y × rows` — without being the row: its right
+    /// operand is that same multiply rather than `local.y`. Nothing here emits one, and it is the
+    /// shape the last two clauses of `row_of`'s conjunction exist to reject.
+    ///
+    /// As with [`with_every_sum_twice`], the copies are referenced by nothing.
+    fn with_a_second_sum_on_each_base(spirv: &[u32]) -> Vec<u32> {
+        let mut words = spirv[..5].to_vec();
+        let mut next = spirv[3];
+        let mut at = 5;
+
+        while at < spirv.len() {
+            let count = (spirv[at] >> 16) as usize;
+            if count == 0 || at + count > spirv.len() {
+                break;
+            }
+            let instruction = &spirv[at..at + count];
+            words.extend_from_slice(instruction);
+
+            if (spirv[at] & 0xffff) as u16 == op::I_ADD && count == 5 {
+                let mut copy = instruction.to_vec();
+                copy[2] = next;
+                // The right operand becomes the left, so the copy keeps the row's base and loses
+                // the `local.y` that makes it a row.
+                copy[4] = copy[3];
+                next += 1;
+                words.extend_from_slice(&copy);
+            }
+            at += count;
+        }
+
+        words[3] = next;
+        words
+    }
+
+    #[test]
+    fn a_sum_on_the_rows_base_that_is_not_on_the_lane_is_not_a_second_row() {
+        // The two clauses that say *what the sum is over* rather than what it adds. On every module
+        // this crate emits they reject nothing, because the only `OpIMul` over `group.y` is the
+        // row's own base and the only term using it is the row — so the conjunction and either half
+        // of it select the same instruction, and the gate reports both as unguarded.
+        //
+        // This is the module where they differ: a second term over that same base, adding something
+        // other than the lane. It is not a row, the row is still unique, and the pitch is still
+        // read. Take away either clause and there are two candidates, no row, and no pitch.
+        let width = 32;
+        let pitch = width * 4;
+        let spirv = kernels::row_scale(width, pitch, 2, 3).expect("built");
+        let grid = Grid::new(1, 4);
+        let fallback = (width * 4 * 2) as usize;
+
+        assert!(
+            !Bounds::of(&with_a_second_sum_on_each_base(&spirv)).fits(grid, fallback),
+            "a sum over the row's base is not a row, and the pitch is still 128"
+        );
+    }
+
     /// `spirv` with its `OpExecutionMode` removed, and everything else left alone.
     ///
     /// A module that declares no workgroup size, built out of one that does — so every built-in,

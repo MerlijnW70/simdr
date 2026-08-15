@@ -56,27 +56,26 @@
 //! `Kernel::load_offset_by` stays outside it, and must: its offset is a specialization constant,
 //! which is a number chosen after the module was built and has no literal here to read.
 //!
-//! # Three mutants here survive, and the reason is worth writing down once
+//! # One mutant here survives, and the reason is worth writing down once
 //!
-//! The gate reports `&&` weakened to `||` in [`row_of`]'s last two clauses and in [`shift_in`]'s
-//! filter as unguarded. They are **equivalent mutants** on every module this emitter can produce,
-//! and the argument is about the module rather than about the tests:
+//! [`row_of`]'s conjunction has four clauses and **no module this emitter produces needs more than
+//! one of them**: the only `OpIMul` over `group.y` is the row's own base, and the only term using
+//! that base is the row. So the gate reported every weakening of it as unguarded, which is true of
+//! every module — and the answer is not to delete the clauses but to test them against the modules
+//! they are there for, since this reads SPIR-V rather than only the SPIR-V it wrote.
 //!
-//! * `row_of` looks for an `OpIAdd` whose right operand is `local.y` and whose left is an `OpIMul`
-//!   over `group.y`. Only the row is either of those — the only `OpIMul` over `group.y` is
-//!   `group.y × rows`, and the only term that uses it is the row itself. So each half of the
-//!   conjunction selects the same one instruction, and their union is that instruction too.
-//! * `shift_in` looks for an `OpIAdd` whose left is the invocation's lane, then keeps only the ones
-//!   whose right operand is a *constant*. Of the sums in an address, exactly one has a constant on
-//!   the right — `local + (strip × workgroup + offset)` — and it is the one the left-hand clause
-//!   already names. Loosening the filter admits `start` and `address`, whose right operands are ids,
-//!   and the constant lookup drops them again.
+//! Three edits to a real module do it, none of which changes an address: a second copy of every sum
+//! (two rows, so no row — the uniqueness rule), a sum over the row's base that adds something other
+//! than `local.y` (not a row, so the row is still unique), and a kernel with no `LocalSize` at all.
+//! `super`'s tests hold all three.
 //!
-//! The first of the three did **not** survive that argument: weakening the first `&&` admitted every
-//! sum in the address, and taking the lowest id happened to give the row anyway. Requiring the match
-//! to be *unique* is what makes that one observable, and it is the better rule regardless — two
-//! terms of the row's shape is a module this cannot choose between, and choosing anyway is the guess
-//! this file refuses everywhere else.
+//! What is left is [`shift_in`]'s `&&`, which is an **equivalent mutant** and stays one. It looks
+//! for an `OpIAdd` whose left is the invocation's lane, then keeps only those whose right operand is
+//! a *constant*. Of the sums in an address exactly one has a constant on the right —
+//! `local + (strip × workgroup + offset)` — and it is the one the left-hand clause already names.
+//! Loosening the filter admits `start` and `address`, whose right operands are ids, and the constant
+//! lookup drops them again. The two clauses cannot be told apart by a module that computes an
+//! address; one that does not reaches no built-in through this walk at all.
 //!
 //! # The walk is deliberately short-sighted
 //!
