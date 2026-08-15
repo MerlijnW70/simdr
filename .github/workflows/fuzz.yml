@@ -84,7 +84,14 @@ jobs:
           # agreed, and a run that produced none of them is a run that found nothing because it did
           # nothing. `SIMDR_FUZZ_ROUNDS` refusing to parse is already an error rather than a silent
           # default — this is the other half of the same guard, on the other side of the harness.
-          domains=$(grep -c '^fuzz .* over .* seeds' "$RUNNER_TEMP/fuzz.log" || true)
+          #
+          # **Occurrences rather than lines, and unanchored**, which is the same correction
+          # `ci.yml` carries three files away and which this one had to make on its first run. With
+          # `--nocapture`, `libtest` writes `test <name> ... ` and only finishes the line after the
+          # body has run — so a domain's own output lands *mid-line* behind the name of the test it
+          # belongs to. Anchored, this counted four of eight and failed a sweep in which all eight
+          # had agreed. The guard's first catch was itself.
+          domains=$(grep -o 'fuzz [A-Z][A-Za-z]* over ' "$RUNNER_TEMP/fuzz.log" | wc -l)
           echo "$domains domains swept at subgroup ${{ matrix.width }}"
           if [ "$domains" -ne 8 ]; then
             echo "::error::${{ matrix.width }}-wide sweep reported $domains domains and there are eight — a domain that is refused every round has no coverage and looks exactly like one that always agreed"
