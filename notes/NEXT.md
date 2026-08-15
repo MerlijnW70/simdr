@@ -1406,7 +1406,22 @@ needs an answer that is *right* rather than close.
 operations rather than plumbing — an inexact split, so it is stated inexactly rather than given a
 number nothing checks. What follows is the named list instead.
 
-### Tier 1 — ripe, in order of what they cost
+### Tier 1 — ~~ripe~~ built, 2026-08-16
+
+All three, in the order they were listed. What each turned out to be is in `notes/FINDINGS.md`; the
+short version is that `Emit` stopped being an arrangement for one operation. Six domains, five and
+one, in three methods with a refusing default — three memberships that do not nest, which is what
+makes it a mechanism rather than a special case.
+
+`abs` arrived needing exactly the treatment predicted for it, and from the predicted cause: a
+magnitude has no answer at a two's-complement minimum, and the bit shifts had just made that value
+reachable. The round is refused rather than compared. `fma` needed its own doc comment corrected —
+it argues against fuzzing a fused operation, which is right in general and wrong for a corpus of
+small integers. And `all_uniform` needed no gate and a carefully argued threshold.
+
+The list below is what it was, kept because the reasoning is what the next one should be asked with.
+
+### The original entries — ripe, in order of what they cost
 
 **1. `all_uniform` — the third vote, and two of three are generated.** `Op::AddIfAnyAbove` reaches
 `any_uniform` and `Op::AddIfAllEqual` reaches `all_equal_uniform`. The vote that asks whether a

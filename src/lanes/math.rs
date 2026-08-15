@@ -148,9 +148,18 @@ impl Lanes<'_> {
     /// `a * b + c`, rounded once.
     ///
     /// Not the same value as [`Lanes::mul`] followed by [`Lanes::add`], which rounds twice. It is
-    /// usually the more accurate of the two and it is never bit-identical, so a kernel that must
-    /// agree with a CPU reference exactly has to make the same choice on both sides. That is why
-    /// the fuzzer's vocabulary has `min`, `max` and `clamp` in it and not this.
+    /// usually the more accurate of the two and it is never bit-identical **in general**, so a
+    /// kernel that must agree with a CPU reference exactly has to make the same choice on both
+    /// sides.
+    ///
+    /// **That sentence used to end "which is why the fuzzer's vocabulary has `min`, `max` and
+    /// `clamp` in it and not this", and it outlived its own scope.** The fuzzer's float corpus is
+    /// small integers below 2²⁴ by construction — that is what lets any float comparison there be
+    /// exact — and in that range a product and a sum are both exact, so the fused and unfused
+    /// spellings give the *same bits*. `Op::FusedMulAdd` generates it now and holds the pair to
+    /// agreeing, which is what `Op::RepeatAdd` and `Op::RolledAdd` are for one level down.
+    ///
+    /// The general claim stands and the conclusion drawn from it did not.
     ///
     /// # Errors
     ///

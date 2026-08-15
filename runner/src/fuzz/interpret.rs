@@ -11,7 +11,7 @@
 mod steps;
 
 use self::steps::apply;
-use super::program::{Finish, Program};
+use super::program::{Finish, Op, Program};
 
 /// What the device should return, and whether it can be checked exactly.
 #[derive(Debug, Clone)]
@@ -86,6 +86,8 @@ pub fn reference(program: &Program, input: &[u32]) -> Reference {
     let mut exact = within(domain, limit, &held);
 
     for step in &program.steps {
+        // Asked of the values going *in*, because that is where the one unanswerable input is.
+        exact = exact && predictable(domain, *step, &held);
         held = apply(program, &held, *step);
         exact = exact && within(domain, limit, &held);
     }
@@ -278,6 +280,28 @@ fn scanned(program: &Program, held: &[Vec<u32>], exclusive: bool) -> Vec<u32> {
     values
 }
 
+/// Whether this step has an answer the reference is entitled to predict.
+///
+/// **The second reason a round can be uncomparable, and it is not a range.** `within` below asks
+/// whether a float left the magnitudes its domain counts exactly. This asks something narrower: a
+/// two's-complement minimum has no positive counterpart at its own width, so `abs` of it negates to
+/// itself — which is what every device does and what GLSL.std.450 does not promise.
+///
+/// The distinction had no way to arise until this week. Every signed value the generator produced
+/// was small, so the minimum was out of reach; a left shift of 31 lands on it exactly, and roughly
+/// half the shifts of that distance do. So the round is *refused* rather than compared, which is
+/// the same answer `Domain::exact_limit` gives for a half that leaves its range, and the same trade
+/// the signed-zero test got wrong once: asserting what the hardware happens to do is how a
+/// specification's silence becomes a promise nobody made.
+fn predictable(domain: super::Domain, step: Op, held: &[Vec<u32>]) -> bool {
+    if !matches!(step, Op::Absolute) || domain.is_float() {
+        return true;
+    }
+
+    let smallest = domain.smallest();
+    held.iter().flatten().all(|&bits| bits != smallest)
+}
+
 /// Whether every value in `held` is one its domain still counts exactly.
 ///
 /// `None` means the domain has no such limit — the integers, where wrapping is defined and this
@@ -310,6 +334,83 @@ mod tests {
 
     use super::*;
     use crate::fuzz::{Domain, Op};
+
+    use crate::fuzz::BitShift;
+
+    /// A one-invocation program in `domain`, so a single input word decides everything.
+    fn one_lane(domain: Domain, steps: Vec<Op>) -> Program {
+        Program {
+            domain,
+            subgroup: 1,
+            workgroup: 1,
+            groups: 1,
+            lanes: 1,
+            steps,
+            finish: Finish::Sum,
+        }
+    }
+
+    /// A magnitude the reference will not predict, and one it will.
+    ///
+    /// **The round is refused rather than answered**, which is the whole of `predictable`. A
+    /// two's-complement minimum has no positive counterpart at its own width — `-128` as an `i8`
+    /// negates to `-128` — and that is what every device does and what GLSL.std.450 does not
+    /// promise. The signed-zero test made the opposite choice once and Ubuntu's Mesa disagreed with
+    /// it, which is the reason this one is written the careful way round.
+    ///
+    /// Reachable only since the bit shifts arrived: every signed value the generator drew was small
+    /// until a left shift of 7 could land exactly on the minimum. Both directions are asserted,
+    /// because a refusal that fires for *every* round is a domain with no coverage and reads
+    /// exactly like a domain that always agreed.
+    #[test]
+    fn a_magnitude_with_no_answer_is_refused_and_an_ordinary_one_is_not() {
+        let shifted_to_the_top = one_lane(
+            Domain::Byte,
+            vec![
+                Op::BitShift {
+                    kind: BitShift::Left,
+                    by: 7,
+                },
+                Op::Absolute,
+            ],
+        );
+        // 1 << 7 is 0x80, which is `i8::MIN`.
+        assert!(
+            !reference(&shifted_to_the_top, &[1]).exact,
+            "a magnitude of the smallest `i8` was compared, and no specification says what it is"
+        );
+
+        // The same program one bit short of it: 2 << 7 wraps to 0, whose magnitude is ordinary.
+        assert!(
+            reference(&shifted_to_the_top, &[2]).exact,
+            "a round that never met the minimum was refused, so the domain has no coverage left"
+        );
+
+        // And without the magnitude at all, the same value is fine — the refusal is about the
+        // operation meeting the value, not about the value being present.
+        let no_magnitude = one_lane(
+            Domain::Byte,
+            vec![Op::BitShift {
+                kind: BitShift::Left,
+                by: 7,
+            }],
+        );
+        assert!(
+            reference(&no_magnitude, &[1]).exact,
+            "the smallest `i8` is an ordinary value until something asks for its magnitude"
+        );
+
+        // An unsigned domain has no magnitude to ask for, and `0x80` there is 128 rather than a
+        // minimum — so the guard must not fire on the bit pattern alone.
+        let unsigned = one_lane(
+            Domain::UnsignedByte,
+            vec![Op::BitShift {
+                kind: BitShift::Left,
+                by: 7,
+            }],
+        );
+        assert!(reference(&unsigned, &[1]).exact);
+    }
 
     /// The reference's answers, for a test that is about the arithmetic rather than the range.
     ///

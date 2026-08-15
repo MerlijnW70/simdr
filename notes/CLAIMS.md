@@ -137,6 +137,14 @@ them**. `tests/documented.rs` reads them now: a quoted path must name a file tha
 because the prose says `scan/plan.rs` and means `runner/src/scan/plan.rs`), and a quoted
 `Type::member` must name something the tree declares, where the type is one the tree declares.
 
+**Including `proeftuin/`, where the counters stop, and the opposite direction is the point.** A
+*count* the workspace states must not depend on the sandbox — deleting it would fail a test in the
+crate it may not touch. A *reference* is checked where it is written, and the sandbox's prose names
+this repository's files and types on almost every page. Those are exactly the names that rot when
+the engine moves under it, and deleting the directory takes the sentences with it and leaves nothing
+owed. That is the test for whether an obligation is a dependency: one that survives the deletion is,
+one that vanishes with it is not.
+
 Both are floors rather than proofs, in the safe direction — the trade `consumed_outside` makes one
 file over. And both found things on their first run:
 

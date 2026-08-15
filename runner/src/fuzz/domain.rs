@@ -375,6 +375,28 @@ impl Domain {
         self.encode(0)
     }
 
+    /// Magnitude, in this domain.
+    ///
+    /// Offered only where `Lanes::abs` is — the `Signed` domains — so the integer half reads its
+    /// operand through `signed_value` without asking whether it should.
+    ///
+    /// # The one value with no answer
+    ///
+    /// A two's-complement minimum has no positive counterpart at its own width: `-128` as an `i8`
+    /// negates to `-128`. That is what this returns, because it is what the negation gives, and it
+    /// is **not** what the round is compared on — `interpret` refuses a round whose `abs` meets that
+    /// value rather than asserting an answer GLSL.std.450 does not promise.
+    ///
+    /// The distinction matters more since the bit shifts arrived. Before them every signed value
+    /// here was small and that edge was out of reach; a left shift of 31 lands on it exactly.
+    #[must_use]
+    pub fn abs(self, bits: u32) -> u32 {
+        if self.is_float() {
+            return self.encode_float(self.decode(bits).abs());
+        }
+        self.truncate(self.signed_value(bits).unsigned_abs())
+    }
+
     /// Shift `bits` by `by`, in this domain.
     ///
     /// The one operation here that reads its operand as **bits rather than as a number**, which is

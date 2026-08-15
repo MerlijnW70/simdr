@@ -612,7 +612,14 @@ fn the_fuzzer_notices_when_a_scan_is_wrong() {
                 // So take the first seed whose program builds under the forced mapping, and insist
                 // one exists. Skipping the combination quietly is the failure this whole file is
                 // about — it would leave a scan unchecked and print nothing.
-                let Some((program, spirv)) = (7_u64..64).find_map(|seed| {
+                //
+                // **And one that can tell the two inputs apart.** A program is free to map both to
+                // the same answer — a clamp does it, and so does an `all` vote whose threshold both
+                // inputs clear — and that is the program being right rather than the harness being
+                // broken. Widening the vocabulary moved the random stream and landed one such
+                // program on a `Scan` over 4 lanes in `Float`, which failed this as though the
+                // comparison could not notice anything. The condition belongs in the search.
+                let Some((program, spirv, input, expected)) = (7_u64..64).find_map(|seed| {
                     let mut program = fuzz::generate(
                         &mut fuzz::Rng::new(seed),
                         domain,
@@ -621,24 +628,26 @@ fn the_fuzzer_notices_when_a_scan_is_wrong() {
                     );
                     program.finish = finish;
                     program.lanes = lanes;
-                    program.build().ok().map(|spirv| (program, spirv))
+                    let spirv = program.build().ok()?;
+
+                    let input = corpus(domain, program.input_len());
+                    let mut wrong = input.clone();
+                    *wrong.first_mut()? = domain.encode(200);
+
+                    let seen = fuzz::reference(&program, &input);
+                    let changed = fuzz::reference(&program, &wrong);
+                    (seen.values != changed.values).then_some((program, spirv, input, changed))
                 }) else {
                     panic!(
                         "no seed in 7..64 gave a {finish:?} over {lanes} lanes in {domain:?} that \
-                         builds, so this mapping is not being checked at all"
+                         builds and separates a changed element, so this mapping is not being \
+                         checked at all"
                     );
                 };
-
-                let input = corpus(domain, program.input_len());
-                let mut wrong = input.clone();
-                if let Some(first) = wrong.first_mut() {
-                    *first = domain.encode(200);
-                }
 
                 let actual = gpu
                     .run_u32(&spirv, &input, program.workgroups())
                     .expect("ran");
-                let expected = fuzz::reference(&program, &wrong);
 
                 assert_ne!(
                     expected.values, actual,

@@ -81,6 +81,29 @@
 //! [`ProgramError::ShiftTooFar`] refuses one rather than comparing a device's arbitrary answer
 //! against a host's.
 //!
+//! **And three more the same day, which turned the gate into a mechanism.** `Op::Absolute` reaches
+//! `Lanes::abs`, gated on `Signed` — **five** domains, neither the six an `Integer` bound reaches
+//! nor the two a float-only operation does. `Op::FusedMulAdd` reaches `Lanes::fma`, which takes
+//! `Vector<F32, _>` concretely and so is available in exactly **one**. Six, five and one in the
+//! same trait is the whole argument that the gate belongs on the element type: one more bound would
+//! otherwise have been one more copy of the width ladder.
+//!
+//! `Op::AddIfAllAbove` needed no gate at all. It is the third vote — `Lanes::all_uniform`, a
+//! different opcode from `any_uniform` — and two of the three were generated while it had unit
+//! tests and nothing else, which is the asymmetry `Op::ShiftDown` had.
+//!
+//! **Two of the three arrived with an edge the corpus had never been able to reach.** A magnitude
+//! has no answer at a two's-complement minimum, and until the bit shifts existed no signed value
+//! here was large enough to be one; a left shift of 31 lands on it exactly. So the reference
+//! *refuses* such a round rather than asserting what every device happens to do — the answer
+//! [`Domain::exact_limit`] gives for a half that leaves its range, and the opposite of the mistake
+//! a test once made about the sign of a sum of negative zeros.
+//!
+//! And the fused multiply-add is fuzzable only because of what this corpus is. `Lanes::fma`'s own
+//! doc comment says a fused operation is *"never bit-identical"* to a separate multiply and add,
+//! which is true in general and not here: every float this generator draws is a small integer, both
+//! spellings are exact, and the pair can be held to agreeing.
+//!
 //! **And the two operations the API audit added, since later on 2026-08-14.** `Op::SelectEqual`
 //! reaches `Lanes::equal` — the elementwise comparison this crate had gone a month without — and
 //! `Op::AddIfAllEqual` reaches the vote about a *value*, the second uniform branch here. Both

@@ -21,75 +21,151 @@
 //! single — a second copy of it, one for integers and one for floats, is the relationship-decided-
 //! twice shape `notes/FINDINGS.md` catalogues more often than any other.
 
-use super::{BitShift, Domain, Op, ProgramError};
-use simdr::lanes::{Element, F16, F32, I8, I16, I32, LaneError, Lanes, U8, U16, U32, Vector};
+use super::{BitShift, Domain, Missing, Op, ProgramError};
+use simdr::lanes::{
+    Element, F16, F32, I8, I16, I32, Integer, LaneError, Lanes, Signed, U8, U16, U32, Vector,
+};
 
 /// What an element type can be asked to emit.
 ///
-/// One method, because one bound differs. A blanket `impl<T: Integer> Emit for T` beside an
-/// `impl Emit for F32` is what this wants to be, and Rust will not take it: the compiler cannot
-/// know `F32` is not an `Integer`, so the two conflict. Hence the two macros below.
+/// **Three methods, three memberships, and the default is a refusal.** The bit shifts reach six of
+/// the eight domains, the magnitude five, and the fused multiply-add exactly one — which is the
+/// whole argument for putting the gate on the element type rather than on the step. A trait whose
+/// default is *no* also means a ninth element type refuses everything until somebody writes the
+/// override, which is the direction `noha gate`'s fail-closed check exists to keep things pointing.
+///
+/// The alternative Rust will not take is `impl<T: Integer> Emit for T` beside `impl Emit for F32`:
+/// the compiler cannot know `F32` is not an `Integer`, so the impls conflict. Hence the table
+/// below, which has the merit of being readable as a table.
 pub trait Emit: Element {
-    /// Move each element's bits, or refuse because this element has no such instruction.
+    /// Move each element's bits. `Lanes` gates the three shifts on `Integer`.
     ///
     /// # Errors
     ///
-    /// [`ProgramError::NotInThisDomain`] for a float element, and whatever the lane API refuses.
+    /// [`ProgramError::NotInThisDomain`] unless this element overrides it.
     fn bit_shift<const LANES: u32>(
         lanes: &mut Lanes<'_>,
         kind: BitShift,
         value: Vector<Self, LANES>,
         by: Vector<U32, LANES>,
-    ) -> Result<Vector<Self, LANES>, ProgramError>;
+    ) -> Result<Vector<Self, LANES>, ProgramError> {
+        let _ = (lanes, value, by);
+        Err(ProgramError::NotInThisDomain {
+            missing: Missing::BitShift(kind),
+            element: <Self as Element>::NAME,
+        })
+    }
+
+    /// Each element's magnitude. `Lanes::abs` is gated on `Signed`.
+    ///
+    /// # Errors
+    ///
+    /// [`ProgramError::NotInThisDomain`] unless this element overrides it.
+    fn absolute<const LANES: u32>(
+        lanes: &mut Lanes<'_>,
+        value: Vector<Self, LANES>,
+    ) -> Result<Vector<Self, LANES>, ProgramError> {
+        let _ = (lanes, value);
+        Err(ProgramError::NotInThisDomain {
+            missing: Missing::Absolute,
+            element: <Self as Element>::NAME,
+        })
+    }
+
+    /// One rounding for a multiply and an add. `Lanes::fma` takes `F32` concretely.
+    ///
+    /// # Errors
+    ///
+    /// [`ProgramError::NotInThisDomain`] unless this element overrides it.
+    fn fused_mul_add<const LANES: u32>(
+        lanes: &mut Lanes<'_>,
+        value: Vector<Self, LANES>,
+        by: Vector<Self, LANES>,
+        plus: Vector<Self, LANES>,
+    ) -> Result<Vector<Self, LANES>, ProgramError> {
+        let _ = (lanes, value, by, plus);
+        Err(ProgramError::NotInThisDomain {
+            missing: Missing::FusedMulAdd,
+            element: <Self as Element>::NAME,
+        })
+    }
 }
 
-/// The six integer elements, each emitting the shift the lane API names.
+/// The shift the lane API names, for an element that has one.
 ///
-/// The match is exhaustive over [`BitShift`], so a fourth shift is a compile error here rather than
-/// a silent fall-through — which is what a `_` arm would have bought instead.
-macro_rules! shifts_for {
-    ($($element:ty),+ $(,)?) => {
-        $(impl Emit for $element {
-            fn bit_shift<const LANES: u32>(
-                lanes: &mut Lanes<'_>,
-                kind: BitShift,
-                value: Vector<Self, LANES>,
-                by: Vector<U32, LANES>,
-            ) -> Result<Vector<Self, LANES>, ProgramError> {
-                Ok(match kind {
-                    BitShift::Left => lanes.shift_left(value, by)?,
-                    BitShift::RightLogical => lanes.shift_right_logical(value, by)?,
-                    BitShift::RightArithmetic => lanes.shift_right_arithmetic(value, by)?,
-                })
-            }
-        })+
+/// A free function rather than a body repeated in six impls, and generic over the bound that gates
+/// it — so this is the one place the `Integer` requirement is written down on this side.
+fn shifted<T: Integer, const LANES: u32>(
+    lanes: &mut Lanes<'_>,
+    kind: BitShift,
+    value: Vector<T, LANES>,
+    by: Vector<U32, LANES>,
+) -> Result<Vector<T, LANES>, ProgramError> {
+    Ok(match kind {
+        BitShift::Left => lanes.shift_left(value, by)?,
+        BitShift::RightLogical => lanes.shift_right_logical(value, by)?,
+        BitShift::RightArithmetic => lanes.shift_right_arithmetic(value, by)?,
+    })
+}
+
+/// The magnitude, for an element that has one.
+fn magnitude<T: Signed, const LANES: u32>(
+    lanes: &mut Lanes<'_>,
+    value: Vector<T, LANES>,
+) -> Result<Vector<T, LANES>, ProgramError> {
+    Ok(lanes.abs(value)?)
+}
+
+/// One impl of [`Emit`], listing what this element can do and inheriting a refusal for the rest.
+///
+/// **The invocations below are the membership table**, and are meant to be read as one: eight lines
+/// with the elements' names down the left and their capabilities across. A domain gaining an
+/// operation is a word on a line here, and losing one is a word deleted — which is the shape a
+/// table should have and a match on eight arms per operation would not.
+macro_rules! emit_for {
+    ($element:ty $(, $capability:ident)* $(,)?) => {
+        impl Emit for $element {
+            $(emit_for!(@can $capability);)*
+        }
+    };
+    (@can shifts) => {
+        fn bit_shift<const LANES: u32>(
+            lanes: &mut Lanes<'_>,
+            kind: BitShift,
+            value: Vector<Self, LANES>,
+            by: Vector<U32, LANES>,
+        ) -> Result<Vector<Self, LANES>, ProgramError> {
+            shifted(lanes, kind, value, by)
+        }
+    };
+    (@can magnitude) => {
+        fn absolute<const LANES: u32>(
+            lanes: &mut Lanes<'_>,
+            value: Vector<Self, LANES>,
+        ) -> Result<Vector<Self, LANES>, ProgramError> {
+            magnitude(lanes, value)
+        }
+    };
+    (@can fused) => {
+        fn fused_mul_add<const LANES: u32>(
+            lanes: &mut Lanes<'_>,
+            value: Vector<Self, LANES>,
+            by: Vector<Self, LANES>,
+            plus: Vector<Self, LANES>,
+        ) -> Result<Vector<Self, LANES>, ProgramError> {
+            Ok(lanes.fma(value, by, plus)?)
+        }
     };
 }
 
-shifts_for!(U32, I32, U8, I8, U16, I16);
-
-/// The two float elements, which have no bit shift at all.
-///
-/// SPIR-V's shifts take integer operands and give an integer result. That is not a leniency a
-/// driver might wave through and not a rounding question — it is a module the validator rejects.
-/// So the answer is a refusal by name rather than a bitcast, which would have worked and meant
-/// something else.
-macro_rules! no_shifts_for {
-    ($($element:ty => $name:literal),+ $(,)?) => {
-        $(impl Emit for $element {
-            fn bit_shift<const LANES: u32>(
-                _lanes: &mut Lanes<'_>,
-                kind: BitShift,
-                _value: Vector<Self, LANES>,
-                _by: Vector<U32, LANES>,
-            ) -> Result<Vector<Self, LANES>, ProgramError> {
-                Err(ProgramError::NotInThisDomain { kind, element: $name })
-            }
-        })+
-    };
-}
-
-no_shifts_for!(F32 => "f32", F16 => "f16");
+emit_for!(U32, shifts);
+emit_for!(I32, shifts, magnitude);
+emit_for!(U8, shifts);
+emit_for!(I8, shifts, magnitude);
+emit_for!(U16, shifts);
+emit_for!(I16, shifts, magnitude);
+emit_for!(F32, magnitude, fused);
+emit_for!(F16, magnitude);
 
 /// Emit one step.
 pub(super) fn apply<T: Emit, const LANES: u32>(
@@ -133,6 +209,39 @@ pub(super) fn apply<T: Emit, const LANES: u32>(
             // per-lane one would be expressible without a second entry point.
             let amount = lanes.splat_bits::<U32, LANES>(by)?;
             T::bit_shift(lanes, kind, value, amount)?
+        }
+        Op::Absolute => T::absolute(lanes, value)?,
+        Op::FusedMulAdd { by, plus } => {
+            let factor = lanes.splat_bits::<T, LANES>(domain.encode(by))?;
+            let addend = lanes.splat_bits::<T, LANES>(domain.encode(plus))?;
+            T::fused_mul_add(lanes, value, factor, addend)?
+        }
+        Op::AddIfAllAbove {
+            when_all_above,
+            add,
+        } => {
+            // `all_uniform` rather than `any_uniform`, and they are different opcodes —
+            // `OpGroupNonUniformAll` against `OpGroupNonUniformAny`. Everything else about this arm
+            // is its neighbour's, deliberately: one vote, one select, and the only difference
+            // between the two programs is the word the hardware is asked.
+            let limit = lanes.splat_bits::<T, LANES>(domain.encode(when_all_above))?;
+            let above = lanes.greater_than(value, limit)?;
+            let vote = lanes.all_uniform(above)?;
+
+            let increment = lanes.splat_bits::<T, LANES>(domain.encode(add))?;
+            let raised = lanes.add(value, increment)?;
+
+            let element = lanes.type_of::<T>()?;
+            let mut chosen = Vec::with_capacity(value.strip_count());
+            for (&taken, &left) in raised.strips().iter().zip(value.strips()) {
+                chosen.push(
+                    lanes
+                        .module()
+                        .select(element, vote.id(), taken, left)
+                        .map_err(LaneError::Build)?,
+                );
+            }
+            lanes.from_strips(&chosen)?
         }
         Op::ClampBelow(floor) => {
             let limit = lanes.splat_bits::<T, LANES>(domain.encode(floor))?;

@@ -595,13 +595,19 @@ fn quoted(text: &str) -> Vec<(usize, String)> {
 /// **Comments as well as markdown**, because the drift this catches has landed in both. A doc
 /// comment naming a file that moved is exactly as wrong as a README naming one, and rustdoc checks
 /// only the links — an intra-doc link is verified and a backtick is decoration.
+///
+/// **And `proeftuin/` too, where the counters stop.** The two are opposite obligations and it is
+/// worth being clear about why. A *count* the workspace states must not depend on the sandbox, or
+/// deleting the sandbox would fail a test in the crate it may not touch. A *reference* is checked
+/// where it is written: the sandbox's prose names this repository's files and types constantly —
+/// `kernels::dot`, `src/lanes/narrow.rs`, `decisions/DR-0003` — and those are exactly the names
+/// that rot when the engine moves under it. Deleting the directory takes its sentences with it and
+/// leaves nothing owed, which is the test: an obligation that survives the deletion is a
+/// dependency, and an obligation that vanishes with it is not.
 fn claims() -> Vec<(String, usize, String)> {
     let mut found = Vec::new();
 
     walk(&root(), &mut |path, relative| {
-        if !in_the_workspace(relative) {
-            return;
-        }
         let markdown = path.extension().is_some_and(|extension| extension == "md");
         let rust = path.extension().is_some_and(|extension| extension == "rs");
         if !markdown && !rust {
@@ -768,10 +774,12 @@ fn declared() -> (BTreeSet<String>, BTreeSet<String>) {
     let mut types = BTreeSet::new();
     let mut names = BTreeSet::new();
 
-    walk(&root(), &mut |path, relative| {
-        if !path.extension().is_some_and(|extension| extension == "rs")
-            || !in_the_workspace(relative)
-        {
+    // The sandbox is read here as well as in `claims`, and for the matching reason: its prose names
+    // its own `Outcome` and `Checked` as freely as it names this crate's, and a name the check
+    // cannot see reads to it exactly like a name that does not exist. Widening what *counts as
+    // declared* can only ever excuse more, so a deleted sandbox cannot fail anything by leaving.
+    walk(&root(), &mut |path, _| {
+        if !path.extension().is_some_and(|extension| extension == "rs") {
             return;
         }
         let Ok(text) = fs::read_to_string(path) else {

@@ -189,6 +189,80 @@ pub enum Op {
         /// How far, always below the element's own width — see [`ProgramError::ShiftTooFar`].
         by: u32,
     },
+    /// Each element's **magnitude**, through GLSL.std.450's `SAbs` or `FAbs`.
+    ///
+    /// The second gate on [`Emit`], and a different one: `Lanes::abs` takes `T: Signed`, which is
+    /// five of the eight domains — neither the six an `Integer` bound reaches nor the two a
+    /// float-only operation does. That is what makes the trait a mechanism rather than an
+    /// arrangement for one operation.
+    ///
+    /// **The value it has no answer for is now reachable.** A two's-complement minimum negates to
+    /// itself, and before [`Op::BitShift`] existed every signed value here was too small to be one.
+    /// A left shift of 31 lands on it exactly, so the reference refuses a round whose magnitude
+    /// meets that value instead of asserting an answer GLSL.std.450 does not promise — the same
+    /// answer `Domain::exact_limit` gives for a half that leaves its range.
+    Absolute,
+    /// Multiply by one constant and add another, **fused** — GLSL.std.450's `Fma`.
+    ///
+    /// The third gate, and the narrowest: `Lanes::fma` takes `Vector<F32, _>` concretely, so of the
+    /// eight domains exactly **one** can be asked. Integer-only, five-of-eight, and one-of-eight in
+    /// the same trait is the whole argument that the gate belongs on the element type.
+    ///
+    /// **Its own doc comment argues against fuzzing it**, and is right in general: a fused multiply
+    /// and add rounds once where a separate pair rounds twice, so *"a kernel that must agree with a
+    /// CPU reference exactly has to make the same choice on both sides"*. This corpus is the case
+    /// that sentence does not cover. Every float here is a small integer, both roundings are
+    /// exact, and the two spellings give the same bits — so the pair can be held to agreeing, which
+    /// is the same trade [`Op::RepeatAdd`] and [`Op::RolledAdd`] are here for.
+    FusedMulAdd {
+        /// What every element is multiplied by.
+        by: u32,
+        /// What is added to the product.
+        plus: u32,
+    },
+    /// Add a constant, but only where **every** element of the subgroup exceeds a threshold.
+    ///
+    /// The third vote, and two of the three were generated. [`Op::AddIfAnyAbove`] asks whether a
+    /// comparison held somewhere and [`Op::AddIfAllEqual`] asks whether the lanes agree; this asks
+    /// whether it held *everywhere*, which is `Lanes::all_uniform` — a different opcode from
+    /// `any_uniform`, with unit tests and, until now, no generated program.
+    ///
+    /// **The threshold is drawn low on purpose.** `AddIfAnyAbove` straddles the corpus so both arms
+    /// are reached; an `all` vote over a few hundred distinct elements almost never passes at the
+    /// same threshold, and a step that never fires is an identity — which agrees with every
+    /// reference including a wrong one.
+    AddIfAllAbove {
+        /// The threshold every element must exceed.
+        when_all_above: u32,
+        /// What to add where the vote passes.
+        add: u32,
+    },
+}
+
+/// Which operation an element type turned out not to have.
+///
+/// Three gates, three memberships: six domains, five, and one. Naming them apart rather than
+/// reporting "unsupported" keeps the refusal as informative as the lane API's own — the difference
+/// between *this width has no mapping* and *this type has no such instruction* was worth a type
+/// when there was one of these, and it is worth more now there are three.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Missing {
+    /// One of the three bit shifts. `Lanes` gates these on `Integer`.
+    BitShift(BitShift),
+    /// `Lanes::abs`, gated on `Signed`.
+    Absolute,
+    /// `Lanes::fma`, which takes `F32` and nothing else.
+    FusedMulAdd,
+}
+
+impl fmt::Display for Missing {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BitShift(kind) => write!(formatter, "a {kind:?} bit shift"),
+            Self::Absolute => formatter.write_str("an absolute value"),
+            Self::FusedMulAdd => formatter.write_str("a fused multiply-add"),
+        }
+    }
 }
 
 /// How a program's final reduction combines the lanes.
@@ -248,7 +322,7 @@ pub enum ProgramError {
     /// representable-but-wrong state is to name it rather than to compute something.
     NotInThisDomain {
         /// What was being emitted.
-        kind: BitShift,
+        missing: Missing,
         /// The element type that has no instruction for it.
         element: &'static str,
     },
@@ -277,8 +351,8 @@ impl fmt::Display for ProgramError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Lanes(error) => write!(formatter, "{error}"),
-            Self::NotInThisDomain { kind, element } => {
-                write!(formatter, "{element} has no {kind:?} bit shift")
+            Self::NotInThisDomain { missing, element } => {
+                write!(formatter, "{element} has no {missing}")
             }
             Self::ShiftTooFar { by, bits } => {
                 write!(

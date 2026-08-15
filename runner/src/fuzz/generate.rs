@@ -8,7 +8,7 @@ mod vocabulary;
 #[cfg(test)]
 mod coverage;
 
-use self::vocabulary::{CLUSTERED, INTEGER_ONLY, Kind, STRIPPED, WHOLE, fill};
+use self::vocabulary::{CLUSTERED, Kind, STRIPPED, WHOLE, by_element, fill};
 use super::domain::Domain;
 use super::program::{Finish, Program};
 use simdr::lanes::{LaneError, Mapping};
@@ -83,11 +83,11 @@ pub fn generate(rng: &mut Rng, domain: Domain, subgroup: u32, workgroup: u32) ->
         Ok(Mapping::Strips { .. }) | Err(_) => STRIPPED,
     };
     // **A second axis, and it is not the mapping's.** The pools above say which lanes a vector may
-    // read. This says which instructions its *element type* has: `Lanes`' three bit shifts take
-    // `T: Integer`, and a float domain has no such instruction at all — not a rounding question but
-    // a module `spirv-val` rejects. A shift crosses no lane, so it is legal under every mapping,
-    // which is why it is one list beside the pool rather than three entries inside them.
-    let integer_only: &[Kind] = if domain.is_float() { &[] } else { INTEGER_ONLY };
+    // read. This says which instructions its *element type* has: the bit shifts take `T: Integer`,
+    // the magnitude `T: Signed`, and the fused multiply-add an `F32` and nothing else. None of the
+    // three crosses a lane, so all of them are legal under every mapping — which is why they are a
+    // list beside the pool rather than entries inside all three of them.
+    let by_type = by_element(domain);
     let mut steps = Vec::with_capacity(steps_wanted);
 
     // Loop trip counts stay small. A rolled loop of four is the same shape as one of four hundred
@@ -97,10 +97,10 @@ pub fn generate(rng: &mut Rng, domain: Domain, subgroup: u32, workgroup: u32) ->
         // Drawn from the two lists as one, so a shift is as likely as any other step rather than
         // being a coin flip on top of the draw — which would have made it a quarter of every
         // integer program and a fifth of the vocabulary's exposure for everything else.
-        let choices = pool.len() + integer_only.len();
+        let choices = pool.len() + by_type.len();
         let kind = pool
             .iter()
-            .chain(integer_only)
+            .chain(by_type)
             .nth(rng.below(choices as u64) as usize)
             .copied()
             .unwrap_or(Kind::AddConstant);

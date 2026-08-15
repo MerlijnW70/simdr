@@ -3594,3 +3594,91 @@ it was 17. All eight domains agree over 256 seeds each on the RTX 4080, the inte
 lavapipe at 4, 8 and 16 — 232 generated modules through `spirv-val` at every width first.
 
 The three operations had, before this, a `compile_fail` doctest and one hand-written test apiece.
+
+## Three gates in one trait, and the edge two of them arrived with — 2026-08-16
+
+`Emit` was written for the bit shifts and read like an arrangement for one operation. Three more
+went through it the next day, and what came out is the argument for the shape.
+
+### Six, five, and one
+
+| operation | what `Lanes` requires | domains |
+| --- | --- | --- |
+| the three bit shifts | `T: Integer` | **6** |
+| `abs` | `T: Signed` | **5** |
+| `fma` | `Vector<F32, _>`, concretely | **1** |
+
+Three memberships that **do not nest**. Any of them alone could have been a special case; together
+they are a mechanism, and the alternative — a width ladder per bound — would now be three copies of
+nine const-generic arms.
+
+The trait's default is a **refusal**, so an element type that gains no override refuses everything.
+That is the direction `noha gate`'s fail-closed check exists to keep things pointing, and it made
+the eight impls a table: `emit_for!(I32, shifts, magnitude)` on one line per element, with the
+capabilities across.
+
+`Lanes::all_uniform` needed no gate — it is the third vote, available everywhere the other two are,
+and it had unit tests and no generated program. The same asymmetry `Op::ShiftDown` had.
+
+### The magnitude has one input with no answer, and the shifts made it reachable
+
+A two's-complement minimum has no positive counterpart at its own width: `-128` as an `i8` negates
+to `-128`. Every device does that and **GLSL.std.450 does not promise it**.
+
+Until this week the question could not arise — every signed value the generator drew was small. A
+left shift of 7 in a byte domain lands on `0x80` exactly, and roughly half the draws of that
+distance do. So the two operations interact, and the interaction is a value the reference is not
+entitled to predict.
+
+The answer is the one `Domain::exact_limit` already gives for a half that leaves its range: **refuse
+the round rather than compare it**. `Outcome::Unrepresentable`, counted and printed. The first
+device sweep reported exactly one such round in `Byte` and one in `Short` — the mechanism firing on
+the domains where the minimum is closest.
+
+This is the shape a test in this repository once got wrong in the other direction: it asserted that
+a sum of sixty-four negative zeros keeps its sign, which IEEE 754 says and Vulkan does not require.
+Two GPUs and a local lavapipe agreed with it; Ubuntu's Mesa folded it to `+0.0`. Asserting what the
+hardware happens to do is how a specification's silence becomes a promise nobody made.
+
+### The fused multiply-add is fuzzable for a reason its own doc comment denies
+
+`Lanes::fma` says: *"never bit-identical [to a multiply and an add], so a kernel that must agree
+with a CPU reference exactly has to make the same choice on both sides. That is why the fuzzer's
+vocabulary has `min`, `max` and `clamp` in it and not this."*
+
+True in general, and **not true of this corpus**. Every float here is a small integer below the
+exact limit, where a product and a sum are both exact — so the fused and unfused spellings give the
+same bits and the pair can be held to agreeing. That is the same trade `RepeatAdd` and `RolledAdd`
+are here for: one answer, two instruction streams, and they must match.
+
+The doc comment is a piece of inherited reasoning that outlived its scope, which is the class this
+file catalogues under *a reason that outlived its conclusion*. It now says which case it means.
+
+### The `all` vote needed its operand argued, not drawn
+
+`AddIfAnyAbove` straddles the corpus so both arms are reached. An `all` vote at the same threshold
+almost never passes — the corpus runs from a magnitude of 1 upwards, so `0` is the only threshold
+the whole subgroup clears outright. Three values, and both arms appear across a sweep.
+
+**In the signed domains the passing arm arrives through another step.** Every fourth element is
+negative and no threshold clears them, so the vote only passes in a program that took a magnitude
+first. Two operations that only work together, which is a coverage argument rather than a coincidence
+— and the reason the coverage test asserts the *threshold's* range rather than the vote's outcome.
+
+### And a meta-test that had been passing by luck
+
+`the_fuzzer_notices_when_a_scan_is_wrong` perturbs one input element and asserts the reference
+notices. Widening the vocabulary moved the random stream, and the seed it settled on for `Scan` over
+4 lanes in `Float` was a program that maps both inputs to the same answer — a clamp does it, and so
+does an `all` vote both inputs clear.
+
+That is the *program* being right and the check being wrong: the search picked a program that
+builds, and never asked whether it could tell the two inputs apart. The condition belongs in the
+search, and does now — with the same insistence that a seed exists, because skipping the combination
+quietly is the failure that whole file is about.
+
+### What it cost
+
+Vocabulary 20 → 23. Six more tests, 176 mutants at 100% over the seven changed files, 232 generated
+modules through `spirv-val`, and all eight domains agreeing over 256 seeds each on the RTX 4080, the
+integrated Radeon and lavapipe at 4, 8 and 16.

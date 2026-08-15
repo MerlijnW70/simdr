@@ -89,6 +89,9 @@ fn the_generator_reaches_every_operation_it_knows() {
                     kind: BitShift::RightArithmetic,
                     ..
                 } => "bit-right-arithmetic",
+                Op::Absolute => "abs",
+                Op::FusedMulAdd { .. } => "fma",
+                Op::AddIfAllAbove { .. } => "all-above",
             };
             if !seen.contains(&name) {
                 seen.push(name);
@@ -102,6 +105,7 @@ fn the_generator_reaches_every_operation_it_knows() {
         vec![
             "add",
             "agree",
+            "all-above",
             "bit-left",
             "bit-right-arithmetic",
             "bit-right-logical",
@@ -122,6 +126,95 @@ fn the_generator_reaches_every_operation_it_knows() {
             "shift-down",
         ],
         "the generator never produced some of its own vocabulary in 512 seeds"
+    );
+    // **`abs` and `fma` are absent from that list on purpose.** This sweep is over
+    // `Domain::Unsigned`, which has neither — a magnitude needs `Signed` and a fused multiply-add
+    // needs `F32`. The list is what *this* domain can draw, and the test below is what checks the
+    // ones it cannot.
+}
+
+/// Every element-gated operation is reached in a domain that has it.
+///
+/// The companion to the sweep above, which is over one domain and would go on passing if the second
+/// axis stopped offering anything at all. Each of these is drawn only where its element type allows
+/// it, so each needs a domain of its own to be seen in — and a gate that silently narrowed to
+/// nothing looks exactly like a vocabulary that was never widened.
+#[test]
+fn every_element_gated_operation_is_reached_where_it_exists() {
+    let reaches = |domain: Domain, wanted: fn(&Op) -> bool| {
+        (0..512_u64)
+            .flat_map(|seed| generate(&mut Rng::new(seed), domain, 32, 64).steps)
+            .any(|step| wanted(&step))
+    };
+
+    assert!(
+        reaches(Domain::Signed, |step| matches!(step, Op::Absolute)),
+        "no signed program in 512 seeds took a magnitude"
+    );
+    assert!(
+        reaches(Domain::Half, |step| matches!(step, Op::Absolute)),
+        "no half program in 512 seeds took a magnitude, and `f16` is a `Signed` element"
+    );
+    assert!(
+        reaches(Domain::Float, |step| matches!(step, Op::FusedMulAdd { .. })),
+        "no float program in 512 seeds fused a multiply and an add"
+    );
+
+    // And the negatives, which are the half that fails quietly. An unsigned element has no
+    // magnitude and every domain but one has no fused multiply-add; offering either builds a module
+    // `spirv-val` rejects, and the sweep would report it as a refusal rather than as a mistake.
+    for domain in [
+        Domain::Unsigned,
+        Domain::UnsignedByte,
+        Domain::UnsignedShort,
+    ] {
+        assert!(
+            !reaches(domain, |step| matches!(step, Op::Absolute)),
+            "{domain:?} was offered a magnitude and `Lanes::abs` takes `T: Signed`"
+        );
+    }
+    for domain in ALL_DOMAINS {
+        if matches!(domain, Domain::Float) {
+            continue;
+        }
+        assert!(
+            !reaches(domain, |step| matches!(step, Op::FusedMulAdd { .. })),
+            "{domain:?} was offered a fused multiply-add and `Lanes::fma` takes `F32`"
+        );
+    }
+}
+
+/// The `all` vote fires, and does not fire always.
+///
+/// **The operand is the whole test.** `AddIfAnyAbove` draws its threshold straddling the corpus so
+/// both arms are reached; an `all` vote over a few hundred distinct elements passes far less often
+/// at the same threshold, so this one draws from the bottom of the range. A step that never fires is
+/// an identity, and an identity agrees with every reference including a wrong one — while a step
+/// that *always* fires is an unconditional add, which is `AddConstant` with extra instructions.
+#[test]
+fn the_all_vote_is_drawn_low_enough_to_pass_and_high_enough_to_fail() {
+    let mut lowest = u32::MAX;
+    let mut highest = 0;
+    let mut seen = 0;
+
+    for seed in 0..512_u64 {
+        for step in generate(&mut Rng::new(seed), Domain::Unsigned, 32, 64).steps {
+            if let Op::AddIfAllAbove { when_all_above, .. } = step {
+                lowest = lowest.min(when_all_above);
+                highest = highest.max(when_all_above);
+                seen += 1;
+            }
+        }
+    }
+
+    assert!(seen > 0, "the `all` vote was never generated at all");
+    assert_eq!(
+        lowest, 0,
+        "no threshold was drawn that every element of the corpus clears, so the vote never passes          and the step is an identity"
+    );
+    assert!(
+        highest > 0,
+        "every threshold drawn was zero, so the vote always passes and the step is `AddConstant`          with a vote in front of it"
     );
 }
 

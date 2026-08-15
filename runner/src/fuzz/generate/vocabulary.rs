@@ -8,6 +8,11 @@ use super::Rng;
 use crate::fuzz::domain::{BitShift, Domain};
 use crate::fuzz::program::Op;
 
+#[cfg(test)]
+use crate::fuzz::domain::ALL_DOMAINS;
+#[cfg(test)]
+use std::collections::BTreeSet;
+
 /// Which operation to generate, before its operands are drawn.
 ///
 /// A named list rather than integers and `match` guards. The guards were the obvious spelling and
@@ -17,7 +22,7 @@ use crate::fuzz::program::Op;
 /// a test of an arbitrary internal mapping proves nothing and makes refactoring painful.
 ///
 /// A table has no arithmetic in it to get wrong.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum Kind {
     AddConstant,
     MulConstant,
@@ -39,6 +44,9 @@ pub(super) enum Kind {
     ShiftLeft,
     ShiftRightLogical,
     ShiftRightArithmetic,
+    Absolute,
+    FusedMulAdd,
+    AddIfAllAbove,
 }
 
 /// What a vector **narrower** than the subgroup may do.
@@ -80,6 +88,7 @@ pub(super) const WHOLE: &[Kind] = &[
     Kind::RotateUp,
     Kind::ButterflyAdd,
     Kind::AddIfAnyAbove,
+    Kind::AddIfAllAbove,
     Kind::AddIfAllEqual,
     Kind::ShiftUp,
     Kind::ShiftDown,
@@ -105,26 +114,51 @@ pub(super) const STRIPPED: &[Kind] = &[
     Kind::SelectEqual,
     Kind::ButterflyAdd,
     Kind::AddIfAnyAbove,
+    Kind::AddIfAllAbove,
     Kind::AddIfAllEqual,
     Kind::ShiftUp,
     Kind::ShiftDown,
     Kind::BroadcastLane,
 ];
 
-/// What only an **integer** domain may do, at any mapping.
+/// What a domain may do that its *element type* decides, rather than its mapping.
 ///
-/// A fourth list beside the three above rather than three more entries inside them, and the reason
-/// is the shape of the constraint. Those three are about the *mapping* — which lanes a vector may
-/// read — and a bit shift reads no lane but its own, so all three mappings would hold identical
-/// copies of it. What gates these is the *element type*: `Lanes`' shifts take `T: Integer`, and
-/// `F32` is not one.
+/// A second axis beside the three pools above, and it needs its own lists because it is a different
+/// question. Those three ask which lanes a vector may read; a bit shift, a magnitude and a fused
+/// multiply-add read no lane but their own, so all three mappings would hold identical copies. What
+/// gates these is the bound `Lanes` puts on the element: `Integer` for the shifts — six domains —
+/// `Signed` for the magnitude — five — and `F32` concretely for the fused multiply-add, which is
+/// **one**.
 ///
-/// Two axes, two lists. Combining them would have been six.
-pub(super) const INTEGER_ONLY: &[Kind] = &[
-    Kind::ShiftLeft,
-    Kind::ShiftRightLogical,
-    Kind::ShiftRightArithmetic,
-];
+/// Three memberships that do not nest, so this is four slices and a match rather than a set
+/// operation. It is meant to be read as a table, which is the argument [`Kind`] itself is built on:
+/// a table has no arithmetic in it to get wrong.
+///
+/// The table is not the authority — `Emit` is, and a domain listed here that cannot emit what it is
+/// offered would produce refusals instead of rounds. `the_element_pool_agrees_with_what_builds`
+/// holds the two together by building one program per pairing.
+pub(super) const fn by_element(domain: Domain) -> &'static [Kind] {
+    const SHIFTS: &[Kind] = &[
+        Kind::ShiftLeft,
+        Kind::ShiftRightLogical,
+        Kind::ShiftRightArithmetic,
+    ];
+    const SHIFTS_AND_MAGNITUDE: &[Kind] = &[
+        Kind::ShiftLeft,
+        Kind::ShiftRightLogical,
+        Kind::ShiftRightArithmetic,
+        Kind::Absolute,
+    ];
+    const SINGLE: &[Kind] = &[Kind::Absolute, Kind::FusedMulAdd];
+    const HALF: &[Kind] = &[Kind::Absolute];
+
+    match domain {
+        Domain::Unsigned | Domain::UnsignedByte | Domain::UnsignedShort => SHIFTS,
+        Domain::Signed | Domain::Byte | Domain::Short => SHIFTS_AND_MAGNITUDE,
+        Domain::Float => SINGLE,
+        Domain::Half => HALF,
+    }
+}
 
 /// How far to shift, in a domain of `bits`.
 ///
@@ -237,6 +271,31 @@ pub(super) fn fill(rng: &mut Rng, domain: Domain, subgroup: u32, lanes: u32, kin
             kind: BitShift::RightArithmetic,
             by: shift_by(rng, domain),
         },
+        // No operand at all, and the only step here with none. Its edge is a *value* rather than an
+        // operand — a two's-complement minimum has no magnitude at its own width — so there is
+        // nothing to draw around; `interpret` refuses the round instead.
+        Kind::Absolute => Op::Absolute,
+        // Small, and multiplicative rather than additive: a product of two draws from the whole
+        // range would leave the float domain's exact limit at once, and a round the reference
+        // refuses proves nothing about the instruction that caused it.
+        Kind::FusedMulAdd => Op::FusedMulAdd {
+            by: 1 + rng.below(3) as u32,
+            plus: rng.below(16) as u32,
+        },
+        // **Drawn low where `AddIfAnyAbove` straddles**, and the asymmetry is the whole operand.
+        // A threshold *some* element exceeds is easy to draw; one *every* element exceeds is not,
+        // because the corpus runs from a magnitude of 1 upwards — so `0` is the only threshold the
+        // whole subgroup clears outright, and anything above it is one that some element fails.
+        // Three values, and both arms are reached across a sweep.
+        //
+        // In the signed domains every fourth element is negative and no threshold clears them, so
+        // the passing arm arrives *through another step*: an `Op::Absolute` earlier in the program
+        // makes the vote reachable. Two operations that only work together are worth having for
+        // the same reason `RepeatAdd` and `RolledAdd` are worth having apart.
+        Kind::AddIfAllAbove => Op::AddIfAllAbove {
+            when_all_above: rng.below(3) as u32,
+            add: 1 + rng.below(8) as u32,
+        },
     }
 }
 
@@ -267,10 +326,13 @@ mod tests {
     /// list to keep true. What keeps *this* one honest is the test below — a `Kind` missing from it
     /// is a `Kind` in no pool, and a `Kind` in no pool is an operation the generator can never
     /// draw.
-    const EVERY_KIND: [Kind; 20] = [
+    const EVERY_KIND: [Kind; 23] = [
         Kind::ShiftLeft,
         Kind::ShiftRightLogical,
         Kind::ShiftRightArithmetic,
+        Kind::Absolute,
+        Kind::FusedMulAdd,
+        Kind::AddIfAllAbove,
         Kind::AddConstant,
         Kind::MulConstant,
         Kind::ClampBelow,
@@ -299,20 +361,26 @@ mod tests {
         // So the relationships are asserted rather than maintained by hand. `WHOLE` is the whole
         // vocabulary — a vector the subgroup's own width can do everything — and the other two are
         // it minus what their mapping refuses.
+        let by_type: BTreeSet<Kind> = ALL_DOMAINS
+            .iter()
+            .flat_map(|domain| by_element(*domain))
+            .copied()
+            .collect();
+
         for kind in EVERY_KIND {
             assert!(
-                WHOLE.contains(&kind) || INTEGER_ONLY.contains(&kind),
+                WHOLE.contains(&kind) || by_type.contains(&kind),
                 "{kind:?} is in no pool, so the generator can never draw it"
             );
         }
-        assert_eq!(WHOLE.len() + INTEGER_ONLY.len(), EVERY_KIND.len());
+        assert_eq!(WHOLE.len() + by_type.len(), EVERY_KIND.len());
 
         // **The two axes do not overlap, and that is the claim worth pinning.** A shift in `WHOLE`
         // would be drawn in the float domains, where `spirv-val` rejects the module it builds — and
         // the generator's own sweeps would report it as a refusal rather than as a mistake, because
         // a refusal by name is a legitimate answer here.
         for pool in [WHOLE, CLUSTERED, STRIPPED] {
-            for kind in INTEGER_ONLY {
+            for kind in &by_type {
                 assert!(
                     !pool.contains(kind),
                     "{kind:?} is gated by the element type and sits in a pool gated by the mapping"
@@ -358,6 +426,62 @@ mod tests {
         );
     }
     use super::distances;
+
+    /// The table above and the `Emit` impls are one claim, and here they meet.
+    ///
+    /// `by_element` is a hand-written list and `Emit` is the authority — a domain offered an
+    /// operation its element cannot emit produces `Outcome::Refused` instead of a round, which the
+    /// sweeps *count and print* rather than fail on. So the drift would be silent in the direction
+    /// that matters: a fuzzer generating refusals looks exactly like a fuzzer that keeps agreeing.
+    ///
+    /// So every pairing is built. Offered means it builds; not offered means it is refused **as a
+    /// missing instruction** rather than as a width — the two errors exist apart for this reason.
+    #[test]
+    fn the_element_pool_agrees_with_what_builds() {
+        use crate::fuzz::program::{Finish, Program, ProgramError};
+
+        const GATED: [Kind; 5] = [
+            Kind::ShiftLeft,
+            Kind::ShiftRightLogical,
+            Kind::ShiftRightArithmetic,
+            Kind::Absolute,
+            Kind::FusedMulAdd,
+        ];
+
+        for domain in ALL_DOMAINS {
+            let offered = by_element(domain);
+            for kind in GATED {
+                let mut rng = Rng::new(7);
+                let program = Program {
+                    domain,
+                    subgroup: 32,
+                    workgroup: 64,
+                    groups: 1,
+                    lanes: 32,
+                    steps: vec![fill(&mut rng, domain, 32, 32, kind)],
+                    finish: Finish::Sum,
+                };
+
+                let built = program.build();
+                assert_eq!(
+                    offered.contains(&kind),
+                    built.is_ok(),
+                    "{domain:?} and {kind:?} disagree: the table offers it {}, and `build` {}",
+                    offered.contains(&kind),
+                    match &built {
+                        Ok(_) => "accepted it".to_owned(),
+                        Err(why) => format!("said `{why}`"),
+                    }
+                );
+                if let Err(why) = built {
+                    assert!(
+                        matches!(why, ProgramError::NotInThisDomain { .. }),
+                        "{domain:?} refused {kind:?} as `{why}`, which is a width problem rather                          than a missing instruction — the two are apart for exactly this reason"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn a_subgroup_of_one_still_leaves_something_to_draw_from() {

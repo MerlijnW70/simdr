@@ -55,6 +55,53 @@ pub(super) fn apply(program: &Program, held: &[Vec<u32>], step: Op) -> Vec<Vec<u
         // `Domain::bit_shift` is where that reading lives, and where the asymmetry that makes the
         // two right shifts worth having is written down.
         Op::BitShift { kind, by } => elementwise(held, |value| domain.bit_shift(kind, value, by)),
+        // Elementwise like the shift, and the one step here whose answer at a single input is not
+        // compared at all: `predictable` in the parent refuses a round whose magnitude meets a
+        // two's-complement minimum, because that value negates to itself and GLSL.std.450 does not
+        // promise it. Everything else about the arm is ordinary.
+        Op::Absolute => elementwise(held, |value| domain.abs(value)),
+        // A multiply and an add, written as a multiply and an add. **Not folded into one
+        // expression on the host** for the reason `RepeatAdd` is not folded into a multiply: the
+        // device fuses these into a single rounding, and the two agree here only because every
+        // value is a small integer that neither rounding touches. Writing it the long way is what
+        // leaves that agreement checkable rather than assumed.
+        Op::FusedMulAdd { by, plus } => {
+            let factor = domain.encode(by);
+            let addend = domain.encode(plus);
+            elementwise(held, |value| domain.add(domain.mul(value, factor), addend))
+        }
+        Op::AddIfAllAbove {
+            when_all_above,
+            add,
+        } => {
+            let threshold = domain.encode(when_all_above);
+            let add = domain.encode(add);
+
+            // `all` where the neighbour has `any`, and per subgroup for the same reason: the vote
+            // is uniform, so the whole subgroup takes the step or none of it does. Strips included,
+            // because a strip-mined vector's every element is in the subgroup being asked.
+            held.chunks(width)
+                .flat_map(|subgroup| {
+                    let takes = subgroup
+                        .iter()
+                        .flatten()
+                        .all(|value| domain.greater(*value, threshold));
+
+                    subgroup.iter().map(move |elements| {
+                        elements
+                            .iter()
+                            .map(|value| {
+                                if takes {
+                                    domain.add(*value, add)
+                                } else {
+                                    *value
+                                }
+                            })
+                            .collect()
+                    })
+                })
+                .collect()
+        }
         Op::BroadcastLane(source) => {
             // Inside the *vector*, exactly as the rotate below: `min(lanes, width)` invocations, so
             // a clustered vector reads position `source` of its own cluster and a subgroup-wide one
