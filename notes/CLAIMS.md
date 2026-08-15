@@ -1,0 +1,124 @@
+# What checks what — the claims, and which of them nothing tests
+
+This repository asserts a great deal in prose: 2 400-odd sentences of the form *every*, *never*,
+*the only*, *cannot*, or a number with a unit on it. Its own rule is that a claim nothing checks is
+a claim. So this is that rule turned on the documents.
+
+It is an inventory rather than a list of sentences. Enumerating 2 400 assertions would produce
+something nobody reads; what is useful is the **class** each belongs to, and whether an instrument
+exists that could ever contradict it.
+
+## The part that is checked, and by what
+
+Stated first because the gap is only visible against it.
+
+| what | instrument | reach |
+| --- | --- | --- |
+| every **branch** in the source | mutation gate | 93 targets, 639 mutants, **100%** |
+| every emitted module's **legality** | `spirv-val` | the kernel library at 5 widths, plus 232 generated programs |
+| the zero-dependency boundary, the decision records' presence, the fail-closed sites | `noha gate` | 56 + 8 + 93 checks |
+| every public operation has a consumer; every pipeline builder bounds its dispatch; the mutation config matches the tree | `tests/integrity.rs` | 14 tests |
+| formatting, lints, **doc links**, the MSRV, the skip counts per width | CI | 5 jobs |
+| behaviour | two GPUs and lavapipe | widths 4, 8, 16, 32, 64 |
+
+**The first row is stronger than it looks, and it retires a whole class of question.** A guard nothing
+reaches *survives* mutation — flipping its condition changes no observable behaviour. So a gate at
+100% is a statement that **every refusal this crate documents is provoked by some test**, and that
+every "only if", "unless" and "when the mapping is…" in a doc comment has something behind it. All
+13 `LaneError` variants, every width guard, every bound: reached.
+
+That is why the classes below are what they are. What is left unchecked is precisely the claims that
+**are not encoded as a branch**.
+
+## 1. Measured numbers — 378 of them, and CI runs none of the sixteen examples
+
+`README.md` carries 55, `notes/FINDINGS.md` 222, `notes/NEXT.md` 101. Every one rests on a manual run
+at a moment in time. `.github/workflows/ci.yml` mentions the word *example* zero times.
+
+**It decays immediately, and here is the proof.** The README says the suite is 451 tests in the
+emitter and 822 across the workspace. It is **455 and 837** — drifted within the same day the line
+was written, by the same hand that wrote it. And that line already carries the scar of the previous
+occurrence: *"these were 348 and 740 until somebody counted again"*. Third time.
+
+The class splits three ways and the honest answer differs for each:
+
+* **Counts** — tests, kernels, opcodes, files. Trivially assertable, and the one above has now
+  drifted three times. There is no argument for leaving these to prose.
+* **Timings and multiples** — `11.2×`, `52×`, `~100 µs`, `376 ns`. CI *cannot* check these and says
+  so: a shared runner's wall clock is not evidence, which is why `session.rs` prints its ratio there
+  rather than asserting it. What can be checked is that the example which produces the number still
+  runs and still prints one. All 16 do today — measured while writing this — and nothing would
+  notice if one stopped.
+* **Facts about a device** — widths, features, heap sizes. Assertable where a device is present, and
+  already are in places.
+
+## 2. Every decision record says of itself that it is unchecked
+
+`noha gate` prints, on every run, eight lines ending `prose-only: recorded, not machine-checked`.
+That is honest and it is also too blunt, because several of those decisions **are** structurally
+enforced and simply not marked as such:
+
+* **DR-0006** — *a grid has two axes* — is enforced by `Grid` having no `z` field. The record says
+  so itself: "that dispatch cannot be written".
+* **DR-0002** — *a module is built for a known subgroup width* — is enforced by `LANES` being a const
+  generic; a width discovered later cannot reach it.
+* **DR-0004** — *a narrow element is one element per lane* — is enforced by there being no packing
+  path to take.
+
+The remainder are genuinely prose. **DR-0001** — *the numbers come from the grammar* — could only be
+machine-checked against Khronos' grammar JSON, which is not installed on this machine while the tool
+that consumes it is. **DR-0008** — *a round trip is the unit of cost* — has a re-runnable check in
+`runner/examples/latency.rs`, which is closer to enforced than to prose.
+
+Marking the enforced ones turns a blanket into a signal, and leaves the genuinely unchecked ones
+visible instead of hidden among their neighbours.
+
+## 3. Uniqueness and absence — 165 claims, three mechanised
+
+*"The only place that…"*, *"nothing else does…"*, *"no caller wants it"*. These are the claims that
+go stale **silently**, because nothing about adding a second copy makes the first one wrong.
+
+Three have been turned into checks, each after it had already failed once: `NO_CONSUMER` (every
+public operation is named outside its own file), `NO_DISPATCH` (every pipeline builder bounds what it
+dispatches), and `NOT_MUTATED` (every unsafe file is excused by name and still contains unsafe).
+
+The rest are prose, and this class produced two of the three findings the gate turned up this week.
+A concrete one still open: **the relationship between a vector's width and the subgroup's is decided
+in three places** — `Lanes::mapping` in the emitter, `shape_of` in the fuzzer (which cannot use the
+first, because it is a const generic and the fuzzer's width is a runtime value), and a guard in
+`kernels/reduce.rs`. Nothing says there are three, so a fourth would be invisible.
+
+Note the asymmetry that makes this class dangerous: a duplicated *branch* has a mutant, so the gate
+finds it. A duplicated claim in *prose* has nothing.
+
+## 4. The "done" markers
+
+`notes/NEXT.md` marks some thirty items **done**, each describing behaviour that later work could
+undo. Nothing re-reads them. This is the lowest-severity class — the items are mostly narrative —
+but it is worth knowing that "done" in that file is a statement about the past.
+
+## 5. Claims about the outside world — the class with the least cover and the highest cost
+
+What SPIR-V permits, and what a driver does with it. Only `spirv-val` and the devices can arbitrate,
+and only where a test actually asks them.
+
+**This is where today's worst finding lived.** `Lanes::shift_left` was bounded by `Element`; `F32`
+is an `Element`; and a shift of a float built a module the validator rejects. No branch expressed
+that claim, so the mutation gate could not see it. No test built such a module, so `spirv-val` was
+never asked. It was reachable from safe code with a plausible spelling for as long as it existed.
+
+The sweep that found it covered `src/lanes/`, and established that the three shifts were the only
+operations there whose type bound was wider than the instruction allows. **`src/module/`'s typed
+helpers have not had the same sweep** — that is the layer below, and it is where an opcode meets a
+type with no lane API in between.
+
+## What to do about it, worst first
+
+1. **Assert the counts.** Trivial, and the one in the README has now been wrong three times. The fix
+   is not to bump the number a fourth time — it is to make the test print it.
+2. **Sweep `src/module/` for type bounds wider than the instruction allows**, the way `src/lanes/`
+   was swept. This is the class that produces invalid modules that run.
+3. **Run the examples in CI for liveness**, not for their numbers. One step, and it catches the
+   runtime drift that `cargo clippy --all-targets` cannot: it compiles them and never runs them.
+4. **Mark the decision records that are enforced**, naming the artefact that enforces each.
+5. **Mechanise the mapping-relationship uniqueness** — the one that has now cost three findings.
