@@ -3091,3 +3091,80 @@ take, and nothing before this could have told.
 Requiring the row to be unique killed a mutant and immediately became one: nothing emits two sums of
 that shape, so `if sums.next().is_some()` could not fire. **A guard that cannot fire reads exactly
 like a guard that works** — the same sentence as the skipped test that looks green, one level down.
+
+## 97% of one answer is not computation — 2026-08-15
+
+A question from next door: `H:\schaak` is a UCI chess engine whose NNUE layer this project's
+`kernels::network::clipped_dot` was modelled on. Can this device evaluate its network and buy Elo?
+
+`runner/examples/latency.rs` exists to answer exactly that — its header has said *"a game-tree
+search asking for one evaluation, say"* since it was written. **Its table could not support the
+answer**, and fixing it is half of this entry.
+
+### The instrument was wrong first
+
+Rows one and two were host wall clock around `Gpu::run`. Row three was a *device timestamp* from
+`time_repeated`, printed under the same `per answer` heading, and divided by the answers it produced
+where the others were not. So the batched row read about **500× better than any caller ever sees**:
+1.9 µs was what the device spent, not what the host waited, and it was per *dispatch* rather than
+per answer.
+
+Two clocks under one heading, one of them measuring something the caller never experiences. The same
+failure as the skip count that could not be counted, in the example written to settle the very
+question it was misreporting.
+
+Rewritten: every row is wall clock around the whole operation — submit, wait, **read the answer
+back** — the device figure is printed *beside* it rather than in place of it, and the per-answer
+column is derived from the answers a dispatch actually produces. The held `Session` is measured too,
+because `Gpu::run` rebuilds its pipeline every call and understating the device's case would make
+the conclusion worthless.
+
+Two of my own errors on the way, both caught before the number was used: the device total was
+divided by 200 while the timing helper called the closure 601 times — a **3× overstatement of the
+device's share** — and a row labelled "one answer" was dividing by two, because a 64-invocation
+workgroup holds two 32-wide subgroups.
+
+### What it says
+
+| RTX 4080 | per call | per answer | of which the device |
+| --- | --- | --- | --- |
+| 2 answers, built per call | 858 µs | 429 µs | — |
+| 2 answers, held session | **100 µs** | 50 µs | 2.9 µs — **2.9%** |
+| 2 048 answers, held session | 129 µs | **0.063 µs** | 3.6 µs — 2.8% |
+
+| Integrated Radeon | per call | per answer | of which the device |
+| --- | --- | --- | --- |
+| 1 answer, held session | **779 µs** | 779 µs | 2.5 µs — **0.3%** |
+| 1 024 answers, held session | 878 µs | 0.858 µs | 11.4 µs — 1.3% |
+
+**Ninety-seven per cent of a single answer is submission, fence and copy-back**, and 99.7% on the
+integrated part. Which is why two answers cost 100 µs and two thousand cost 129: the round trip is
+fixed, and the only lever is how many answers divide it.
+
+### The answer to the question, and why it is a decision
+
+`decisions/DR-0008` records it. The break-even is `R / (c - d)` independent answers, and **never**
+when the CPU's per-answer cost `c` is at or below the device's `d`.
+
+schaak's evaluation is **78 ns** in-tree, measured by differential timing in its own `SPEED.md`,
+against 63 ns per answer here — so the break-even is **~9 700 evaluations pending at once**, and
+alpha–beta supplies **one**, because a node's score decides whether its siblings are searched at
+all. That is what pruning is.
+
+Two independent ceilings sit above that arithmetic and were already measured by the engine:
+evaluation is ~20% of a 376 ns node, so a *free* evaluation buys ~25% nps ≈ **15 Elo**; and the
+network is **not adopted**, since distilling the engine's own hand evaluation asymptotes to parity
+with it. Its real bottleneck is playing games — `NNUE.md` calls the WDL loop *"a large, multi-day,
+self-play-bound compute project"* and `TUNING.md` records a tune that improved validation loss and
+lost **−24.7 Elo** over the board. Self-play is alpha–beta search, which is the one workload a GPU
+is worst at.
+
+And a structural refusal underneath: schaak is `#![forbid(unsafe_code)]` with an empty dependency
+table, in its crate description. `runner` is `ash`, FFI and `unsafe` by necessity. Linking them ends
+both claims.
+
+**The useful half is what it rules in.** Batch size beats kernel quality by two orders of magnitude
+— 2 answers to 2 048 is 800×, where no kernel change recorded here has been worth more than 3×. So
+the shape to keep building is the one the reduction and scan chains already have: one question over
+a whole buffer, one submission. And the most valuable workload in this repository is not a speed one
+at all — it is the differential fuzzer, whose 30 000 programs are what find emitter bugs.

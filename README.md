@@ -691,6 +691,40 @@ A first attempt reported 2.9× by writing the old route as `gpu.run`, which allo
 pipeline every call. Give the thing you are replacing every advantage you would give the
 replacement.
 
+## What belongs here, and what does not
+
+`decisions/DR-0008` is the boundary, and it is a number rather than a taste. A held `Session` on an
+RTX 4080 answers **one** question in ~100 µs, of which the device itself accounts for **2.9%** — the
+other 97% is the submission, the fence and the copy back, and no kernel change in this repository
+touches any of it. The same session answers **2 048** questions in 129 µs.
+
+So the round trip is a *fixed* cost and the only lever a caller has is how many answers it divides
+that cost by. `runner/examples/latency.rs` prints the break-even for whatever device runs it:
+
+```text
+what                                per call   per answer      answers/s
+2 answers, held session             100.5 us    50.232 us          19908
+  of which the device itself          2.9 us   2.9% of the wall clock
+2048 answers, held session          128.6 us     0.063 us       15922131
+
+independent answers needed before this beats a CPU that takes:
+        50 ns per answer   never — the device is slower per answer too
+       100 ns per answer   3458
+      1000 ns per answer   137
+     10000 ns per answer   13
+```
+
+**Independent** is the load-bearing word. A caller that needs answer *n* before it knows whether to
+ask for *n + 1* has a batch of one, however much total work it has. DR-0008 works that through for a
+real case — a chess engine next door whose NNUE layer `kernels::network::clipped_dot` was modelled
+on — and the break-even comes out at ~9 700 evaluations pending at once against the one that
+alpha–beta pruning can supply. The answer is *stay on the CPU*, and saying so is worth more than a
+benchmark somebody would have discovered after a fortnight's integration.
+
+What that rules **in** is the shape everything above already has: one question over a whole buffer,
+in one submission. `Gpu::sum` at 11.2×, `Gpu::scanner_of` at 2.0–3.0×, and the differential fuzzer's
+30 000 programs — which is the most valuable workload here and is not a speed one at all.
+
 ## One instruction where there were eleven
 
 `VK_KHR_shader_integer_dot_product` sums four 8-bit products in one instruction. What it replaces

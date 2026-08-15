@@ -1044,6 +1044,21 @@ whose only callers are tests of the *block* machinery rather than of themselves.
 
 ## Deliberately not doing
 
+**Putting a latency-bound caller on this device.** `decisions/DR-0008` is the boundary and
+`runner/examples/latency.rs` is the check that re-tests it on any machine. One answer from a held
+`Session` costs ~100 µs on an RTX 4080 and ~779 µs on the integrated Radeon, of which the device
+itself is **2.9%** and **0.3%** — the rest is submission, fence and copy-back, and nothing in this
+repository can move it. A caller needs `R / (c - d)` *independent* answers pending before the device
+is worth asking, and **never**, at any batch size, when its CPU cost per answer is at or below this
+device's.
+
+The case that settled it is written up in full there: a chess engine next door, whose NNUE layer
+`kernels::network::clipped_dot` was modelled on. Break-even ~9 700 evaluations at once against the
+one that alpha–beta pruning supplies — and two ceilings above that arithmetic which the engine had
+already measured for itself. The answer is *stay on the CPU*, and it is a decision rather than a
+note because the pressure to re-open it is predictable ("the kernel is only a few microseconds" — it
+is 2.9% of what the caller waits).
+
 **Chasing the large-working-set cliff.** Past ~50 MB the timings stop being steady, and three
 explanations have now been tested and refuted: L2 capacity, eviction of a single allocation, and
 placement under three simultaneous allocations — all three buffers land device-local up to 3 GB
@@ -1249,3 +1264,68 @@ reaching a new caller.
 The habit that found them, which costs nothing and is not automatable yet:
 
 **Ask where a check is called from, not whether it works.**
+
+---
+
+## Where the work goes now — 2026-08-15, after DR-0008
+
+The four lists above asked *what is missing*, *what holes did the week open*, *which refusals are
+stronger than the hardware*, and *where is each check called from*. This one asks a question none of
+them did: **which workloads is this repository actually the right answer for**, now that the cost of
+being asked has been measured properly.
+
+`decisions/DR-0008` answers it with one number. A round trip is fixed at ~100 µs on the discrete
+device and ~779 µs on the integrated one, and the device's own share of that is **2.9%** and
+**0.3%**. So:
+
+> **Batch size beats kernel quality by two orders of magnitude.** Raising the answers per round trip
+> from 2 to 2 048 is 800×. No kernel change recorded anywhere in this file has been worth more
+> than 3×.
+
+That reorders everything. What follows is the tree read against it.
+
+### Tier 1 — already the right shape, and worth deepening
+
+**1. The differential fuzzer is the most valuable thing here, and it is not a speed workload.**
+30 000 generated programs, each answered by a device and by a CPU reference. It found `reduce_min`
+folding its strips with a maximum, an `OpUDot` invalid since the day it shipped, and a driver that
+faults compiling a valid module. Every one of those is a correctness result that no benchmark would
+have produced, and the workload is throughput-shaped by construction — thousands of independent
+questions, no caller waiting on any one of them.
+
+It is also where the mutation gate keeps landing: *"nine of the twelve were in the fuzzer or its CPU
+reference; none was in the emitter."* Widening the vocabulary is the single highest-value direction
+in the tree.
+
+**2. The reduction and scan chains are the shape DR-0008 rules in** — one question over a whole
+buffer, one submission. `Gpu::sum` at 11.2× over 8 192 elements, `Gpu::scanner_of` at 2.0–3.0×,
+`Reducer` at 52× per dispatch against rebuilding. Nothing here needs re-argued; it needs keeping.
+
+**3. The emitter is the part with no round trip at all.** It takes no dependencies, forbids
+`unsafe`, and produces SPIR-V on stable Rust — and the boundary above does not touch it, because
+nothing is dispatched. Every hour spent on `spirv-val` coverage, on the lane API's refusals, and on
+the mutation gate pays regardless of what any device costs.
+
+### Tier 2 — the shape a future caller would need
+
+**4. There is no API for "here are N independent problems, answer them all".** Every entry point
+takes one module and one grid; a caller with a batch has to lay it out itself, and the one thing
+DR-0008 says matters is exactly that layout. `Gpu::run_bound` and `Session` are the pieces, and what
+is missing is the shape that makes batching the default rather than the caller's idea.
+
+Written down rather than built, and deliberately: it needs a caller. The last three times this file
+guessed at an API before one existed — the third dispatch axis, the caller-owned buffer, the larger
+CLI — the guess was refused by its own argument. A batch API invented without a batch would be the
+fourth.
+
+### Tier 3 — carried over, unchanged
+
+**5. A buffer the caller already owns.** Still no caller in this repository wants it.
+
+**6. A third vendor.** Still needs hardware that is not in this machine.
+
+### What this list retires
+
+Anything that begins *"if the kernel were faster"*. The kernel is 2.9% of what a caller waits for on
+the best device in this machine and 0.3% on the other. A proposal has to move the round trip or the
+batch size, and only one of those is reachable from here.
