@@ -1212,6 +1212,17 @@ looked exactly like working.
 What is left outside is `Kernel::load_offset_by`, whose offset is a specialization constant chosen
 after the module was built with no literal in it to read.
 
+**And the gate was pointed at all of it, five times.** 63% → 85.2% → 86.7% → 90% → **100%, 30 of
+30**. The first run's survivors clustered in the four conditions that identify a grid's row, because
+a workgroup one row deep never builds the sum they match — so that branch had no test at all, in
+either half of the walk written that day.
+
+Three survivors were then argued to be *equivalent mutants*, each with a sound argument about every
+module this emitter produces. All three were wrong, and for the same reason: this file decodes
+SPIR-V rather than only the SPIR-V it wrote. Four edits to a real kernel — a sum duplicated, a sum
+over the row's base that is not a row, a constant spliced in off the lane, and the workgroup size
+removed — killed every one of them. `runner/src/dispatch/extent/addressing.rs` has the table.
+
 ### Tier 3 — carried over, unchanged
 
 **10. A buffer the caller already owns.** Still no caller in this repository wants it.

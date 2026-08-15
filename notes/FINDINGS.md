@@ -3031,3 +3031,63 @@ invocations — which looked exactly like working. `local.y` on the right is wha
 
 Three of these in one file in one sitting, and all three have the same shape: an expression that
 happens to be unambiguous on every module this crate emits today.
+
+## Five runs of the gate over one file, and the word "equivalent" three times — 2026-08-15
+
+The mutation gate over the day's address-walk work, scoped to the same span each time:
+
+| run | killed | score | what it named |
+| --- | --- | --- | --- |
+| 1 | 17/27 | **63%** | eight of ten survivors in the four conditions identifying a grid's row |
+| 2 | 23/27 | **85.2%** | the four `&&`, after the row-two-deep tests |
+| 3 | 26/30 | **86.7%** | one killed, and the uniqueness rule arrived as a survivor of its own |
+| 4 | 27/30 | **90%** | the two clauses saying what the row's sum is *over* |
+| 5 | **30/30** | **100%** | nothing |
+
+The first run's clustering was the finding, not the score. All eight of those mutants sat in
+`row_of`, and they sat there because **a workgroup one row deep computes its row as `group.y` alone
+and never builds the sum** — so `row_of` returns before the conjunction, and every grid kernel in
+this crate, every test above them and every unit test written that day took the short branch.
+`row = group.y × rows + local.y` was decoded by nothing at all.
+
+Which is the branch that had already been wrong once that morning: the sum has the same shape as
+`start = (group.y × pitch) + run`, the address the row is *used* to compute, and the first version
+matched that instead.
+
+### The word "equivalent", three times, wrongly
+
+Three survivors were argued to be equivalent mutants, each with a careful argument about the module
+rather than the tests:
+
+* the only `OpIMul` over `group.y` is the row's base, and the only term using that base is the row —
+  so each half of the conjunction selects the same one instruction;
+* of the sums in an address exactly one has a constant on its right, and it is the one `shift_in`'s
+  left-hand clause already names.
+
+Every one of those is **true of every module this emitter produces**, and that turns out to be a
+much smaller claim than it sounds. This file decodes SPIR-V; the clauses exist for the SPIR-V it did
+not write. The fix was to write it — four edits to a real kernel, none of which changes an address:
+
+| the edit | what it makes | what it pins |
+| --- | --- | --- |
+| every `OpIAdd` copied under a fresh id | two rows | the match must be *unique* |
+| a sum over the row's base adding something that is not `local.y` | not a row | what the sum is over |
+| `i_add(index, k)` spliced into an access chain | a constant off the lane | whose sum carries the offset |
+| `OpExecutionMode` removed | no workgroup size | the divisor is not zero |
+
+The third has to be **reachable** where the first two do not, and that difference is the design in
+miniature: `row_of` scans every term in the module, while the offset and pitch walks follow only
+what an access chain reaches. So the copies are appended and ignored; the splice goes in *in order*,
+in front of the chain it repoints, and the module stays well formed.
+
+`k` is the largest constant of the index's own type, because the walk takes a maximum — a constant
+under the strip stride would be folded away by it and prove nothing. Applying the mutation by hand
+confirms it: the offset comes back as **64 where the kernel reads 0**, which is the loose reading
+asking for more buffer than the kernel touches. That is the one direction this check must never
+take, and nothing before this could have told.
+
+### And one guard that arrived as its own survivor
+
+Requiring the row to be unique killed a mutant and immediately became one: nothing emits two sums of
+that shape, so `if sums.next().is_some()` could not fire. **A guard that cannot fire reads exactly
+like a guard that works** — the same sentence as the skipped test that looks green, one level down.
