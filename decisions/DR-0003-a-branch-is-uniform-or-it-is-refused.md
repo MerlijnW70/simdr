@@ -87,3 +87,11 @@ reduction.
 - Loops have the same rule and the same reason: the trip count is uniform or the loop is refused.
 - If a future slice does want divergence, `OpGroupNonUniform*` inside it needs a separate
   argument, not an extension of this one.
+
+## What enforces this
+
+**The type system, completely.** `Lanes::if_uniform` takes a `Uniform`, and the only things that
+produce one are `any_uniform` and `all_uniform` — the votes, which answer for the whole subgroup by
+construction. A per-lane `Predicate` is a different type and cannot be handed to a branch.
+
+There is no runtime refusal to test here because there is no runtime path to one.

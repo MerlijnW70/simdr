@@ -103,3 +103,12 @@ has the instruction, not that anyone will notice.
   it. `runner/tests/narrow.rs` is the only layer that can tell.
 - A packed mapping remains possible later. It would be a new `Mapping` variant and a new decision
   record, not a reinterpretation of this one.
+
+## What enforces this
+
+**Absence.** There is no packing path to take: `Element::STRIDE` gives a buffer its element size and
+every lane holds exactly one, so a caller cannot ask for four `i8` in a lane because nothing offers
+it. Enforced the way `decisions/DR-0006` is — by the thing not existing.
+
+What is *not* enforced is the reasoning. Nothing stops the packed path being added; the measurement
+saying it would not pay is in `notes/FINDINGS.md`, and it is prose.

@@ -85,3 +85,15 @@ module, and a validated module is weaker than one that computed the right answer
   when adding to it.
 - Adding an opcode to `module::op` means running the recipe for that opcode. "It is obviously 43"
   is exactly the reasoning this record refuses.
+
+## What enforces this
+
+**A validator, partly, and nothing else.** A wrong opcode number assembles into a *different
+instruction*, and `spirv-val` rejects most of those — which is how `OpUDot` with a signed result
+type was caught on the first run against it. What it cannot catch is a wrong number that happens to
+name another legal instruction in the same position: that module validates, runs, and computes
+something else.
+
+So this is **prose with a partial backstop**, and the rule that makes it hold is procedural — read
+the number out of `spirv-as` or the grammar, never from memory. `noha gate` is right to call the
+record unchecked.

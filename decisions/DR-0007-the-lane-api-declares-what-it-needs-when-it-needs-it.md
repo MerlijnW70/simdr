@@ -77,3 +77,15 @@ run, and is what `a_clustered_scan_is_valid_spirv` exists for.
 - The clustered ladder declares `GroupNonUniform` and `GroupNonUniformShuffleRelative`, and neither
   arithmetic capability: every instruction in it is a scalar one or a shuffle. A kernel that scales
   still declares nothing.
+
+## What enforces this
+
+**A validator, and it was checked by breaking it.** `Module` holds the entry point and its interface
+as data and re-renders `OpEntryPoint` whenever either grows, so a built-in the *body* asks for still
+reaches the interface list. The failure mode is an invalid module every driver runs anyway — so
+`spirv-val` is the only layer that can see it, and deleting the line that adds the variable to the
+interface leaves **19 of `tests/kernels.rs`'s 20 modules rejected** while all three devices go on
+returning right answers.
+
+That is the strongest backing of the eight: a named test, a named failure mode, and a measured
+result from having done it.

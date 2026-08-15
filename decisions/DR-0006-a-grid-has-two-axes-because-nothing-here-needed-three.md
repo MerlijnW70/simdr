@@ -89,3 +89,12 @@ cargo run -p runner --release --example plane
 The device tests run each kernel at four shapes — one row per workgroup, several rows per
 workgroup, and a row spanning several workgroups — because a wrong address arithmetic agrees with a
 right one on any single shape.
+
+## What enforces this
+
+**The type system.** `runner::Grid` has an `x` and a `y` and no `z`, so the dispatch this decision
+refuses cannot be written — there is no field to set. The record says as much above, and it is
+literally true rather than a figure of speech.
+
+`noha gate` reports it prose-only because its invariants are about imports. The absence of a struct
+field is not something that vocabulary can see, and it is stronger than anything it could.

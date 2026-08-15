@@ -92,3 +92,15 @@ The backticks are the whole convention, and it cuts both ways. Code spelled as c
 crate defines it, and is checked. A dead name being discussed — as just above — is prose, and is
 not. So a retraction can name what it retracts without the check mistaking the obituary for a
 promise.
+
+## What enforces this
+
+**The type system.** `LANES` is a const generic, so a width discovered at run time cannot reach
+`Lanes::mapping::<LANES>` at all — the call does not compile. `simdr::lanes::Mapping::of` is the same
+rule for a caller that does hold a runtime width, and it is the only other place the relationship is
+decided: two further copies of it in `runner` were removed on 2026-08-15, after the mutation gate
+found both and neither was the same rule.
+
+`noha gate` still reports this record as prose-only, and that is a limit of its vocabulary rather
+than of the decision — its invariants confine an *import graph*, and this is a claim about a type
+parameter.

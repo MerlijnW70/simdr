@@ -108,3 +108,13 @@ elements as one baked in.
   module declares is easy to write and the alternative would make it a crash.
 - `OpSpecConstantOp` carries its opcode as a **literal**, in the word where an operand would
   normally go. An instruction one word short of that decodes cleanly and computes something else.
+
+## What enforces this
+
+**Weakly — this is the loosest of the eight.** `Module::spec_constant` returns an `Id`, a value like
+any other, so a specialization constant can be added, multiplied and stored and cannot change which
+instructions a module contains: the emitter has finished by the time anyone picks its value.
+
+That is structural rather than checked. An `Id` is an `Id`, and nothing here would stop an emitter
+branching on the *default* and shipping a module that only appears to defer the decision.
+`runner/examples/specialize.rs` measures what deferring is worth; nothing tests what it must not be.

@@ -70,8 +70,42 @@ machine-checked against Khronos' grammar JSON, which is not installed on this ma
 that consumes it is. **DR-0008** — *a round trip is the unit of cost* — has a re-runnable check in
 `runner/examples/latency.rs`, which is closer to enforced than to prose.
 
-Marking the enforced ones turns a blanket into a signal, and leaves the genuinely unchecked ones
-visible instead of hidden among their neighbours.
+### The marking was tried, and the tool said no — which is the finding
+
+`noha` does have the mechanism. A record may say `status: enforced` with an `invariant:`, and it is
+strict about the pairing: *"status `prose-only` forbids an `invariant` — an invariant nobody enforces
+is a false promise"*. Four kinds exist: `zero-deps`, `forbid-unsafe`, `sole-use` and `sole-ref`.
+
+**All four operate on the import graph of the audited surface**, and none of the eight decisions is
+an import-confinement claim. Marking DR-0007 as `enforced` with a `sole-use` invariant was tried;
+the gate accepted the syntax and reported
+
+```text
+no audited source imports `require_capability` (the restriction holds vacuously)
+```
+
+which is the tool being better than the attempt. A vacuous invariant reads as enforcement and checks
+nothing — the precise failure this whole document is about — so the eight stay `prose-only`, and the
+blanket turns out to have been accurate.
+
+What was missing was not a status field. It was that a reader could not tell **which** of the eight
+had something behind it. Each record now ends with a `## What enforces this` section naming the
+artefact and its kind:
+
+| record | what backs it | kind |
+| --- | --- | --- |
+| DR-0003 — a branch is uniform or refused | `if_uniform` takes a `Uniform`, which only the votes produce | **type** |
+| DR-0006 — a grid has two axes | `Grid` has no `z` field | **type** |
+| DR-0002 — a known subgroup width | `LANES` is a const generic; `Mapping::of` is the one runtime copy | **type** |
+| DR-0004 — one element per lane | no packing path exists to take | **absence** |
+| DR-0007 — declares what it needs | `spirv-val`; breaking it leaves 19 of 20 modules rejected | **tested** |
+| DR-0008 — a round trip is the unit of cost | `runner/examples/latency.rs`, re-runnable anywhere | **measured** |
+| DR-0001 — numbers from the grammar | `spirv-val` catches a wrong number that makes an *invalid* module, and nothing catches one that makes a valid one | **partial** |
+| DR-0005 — a constant defers a number | an `Id` is an `Id` | **weakest** |
+
+Three are enforced by the type system and cannot be violated; one by something not existing; one is
+tested and was checked by breaking it; one has an instrument and no schedule. **Two are genuinely
+thin** — and now they say so where a reader will find it, which is what the blanket could not do.
 
 ## 3. Uniqueness and absence — 165 claims, three mechanised
 

@@ -127,3 +127,13 @@ Fixing it moved the batched figure from `1.9 µs per dispatch` to `129 µs per c
 number this decision rests on. A figure that reads as evidence and was produced by an instrument
 that cannot see the claim is the failure this project keeps finding; this one was in the example
 written to settle exactly that question.
+
+## What enforces this
+
+**A re-runnable measurement.** `runner/examples/latency.rs` prints the round trip, the device's share
+of it, and the break-even batch size for whatever machine it runs on — so this decision can be
+re-tested rather than re-argued.
+
+What is *not* enforced is that anybody runs it. CI runs none of the sixteen examples, by design: a
+shared runner's wall clock is not evidence about a round trip. So this is a decision with an
+instrument and no schedule, which is what `notes/CLAIMS.md` says of every measured number here.
