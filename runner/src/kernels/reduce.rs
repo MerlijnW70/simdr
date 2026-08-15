@@ -410,8 +410,41 @@ pub fn workgroup_sum<T: Element>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{workgroup_sum, workgroup_sum_at};
+    use super::{butterfly_cluster_sum, workgroup_sum, workgroup_sum_at};
     use simdr::lanes::{F32, LaneError};
+
+    /// A cluster exactly the subgroup's width, and one wider than it.
+    ///
+    /// **The third time this file has met the same shape**, and the note above records the first:
+    /// a guard nothing reaches reads exactly like one that works. Here the mutation gate found two
+    /// at once — `LANES > subgroup` weakened to `>=`, which refuses a cluster that is simply a
+    /// whole-subgroup vector, and the condition removed altogether, which lets a wider one through.
+    ///
+    /// Neither consumer could see either. `runner/tests/validated.rs` sweeps clusters 2, 4 and 8
+    /// across every width and *reports* a build refusal rather than failing on it — by design, since
+    /// a cluster wider than the subgroup is a real refusal there — so `>=` reads as that. And
+    /// `runner/tests/loops.rs` skips the equal case by name before it builds anything.
+    ///
+    /// The wider case is the sharper half: without this guard the call is still refused, but by the
+    /// *butterfly's* own bound, as a mask reaching outside its subgroup. That is a true statement
+    /// about a different thing, and every consumer here would print it as "not built" either way.
+    #[test]
+    fn a_cluster_the_subgroups_width_builds_and_a_wider_one_is_refused_by_name() {
+        assert!(
+            butterfly_cluster_sum(32, 32).is_ok(),
+            "a cluster exactly the subgroup's width is a whole-subgroup vector, not a missing \
+             mapping"
+        );
+
+        assert_eq!(
+            butterfly_cluster_sum(16, 32).err(),
+            Some(LaneError::NoMapping {
+                lanes: 32,
+                width: 16
+            }),
+            "a cluster wider than the subgroup is refused here and names both numbers"
+        );
+    }
 
     /// A width the workgroup is not a whole number of.
     ///
