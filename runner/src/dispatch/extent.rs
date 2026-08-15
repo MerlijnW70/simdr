@@ -695,6 +695,67 @@ mod tests {
         assert!(!bounds.fits(grid, reached - 1));
     }
 
+    /// `spirv` with a second copy of every `OpIAdd`, each under a fresh result id.
+    ///
+    /// A module with two terms of the row's shape, which no kernel here emits and which the
+    /// uniqueness rule in `addressing::row_of` exists for. The copies are referenced by nothing, so
+    /// they change no address and reach no access chain — the *only* thing they change is how many
+    /// terms answer to the row's description, which is the question being asked.
+    fn with_every_sum_twice(spirv: &[u32]) -> Vec<u32> {
+        let mut words = spirv[..5].to_vec();
+        // Word three of the header is the id bound, and a fresh id has to come from under it.
+        let mut next = spirv[3];
+        let mut at = 5;
+
+        while at < spirv.len() {
+            let count = (spirv[at] >> 16) as usize;
+            if count == 0 || at + count > spirv.len() {
+                break;
+            }
+            let instruction = &spirv[at..at + count];
+            words.extend_from_slice(instruction);
+
+            // Type, result, left, right, and the instruction word before them.
+            if (spirv[at] & 0xffff) as u16 == op::I_ADD && count == 5 {
+                let mut copy = instruction.to_vec();
+                copy[2] = next;
+                next += 1;
+                words.extend_from_slice(&copy);
+            }
+            at += count;
+        }
+
+        words[3] = next;
+        words
+    }
+
+    #[test]
+    fn two_terms_of_the_rows_shape_give_no_row_rather_than_the_first_one() {
+        // **The rule that says do not guess, made falsifiable.** Nothing this crate emits has two
+        // sums of the row's shape, so the check that there is only one could not fire — and a guard
+        // that cannot fire reads exactly like a guard that works.
+        //
+        // Doubling every sum is the smallest edit that creates the ambiguity: the copies are
+        // referenced by nothing, so no address changes and no access chain reaches them. All that
+        // changes is how many terms answer to the row's description.
+        let width = 32;
+        let pitch = width * 4;
+        let spirv = kernels::row_scale(width, pitch, 2, 3).expect("built");
+        let grid = Grid::new(1, 4);
+
+        // What the invocation reading gives, which is what a module with no readable row falls back
+        // to — and a quarter of what the pitch reading gives for this dispatch.
+        let fallback = (width * 4 * 2) as usize;
+        assert!(
+            !Bounds::of(&spirv).fits(grid, fallback),
+            "the unambiguous module reads its pitch and asks for 928"
+        );
+        assert!(
+            Bounds::of(&with_every_sum_twice(&spirv)).fits(grid, fallback),
+            "two rows to choose between is no row, and no row is no pitch"
+        );
+    }
+
     /// `spirv` with its `OpExecutionMode` removed, and everything else left alone.
     ///
     /// A module that declares no workgroup size, built out of one that does — so every built-in,
