@@ -1319,9 +1319,25 @@ floats built a module `spirv-val` rejects — `OpUDot`'s shape exactly, in three
 It is `T: Integer` now, so the call cannot be written, with a `compile_fail` doctest as the only
 artefact that can assert what a program *cannot be*.
 
-Which is also the blocker: `Program::build` emits through one function generic over `Element`, and a
-shift needs `Integer`. Generating one means emitting **per domain** rather than filtering a pool.
-That is a real piece of design, not a table entry.
+Which was also the blocker: `Program::build` emits through one function generic over `Element`, and
+a shift needs `Integer`. Generating one means emitting **per domain** rather than filtering a pool.
+
+**Built on 2026-08-15, and the obvious reading of that sentence was the wrong one.** "Per domain"
+looks like a second copy of the const-generic width ladder, one for the six integer types and one
+for the two floats — a relationship decided twice, which is the shape `notes/FINDINGS.md` catalogues
+more often than any other. The ladder stays single and the *element type* carries what it can do:
+`Emit` is one method, implemented by macro for the integers and by a refusal for `F32` and `F16`.
+
+`Op::BitShift` reaches all three shifts. The distance is drawn across the element's whole width,
+because the two right shifts agree on every value whose top bit is clear and every value this
+generator draws has one — so a small distance would have generated two instructions and proved one.
+`ProgramError` names the second kind of no that arrived with it.
+
+What is left of this item: `abs` — gated by `Signed` rather than by `Integer`, so it is a second
+group on the same mechanism and now cheap — the conversions, which change the element type mid-
+program and so do not fit the single-accumulator shape without thought, and the integer dot
+products, whose input is four bytes in a word and which `proeftuin/` already covers at all three
+mappings.
 
 **2. The reduction and scan chains are the shape DR-0008 rules in** — one question over a whole
 buffer, one submission. `Gpu::sum` at 11.2× over 8 192 elements, `Gpu::scanner_of` at 2.0–3.0×,
@@ -1361,3 +1377,19 @@ fourth.
 Anything that begins *"if the kernel were faster"*. The kernel is 2.9% of what a caller waits for on
 the best device in this machine and 0.3% on the other. A proposal has to move the round trip or the
 batch size, and only one of those is reachable from here.
+
+## The baseline, frozen — 2026-08-15
+
+`baseline-2026-08-15` is an annotated tag on the tree with nothing owed on it: every branch reached
+by a test, every opcode emitted by something, every public operation consumed outside its own file,
+every pipeline builder bounding its dispatch, every decision record saying what enforces it, and
+every number the documents state about this repository resolved against the tree.
+
+It is a floor rather than a milestone. What it is for is the sentence that comes after it: **work
+after this may add work, and may not add debt.** A `git diff baseline-2026-08-15` that adds a public
+operation with no consumer, an opcode with no emitter, a dispatch with no bound or a number with no
+counter is a change that undid something, and the tag is what makes that one command rather than an
+argument.
+
+The bit shifts above are the first extension built on it, and they were held to it: six tests, 124
+mutants at 100%, `spirv-val` before any device, and five widths across three vendors after.

@@ -17,7 +17,7 @@
 //!   having one was not, so treating every vector as clustered stayed green.
 
 use super::{Domain, Finish, Rng, generate};
-use crate::fuzz::Op;
+use crate::fuzz::{ALL_DOMAINS, BitShift, Op};
 
 /// The finish that carries a value out of a branch, on the mapping that is most of the sweep.
 ///
@@ -73,6 +73,22 @@ fn the_generator_reaches_every_operation_it_knows() {
                 Op::ShiftUp => "shift",
                 Op::ShiftDown => "shift-down",
                 Op::BroadcastLane(_) => "broadcast",
+                // Named apart rather than counted as one "shift". The two right shifts agree on
+                // every value whose top bit is clear, so a run that only ever drew one of them
+                // would look identical to a run that drew both — the coverage question this
+                // module exists to ask.
+                Op::BitShift {
+                    kind: BitShift::Left,
+                    ..
+                } => "bit-left",
+                Op::BitShift {
+                    kind: BitShift::RightLogical,
+                    ..
+                } => "bit-right-logical",
+                Op::BitShift {
+                    kind: BitShift::RightArithmetic,
+                    ..
+                } => "bit-right-arithmetic",
             };
             if !seen.contains(&name) {
                 seen.push(name);
@@ -86,6 +102,9 @@ fn the_generator_reaches_every_operation_it_knows() {
         vec![
             "add",
             "agree",
+            "bit-left",
+            "bit-right-arithmetic",
+            "bit-right-logical",
             "branch",
             "broadcast",
             "butterfly",
@@ -421,4 +440,106 @@ fn the_rotate_is_generated_for_a_clustered_vector_and_for_a_whole_one() {
         "no rotate over a subgroup-wide vector in 512 seeds — the pool for `lanes == subgroup` \
          is not being reached"
     );
+}
+
+/// A float domain never gets a bit shift, and every integer one does.
+///
+/// **Both halves, because the rule has two directions and only one of them is obvious.** A
+/// generator that never offered the shifts at all would pass the negative half forever, which is
+/// the state this file's header describes: a fuzzer that stops generating a shape looks exactly
+/// like a fuzzer that keeps agreeing.
+///
+/// The positive half is the one that would have caught the mistake actually worth making — gating
+/// on the wrong side of `is_float`, which builds, runs, and quietly moves the whole extension into
+/// the two domains that cannot use it.
+#[test]
+fn the_bit_shifts_reach_every_integer_domain_and_no_float_one() {
+    for domain in ALL_DOMAINS {
+        let shifted = (0..512_u64)
+            .flat_map(|seed| generate(&mut Rng::new(seed), domain, 32, 64).steps)
+            .filter(|step| matches!(step, Op::BitShift { .. }))
+            .count();
+
+        if domain.is_float() {
+            assert_eq!(
+                shifted, 0,
+                "{domain:?} was offered a bit shift, and `spirv-val` rejects the module it builds"
+            );
+        } else {
+            assert!(
+                shifted > 0,
+                "no program in 512 seeds shifted bits in {domain:?}, so the domain has the \
+                 instruction and nothing generated reaches it"
+            );
+        }
+    }
+}
+
+/// A generated shift stays inside its element's own width, and reaches the top of it.
+///
+/// Two claims about one draw, and they pull against each other on purpose. SPIR-V leaves a shift by
+/// at least the operand's width **undefined**, so the range has a ceiling the specification fixes —
+/// and the interesting half of the range is right below that ceiling, because `OpShiftRightLogical`
+/// and `OpShiftRightArithmetic` agree on every value whose top bit is clear. A draw that played it
+/// safe with small amounts would satisfy the first claim and make the two right shifts
+/// indistinguishable, which is the `ButterflyAdd` mistake read backwards.
+#[test]
+fn a_generated_shift_stays_inside_the_element_and_reaches_its_top() {
+    for domain in ALL_DOMAINS {
+        if domain.is_float() {
+            continue;
+        }
+
+        let mut furthest = 0;
+        for seed in 0..512_u64 {
+            for step in &generate(&mut Rng::new(seed), domain, 32, 64).steps {
+                if let Op::BitShift { by, .. } = *step {
+                    assert!(
+                        by < domain.bits(),
+                        "{domain:?} drew a shift of {by} into a {}-bit element, which SPIR-V \
+                         leaves undefined",
+                        domain.bits()
+                    );
+                    furthest = furthest.max(by);
+                }
+            }
+        }
+
+        assert_eq!(
+            furthest,
+            domain.bits() - 1,
+            "{domain:?} never drew a shift to the top of its element, so nothing generated here \
+             puts a bit where the two right shifts differ"
+        );
+    }
+}
+
+/// The left shift puts a bit at the top, and the right shifts then disagree about it.
+///
+/// The claim the whole extension rests on, made against `Domain` rather than against a device: for
+/// every integer domain there is a value and a distance where `OpShiftRightLogical` and
+/// `OpShiftRightArithmetic` give different answers. Without it the two instructions are one
+/// instruction with two names, and generating both proves nothing.
+#[test]
+fn the_two_right_shifts_disagree_once_the_top_bit_is_set() {
+    for domain in ALL_DOMAINS {
+        if domain.is_float() {
+            continue;
+        }
+
+        let top = domain.bits() - 1;
+        let raised = domain.bit_shift(BitShift::Left, 1, top);
+        let logical = domain.bit_shift(BitShift::RightLogical, raised, top);
+        let arithmetic = domain.bit_shift(BitShift::RightArithmetic, raised, top);
+
+        assert_eq!(
+            logical, 1,
+            "{domain:?} filled a logical shift with something other than zeros"
+        );
+        assert_ne!(
+            logical, arithmetic,
+            "{domain:?} gives the same answer to both right shifts even with the top bit set, so \
+             the corpus can never tell the two instructions apart"
+        );
+    }
 }

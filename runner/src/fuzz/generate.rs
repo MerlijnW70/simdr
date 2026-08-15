@@ -8,7 +8,7 @@ mod vocabulary;
 #[cfg(test)]
 mod coverage;
 
-use self::vocabulary::{CLUSTERED, Kind, STRIPPED, WHOLE, fill};
+use self::vocabulary::{CLUSTERED, INTEGER_ONLY, Kind, STRIPPED, WHOLE, fill};
 use super::domain::Domain;
 use super::program::{Finish, Program};
 use simdr::lanes::{LaneError, Mapping};
@@ -82,14 +82,26 @@ pub fn generate(rng: &mut Rng, domain: Domain, subgroup: u32, workgroup: u32) ->
         // quietly narrow the sweep at exactly the width that needs it most.
         Ok(Mapping::Strips { .. }) | Err(_) => STRIPPED,
     };
+    // **A second axis, and it is not the mapping's.** The pools above say which lanes a vector may
+    // read. This says which instructions its *element type* has: `Lanes`' three bit shifts take
+    // `T: Integer`, and a float domain has no such instruction at all — not a rounding question but
+    // a module `spirv-val` rejects. A shift crosses no lane, so it is legal under every mapping,
+    // which is why it is one list beside the pool rather than three entries inside them.
+    let integer_only: &[Kind] = if domain.is_float() { &[] } else { INTEGER_ONLY };
     let mut steps = Vec::with_capacity(steps_wanted);
 
     // Loop trip counts stay small. A rolled loop of four is the same shape as one of four hundred
     // — four blocks and two phis — and the short one leaves the sums well inside the float
     // domain's exact range, which is what lets the comparison be exact at all.
     for _ in 0..steps_wanted {
+        // Drawn from the two lists as one, so a shift is as likely as any other step rather than
+        // being a coin flip on top of the draw — which would have made it a quarter of every
+        // integer program and a fifth of the vocabulary's exposure for everything else.
+        let choices = pool.len() + integer_only.len();
         let kind = pool
-            .get(rng.below(pool.len() as u64) as usize)
+            .iter()
+            .chain(integer_only)
+            .nth(rng.below(choices as u64) as usize)
             .copied()
             .unwrap_or(Kind::AddConstant);
 

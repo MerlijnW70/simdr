@@ -7,10 +7,13 @@
 
 mod emit;
 
+pub use self::emit::Emit;
+
 use self::emit::apply;
-use super::domain::Domain;
+use super::domain::{BitShift, Domain};
 use simdr::kernel::{Kernel, Shape};
-use simdr::lanes::{Element, F16, F32, I8, I16, I32, LaneError, U8, U16, U32};
+use simdr::lanes::{F16, F32, I8, I16, I32, LaneError, U8, U16, U32};
+use std::fmt;
 
 /// One step of a generated program.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,6 +170,25 @@ pub enum Op {
         /// How many trips.
         times: u32,
     },
+    /// Move every element's **bits**, which only an integer domain can do.
+    ///
+    /// The first step here that is not available in every domain, and the reason the emission below
+    /// goes through [`Emit`] rather than through one function generic over `Element`. `Lanes`'
+    /// three shifts take `T: Integer`, so a float domain cannot even be asked — which is a bound
+    /// that arrived *because* preparing this pass found `shift_left` taking `T: Element` and
+    /// building a module `spirv-val` rejects.
+    ///
+    /// **`by` reaches the top of the element**, deliberately. Everything the generator draws is a
+    /// small positive number, and `OpShiftRightLogical` and `OpShiftRightArithmetic` agree on every
+    /// one of them — the difference lives entirely in the top bit, so a corpus alone cannot
+    /// separate the two instructions. A left shift of 31 puts a bit there, and the next right shift
+    /// is then a question with two different answers.
+    BitShift {
+        /// Which of the three.
+        kind: BitShift,
+        /// How far, always below the element's own width — see [`ProgramError::ShiftTooFar`].
+        by: u32,
+    },
 }
 
 /// How a program's final reduction combines the lanes.
@@ -202,6 +224,79 @@ pub enum Finish {
     /// deriving one from the other over floats subtracts a large running total back off itself and
     /// loses the low bits the scan just accumulated.
     ScanExclusive,
+}
+
+/// Why a generated program could not be emitted.
+///
+/// **Two kinds, and telling them apart is the point** — `decisions/DR-0009` in one sentence. Until
+/// this existed a refusal was always a [`LaneError`], because every operation was available in
+/// every domain and the only thing that could go wrong was the *width*. A step that some domains
+/// have and others do not is a second kind of no, and folding it into the first would have made a
+/// float program holding a bit shift look exactly like a vector too wide to map.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum ProgramError {
+    /// The lane API refused: a width with no mapping, a lane outside the vector.
+    ///
+    /// Not a failure. The generator is allowed to ask for things the mapping refuses, and being
+    /// refused by name is the correct answer.
+    Lanes(LaneError),
+    /// The element type has no such instruction — a bit shift in a float domain.
+    ///
+    /// Not reachable from [`super::generate`], which offers the shifts only where they exist. It is
+    /// reachable from a [`Program`] somebody wrote by hand, and this crate's answer to a
+    /// representable-but-wrong state is to name it rather than to compute something.
+    NotInThisDomain {
+        /// What was being emitted.
+        kind: BitShift,
+        /// The element type that has no instruction for it.
+        element: &'static str,
+    },
+    /// A shift by at least the element's own width, which SPIR-V leaves **undefined**.
+    ///
+    /// The reference cannot predict undefined, so a round like this would compare a device's
+    /// arbitrary answer against a host's arbitrary answer and report whichever way they fell. That
+    /// is the `ButterflyAdd` mistake — a mask that took a lane past the subgroup, right on the two
+    /// devices here and wrong on an eight-wide one — and it is refused here rather than drawn
+    /// around, because `Op` is public and a caller can write one.
+    ShiftTooFar {
+        /// The distance asked for.
+        by: u32,
+        /// The element's width, which it must stay below.
+        bits: u32,
+    },
+}
+
+impl From<LaneError> for ProgramError {
+    fn from(error: LaneError) -> Self {
+        Self::Lanes(error)
+    }
+}
+
+impl fmt::Display for ProgramError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Lanes(error) => write!(formatter, "{error}"),
+            Self::NotInThisDomain { kind, element } => {
+                write!(formatter, "{element} has no {kind:?} bit shift")
+            }
+            Self::ShiftTooFar { by, bits } => {
+                write!(
+                    formatter,
+                    "a shift of {by} in a {bits}-bit element is undefined"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for ProgramError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Lanes(error) => Some(error),
+            _ => None,
+        }
+    }
 }
 
 /// A generated program.
@@ -245,9 +340,10 @@ impl Program {
     ///
     /// # Errors
     ///
-    /// [`LaneError`] when the lane count has no mapping onto this subgroup, which is a legitimate
-    /// answer rather than a failure.
-    pub fn build(&self) -> Result<Vec<u32>, LaneError> {
+    /// [`ProgramError`] when the lane count has no mapping onto this subgroup, or when a step asks
+    /// for an instruction this domain does not have. Both are legitimate answers rather than
+    /// failures, and they are different answers — see the type.
+    pub fn build(&self) -> Result<Vec<u32>, ProgramError> {
         match self.domain {
             Domain::Unsigned => self.build_in::<U32>(),
             Domain::Signed => self.build_in::<I32>(),
@@ -261,7 +357,14 @@ impl Program {
     }
 
     /// The same, with the element type chosen.
-    fn build_in<T: Element>(&self) -> Result<Vec<u32>, LaneError> {
+    ///
+    /// **[`Emit`] rather than `Element`, and that is the whole shape of this pass.** The three bit
+    /// shifts take `T: Integer`, so one function generic over `Element` cannot emit them — which is
+    /// what kept them out of the generated vocabulary. The alternative was a second copy of the
+    /// width ladder below, one for the integer domains and one for the floats, and a relationship
+    /// decided twice is what `notes/FINDINGS.md` catalogues most often. So the ladder stays single
+    /// and the *element type* carries what it can do.
+    fn build_in<T: Emit>(&self) -> Result<Vec<u32>, ProgramError> {
         // `LANES` is a const generic and the generator picks it at runtime, so the widths have to
         // be listed. These are every power of two the mapping can express on a 32- or 64-lane
         // device with `MAX_STRIPS` of headroom.
@@ -275,14 +378,14 @@ impl Program {
             64 => self.build_at::<T, 64>(),
             128 => self.build_at::<T, 128>(),
             256 => self.build_at::<T, 256>(),
-            other => Err(LaneError::NoMapping {
+            other => Err(ProgramError::Lanes(LaneError::NoMapping {
                 lanes: other,
                 width: self.subgroup,
-            }),
+            })),
         }
     }
 
-    fn build_at<T: Element, const LANES: u32>(&self) -> Result<Vec<u32>, LaneError> {
+    fn build_at<T: Emit, const LANES: u32>(&self) -> Result<Vec<u32>, ProgramError> {
         let mut kernel = Kernel::<T>::new(Shape::new(self.subgroup, self.workgroup, 2))?;
         let mut value = kernel.load::<LANES>(0)?;
 
@@ -338,7 +441,7 @@ impl Program {
                 kernel.store(1, scanned)?;
             }
         }
-        kernel.finish()
+        Ok(kernel.finish()?)
     }
 }
 
@@ -360,6 +463,131 @@ mod tests {
 
         // Four strips per invocation, 64 invocations per workgroup, two workgroups.
         assert_eq!(program.input_len(), 4 * 64 * 2);
+    }
+
+    #[test]
+    fn a_float_domain_refuses_a_bit_shift_rather_than_emitting_one() {
+        // Not reachable from `generate`, which offers the shifts only where they exist. It is
+        // reachable from a `Program` somebody wrote by hand — the type is public and every field
+        // with it — and this crate's answer to a representable-but-wrong state is to name it.
+        //
+        // What the alternative looks like is on the record: `Lanes::shift_left` took `T: Element`
+        // for a month, and a shift of a vector of floats built a module `spirv-val` rejects. The
+        // bound stops the *call* from compiling; this stops the *program* from being emitted, and
+        // the two are different layers of the same no.
+        for domain in [Domain::Float, Domain::Half] {
+            let program = Program {
+                domain,
+                subgroup: 32,
+                workgroup: 64,
+                groups: 1,
+                lanes: 32,
+                steps: vec![Op::BitShift {
+                    kind: BitShift::Left,
+                    by: 3,
+                }],
+                finish: Finish::Sum,
+            };
+
+            let refused = program.build().expect_err("a float has no bit shift");
+            assert!(
+                matches!(refused, ProgramError::NotInThisDomain { .. }),
+                "{domain:?} refused a bit shift as {refused}, which reads as a width problem"
+            );
+        }
+    }
+
+    #[test]
+    fn a_shift_past_the_element_is_refused_at_every_width() {
+        // SPIR-V leaves a shift by at least the operand's width undefined, and a reference cannot
+        // predict undefined. The `ButterflyAdd` mask was the same shape: every distance it drew was
+        // inside a 32- or 64-wide subgroup, so it was right on both devices here and wrong on an
+        // eight-wide one, found by lavapipe on seed 3.
+        //
+        // The generator cannot draw one of these. `Op` is public, so a caller can write one.
+        for domain in [
+            Domain::Unsigned,
+            Domain::Signed,
+            Domain::UnsignedByte,
+            Domain::Byte,
+            Domain::UnsignedShort,
+            Domain::Short,
+        ] {
+            let program = Program {
+                domain,
+                subgroup: 32,
+                workgroup: 64,
+                groups: 1,
+                lanes: 32,
+                steps: vec![Op::BitShift {
+                    kind: BitShift::RightLogical,
+                    by: domain.bits(),
+                }],
+                finish: Finish::Sum,
+            };
+
+            let refused = program.build().expect_err("an undefined shift is refused");
+            assert!(
+                matches!(refused, ProgramError::ShiftTooFar { .. }),
+                "{domain:?} took a shift of {} bits and answered {refused}",
+                domain.bits()
+            );
+        }
+
+        // And the width below it builds, or the check above would pass by refusing everything.
+        let program = Program {
+            domain: Domain::Unsigned,
+            subgroup: 32,
+            workgroup: 64,
+            groups: 1,
+            lanes: 32,
+            steps: vec![Op::BitShift {
+                kind: BitShift::RightLogical,
+                by: 31,
+            }],
+            finish: Finish::Sum,
+        };
+        assert!(
+            program.build().is_ok(),
+            "a shift of 31 into a u32 is defined"
+        );
+    }
+
+    #[test]
+    fn the_three_shifts_are_three_different_modules() {
+        // One `Op` reaching one instruction, which is what `Emit` exists to arrange. If the match
+        // in the macro folded two arms together the programs would still build, still run, and
+        // still agree with a reference that made the same mistake — so the claim is made about the
+        // words rather than about the answer.
+        let base = Program {
+            domain: Domain::Signed,
+            subgroup: 32,
+            workgroup: 64,
+            groups: 1,
+            lanes: 32,
+            steps: Vec::new(),
+            finish: Finish::Sum,
+        };
+
+        let built = |kind| {
+            Program {
+                steps: vec![Op::BitShift { kind, by: 3 }],
+                ..base.clone()
+            }
+            .build()
+            .expect("built")
+        };
+
+        let left = built(BitShift::Left);
+        let logical = built(BitShift::RightLogical);
+        let arithmetic = built(BitShift::RightArithmetic);
+
+        assert_ne!(left, logical);
+        assert_ne!(
+            logical, arithmetic,
+            "the two right shifts are one opcode apart"
+        );
+        assert_ne!(left, arithmetic);
     }
 
     #[test]

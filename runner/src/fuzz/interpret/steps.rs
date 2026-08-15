@@ -50,6 +50,11 @@ pub(super) fn apply(program: &Program, held: &[Vec<u32>], step: Op) -> Vec<Vec<u
         // `Op::ShiftUp`: SPIR-V leaves the out-of-range lanes undefined, so there is no reference
         // for a real one to be compared against.
         Op::ShiftUp | Op::ShiftDown => held.to_vec(),
+        // The *bit* shift, which crosses no lane — so unlike the two above it is elementwise, and
+        // unlike everything else here it reads its operand as bits rather than as a number.
+        // `Domain::bit_shift` is where that reading lives, and where the asymmetry that makes the
+        // two right shifts worth having is written down.
+        Op::BitShift { kind, by } => elementwise(held, |value| domain.bit_shift(kind, value, by)),
         Op::BroadcastLane(source) => {
             // Inside the *vector*, exactly as the rotate below: `min(lanes, width)` invocations, so
             // a clustered vector reads position `source` of its own cluster and a subgroup-wide one

@@ -5,7 +5,7 @@
 //! mapping — and it reads better as a table than as arms of the match that draws.
 
 use super::Rng;
-use crate::fuzz::domain::Domain;
+use crate::fuzz::domain::{BitShift, Domain};
 use crate::fuzz::program::Op;
 
 /// Which operation to generate, before its operands are drawn.
@@ -36,6 +36,9 @@ pub(super) enum Kind {
     ShiftUp,
     ShiftDown,
     BroadcastLane,
+    ShiftLeft,
+    ShiftRightLogical,
+    ShiftRightArithmetic,
 }
 
 /// What a vector **narrower** than the subgroup may do.
@@ -107,6 +110,33 @@ pub(super) const STRIPPED: &[Kind] = &[
     Kind::ShiftDown,
     Kind::BroadcastLane,
 ];
+
+/// What only an **integer** domain may do, at any mapping.
+///
+/// A fourth list beside the three above rather than three more entries inside them, and the reason
+/// is the shape of the constraint. Those three are about the *mapping* — which lanes a vector may
+/// read — and a bit shift reads no lane but its own, so all three mappings would hold identical
+/// copies of it. What gates these is the *element type*: `Lanes`' shifts take `T: Integer`, and
+/// `F32` is not one.
+///
+/// Two axes, two lists. Combining them would have been six.
+pub(super) const INTEGER_ONLY: &[Kind] = &[
+    Kind::ShiftLeft,
+    Kind::ShiftRightLogical,
+    Kind::ShiftRightArithmetic,
+];
+
+/// How far to shift, in a domain of `bits`.
+///
+/// **Up to one below the element's width, and reaching that far is the point.** SPIR-V leaves a
+/// shift by at least the width undefined, so the top of the range is fixed by the specification
+/// rather than chosen — and the whole range is drawn rather than a small constant, because
+/// `OpShiftRightLogical` and `OpShiftRightArithmetic` agree on every value whose top bit is clear.
+/// Every value this generator draws has a clear top bit. A left shift of 31 is what puts one there,
+/// and the right shift after it is then a question with two different answers.
+fn shift_by(rng: &mut Rng, domain: Domain) -> u32 {
+    rng.below(u64::from(domain.bits())) as u32
+}
 
 /// Draw the operands for `kind`.
 ///
@@ -195,6 +225,18 @@ pub(super) fn fill(rng: &mut Rng, domain: Domain, subgroup: u32, lanes: u32, kin
         Kind::BroadcastLane => {
             Op::BroadcastLane(rng.below(u64::from(lanes.min(subgroup).max(1))) as u32)
         }
+        Kind::ShiftLeft => Op::BitShift {
+            kind: BitShift::Left,
+            by: shift_by(rng, domain),
+        },
+        Kind::ShiftRightLogical => Op::BitShift {
+            kind: BitShift::RightLogical,
+            by: shift_by(rng, domain),
+        },
+        Kind::ShiftRightArithmetic => Op::BitShift {
+            kind: BitShift::RightArithmetic,
+            by: shift_by(rng, domain),
+        },
     }
 }
 
@@ -225,7 +267,10 @@ mod tests {
     /// list to keep true. What keeps *this* one honest is the test below — a `Kind` missing from it
     /// is a `Kind` in no pool, and a `Kind` in no pool is an operation the generator can never
     /// draw.
-    const EVERY_KIND: [Kind; 17] = [
+    const EVERY_KIND: [Kind; 20] = [
+        Kind::ShiftLeft,
+        Kind::ShiftRightLogical,
+        Kind::ShiftRightArithmetic,
         Kind::AddConstant,
         Kind::MulConstant,
         Kind::ClampBelow,
@@ -256,11 +301,24 @@ mod tests {
         // it minus what their mapping refuses.
         for kind in EVERY_KIND {
             assert!(
-                WHOLE.contains(&kind),
+                WHOLE.contains(&kind) || INTEGER_ONLY.contains(&kind),
                 "{kind:?} is in no pool, so the generator can never draw it"
             );
         }
-        assert_eq!(WHOLE.len(), EVERY_KIND.len());
+        assert_eq!(WHOLE.len() + INTEGER_ONLY.len(), EVERY_KIND.len());
+
+        // **The two axes do not overlap, and that is the claim worth pinning.** A shift in `WHOLE`
+        // would be drawn in the float domains, where `spirv-val` rejects the module it builds — and
+        // the generator's own sweeps would report it as a refusal rather than as a mistake, because
+        // a refusal by name is a legitimate answer here.
+        for pool in [WHOLE, CLUSTERED, STRIPPED] {
+            for kind in INTEGER_ONLY {
+                assert!(
+                    !pool.contains(kind),
+                    "{kind:?} is gated by the element type and sits in a pool gated by the mapping"
+                );
+            }
+        }
 
         // A clustered vector shares its lanes with three others: no shuffle across the subgroup and
         // no vote. The rotate stays, because it wraps inside the cluster.

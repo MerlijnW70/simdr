@@ -60,6 +60,27 @@
 //! of `min(lanes, width)` invocations rather than of the width — which is the one line that tells a
 //! clustered scan from a whole-subgroup one.
 //!
+//! **And the bit shifts, since 2026-08-15 — the first step that is not available in every domain.**
+//! `Op::BitShift` reaches `Lanes::shift_left`, `shift_right_logical` and `shift_right_arithmetic`,
+//! which take `T: Integer`. Everything generated before it existed in all eight domains, so one
+//! function generic over `Element` could emit any step, and that is precisely why the shifts had no
+//! `Op`: the layer that emits could not express *"this domain has the instruction and that one does
+//! not"*. [`Emit`] is that expression, carried by the element type, and the width ladder stays
+//! single rather than being copied once for integers and once for floats.
+//!
+//! The bound they are gated by is younger than the gap. `shift_left` took `T: Element` until this
+//! pass was prepared, so a shift of a vector of floats compiled, built, and produced a module
+//! `spirv-val` rejects — `OpUDot`'s shape exactly, in three public operations at once.
+//!
+//! **The distance is drawn across the element's whole width**, which is the half of this worth
+//! arguing. `OpShiftRightLogical` and `OpShiftRightArithmetic` agree on every value whose top bit
+//! is clear, and every value this generator draws has one — so a corpus of small numbers proves one
+//! instruction and reads as proving two. A left shift of 31 is what puts a bit at the top, and the
+//! right shift after it is then a question with two different answers. The ceiling is the
+//! specification's: a shift by at least the operand's width is **undefined**, and
+//! [`ProgramError::ShiftTooFar`] refuses one rather than comparing a device's arbitrary answer
+//! against a host's.
+//!
 //! **And the two operations the API audit added, since later on 2026-08-14.** `Op::SelectEqual`
 //! reaches `Lanes::equal` — the elementwise comparison this crate had gone a month without — and
 //! `Op::AddIfAllEqual` reaches the vote about a *value*, the second uniform branch here. Both
@@ -71,13 +92,12 @@ mod generate;
 mod interpret;
 mod program;
 
-pub use domain::{ALL_DOMAINS, Domain};
+pub use domain::{ALL_DOMAINS, BitShift, Domain};
 pub use generate::{Rng, generate};
 pub use interpret::{Reference, reference};
-pub use program::{Finish, Op, Program};
+pub use program::{Emit, Finish, Op, Program, ProgramError};
 
 use crate::{Error, Gpu};
-use simdr::lanes::LaneError;
 
 /// What a single fuzzing round concluded.
 #[derive(Debug)]
@@ -99,7 +119,12 @@ pub enum Outcome {
     ///
     /// Not a failure: the generator is allowed to ask for things the mapping refuses, and being
     /// refused *by name* is the correct answer.
-    Refused(LaneError),
+    ///
+    /// **A [`ProgramError`] and not a `LaneError` since the bit shifts arrived.** Until then every
+    /// operation existed in every domain and the only thing that could go wrong was the width. A
+    /// step some domains have and others do not is a second kind of no, and `decisions/DR-0009` is
+    /// about not folding two kinds of no into one arm.
+    Refused(ProgramError),
     /// The reference left the range its domain counts exactly, so the round was not compared.
     ///
     /// Also not a failure, and for a sharper reason than [`Outcome::Refused`]: the *device* would

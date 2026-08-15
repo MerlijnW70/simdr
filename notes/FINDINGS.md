@@ -3508,3 +3508,89 @@ than a silence, and because the expiry test beside it fires the moment an excuse
 emitter. Its scanner test needed a new negative case for the same reason the list emptied: there is
 no dead opcode left to point at, so it asks about a name no opcode has — which is the shape a new
 dead one would arrive in.
+
+## The first step that is not available in every domain — 2026-08-15
+
+`notes/NEXT.md` has named the fuzzer's vocabulary as the highest-value direction in the tree for
+three passes running, and named the same blocker each time: *"`Program::build` emits through one
+function generic over `Element`, and a shift needs `Integer`. Generating one means emitting per
+domain rather than filtering a pool."*
+
+That is now built, and the shape it took is worth recording, because the obvious reading of "emit
+per domain" is the wrong one.
+
+### The obvious fix was a second copy of the width ladder
+
+`build_in` picks the element type from the domain and hands it to `build_at::<T, LANES>`, which is a
+ladder of nine const-generic arms — `1 => …::<T, 1>()`, `2 => …::<T, 2>()`, and so on, because
+`LANES` is a const generic and the generator's width is a runtime value. Emitting per domain reads
+like: one ladder for the six integer types and another for the two floats.
+
+**Two ladders is a relationship decided twice**, which is the shape this file catalogues more often
+than any other — `reduce_min` folding its strips with a maximum, `shape_of` deciding the mapping a
+second way, `strips_of` and `input_len` sharing a comparison that could not distinguish its arms.
+
+So the ladder stays single and the *element type* carries what it can do. `Emit` is one method:
+
+```text
+fn bit_shift<const LANES: u32>(lanes, kind, value, by) -> Result<Vector<Self, LANES>, ProgramError>
+```
+
+implemented for the six integers by a macro that calls the lane API, and for `F32` and `F16` by one
+that refuses. A blanket `impl<T: Integer> Emit for T` beside `impl Emit for F32` is what this wants
+to be, and Rust will not take it — the compiler cannot know `F32` is not an `Integer`, so the impls
+conflict. That is the whole reason for the macros, and it is worth saying so where somebody will
+otherwise try to simplify them away.
+
+### Two gating axes, and they are not the same axis
+
+The generator already had three pools — `CLUSTERED`, `WHOLE`, `STRIPPED` — chosen by the mapping,
+which says **which lanes a vector may read**. A bit shift reads no lane but its own, so it is legal
+under all three and adding it to each would have been three identical copies.
+
+What gates it is the **element type**. So it is a fourth list beside the three rather than three
+entries inside them: two axes, two lists. Combining them would have been six.
+
+### A second kind of no
+
+`Outcome::Refused` carried a `LaneError` because, until this, every operation existed in every
+domain and the only thing that could go wrong was the *width*. A step some domains have and others
+do not is a second kind of no, and folding it into the first would have made a float program holding
+a shift look exactly like a vector too wide to map.
+
+`ProgramError` names three: the lane API's refusal, `NotInThisDomain`, and `ShiftTooFar`. That is
+`decisions/DR-0009` applied to the type it says is missing an arm.
+
+### The corpus could not have told the two right shifts apart
+
+`OpShiftRightLogical` and `OpShiftRightArithmetic` **agree on every value whose top bit is clear**,
+and every value this generator draws is a small positive number. So the naive draw — a small shift
+distance, like every other operand here — would have generated both instructions, run both on four
+devices, agreed both times, and proved one instruction twice.
+
+The distance is drawn across the element's whole width instead. A left shift of 31 puts a bit at the
+top and the next right shift is a question with two different answers. `Domain::bit_shift` is
+asserted directly on that: for every integer domain, the two right shifts differ once the top bit is
+set — a claim about the *reference*, made where a device is not needed to check it.
+
+**And the ceiling is the specification's rather than a choice.** A shift by at least the operand's
+width is undefined in SPIR-V, so `ProgramError::ShiftTooFar` refuses one. That is the `ButterflyAdd`
+lesson verbatim: its mask was drawn from `1 << below(4)`, every distance of which is inside a 32- or
+64-wide subgroup — right on both devices here, and wrong on an eight-wide one, found by lavapipe on
+seed 3 as a disagreement the fuzzer reported against itself.
+
+### The other asymmetry, which the reference had to be written from
+
+`OpShiftRightArithmetic` sign-extends from the **element's own top bit whatever the type's
+signedness says**. An `OpTypeInt` with signedness 0 still spreads bit 7 of a byte. So the reference
+reads it from `Domain::bits` rather than from `Domain::is_signed` — and the two would agree for
+every signed domain, which is exactly how a reference written the other way would have passed and
+then disagreed with a device only in `u8` and `u16`.
+
+### What it cost and what it bought
+
+Six new tests, 124 mutants at 100% over the six changed files, and the vocabulary is 20 kinds where
+it was 17. All eight domains agree over 256 seeds each on the RTX 4080, the integrated Radeon and
+lavapipe at 4, 8 and 16 — 232 generated modules through `spirv-val` at every width first.
+
+The three operations had, before this, a `compile_fail` doctest and one hand-written test apiece.

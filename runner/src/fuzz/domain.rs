@@ -41,6 +41,31 @@
 //! `runner/tests/narrow.rs` covers the rounding itself, against expectations reasoned from the
 //! format.
 
+/// Which of the three bit shifts a step asks for.
+///
+/// Named apart because `src/lanes/shift.rs` names them apart, and for its reason: the two right
+/// shifts *agree on every value whose top bit is clear*, which is every value this generator draws
+/// — so a corpus alone could never tell them apart. What separates them is a program that puts a
+/// bit at the top, which is what [`BitShift::Left`] by a large amount is here to do.
+///
+/// Not to be confused with `Op::ShiftUp` and `Op::ShiftDown`, which move a value between *lanes*.
+/// These move bits inside one element and cross no lane at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BitShift {
+    /// `value << by`, `OpShiftLeftLogical`.
+    Left,
+    /// `value >> by` filling with zeros, `OpShiftRightLogical`.
+    RightLogical,
+    /// `value >> by` filling with copies of the top bit, `OpShiftRightArithmetic`.
+    ///
+    /// **Sign-extends from the element's own top bit whatever the type's signedness says**, which
+    /// is SPIR-V's rule and not an obvious one: an `OpTypeInt` with signedness 0 shifted this way
+    /// still spreads bit 7 of a byte. The reference below reads it the same way, from
+    /// [`Domain::bits`] rather than from [`Domain::is_signed`] — and the two would agree for every
+    /// signed domain, which is how a reference written the other way would have passed.
+    RightArithmetic,
+}
+
 /// The element type a program computes in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Domain {
@@ -348,6 +373,34 @@ impl Domain {
     #[must_use]
     pub fn zero(self) -> u32 {
         self.encode(0)
+    }
+
+    /// Shift `bits` by `by`, in this domain.
+    ///
+    /// The one operation here that reads its operand as **bits rather than as a number**, which is
+    /// why it is written from `truncate` and `signed_value` directly instead of from `add` and
+    /// `greater` like everything above it.
+    ///
+    /// # What happens past the element's width
+    ///
+    /// SPIR-V leaves a shift by at least the operand's width **undefined**, and a reference cannot
+    /// predict undefined. `Program::build` refuses such a step by name, so this is never consulted
+    /// for one — and it is still total, because a public function that panics on an input is worse
+    /// than one that answers. The answer it gives is the *mathematical* limit: everything shifted
+    /// out, so zero, or all sign bits. That is what most hardware does and what nothing promises,
+    /// which is exactly why the refusal is the operative rule rather than this line.
+    #[must_use]
+    pub fn bit_shift(self, kind: BitShift, bits: u32, by: u32) -> u32 {
+        match kind {
+            BitShift::Left => self.truncate(self.truncate(bits).checked_shl(by).unwrap_or(0)),
+            BitShift::RightLogical => self.truncate(bits).checked_shr(by).unwrap_or(0),
+            // `signed_value` widens from this domain's own top bit, so a byte spreads bit 7 and a
+            // `u32` spreads bit 31 — the type's signedness does not enter into it. The `min` is the
+            // out-of-range case above: `i32 >> 32` is a panic in Rust and a sign fill here.
+            BitShift::RightArithmetic => {
+                self.truncate((self.signed_value(bits) >> by.min(31)) as u32)
+            }
+        }
     }
 }
 
