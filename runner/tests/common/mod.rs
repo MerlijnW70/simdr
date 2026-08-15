@@ -78,6 +78,14 @@ pub fn device(label: &str) -> Option<Gpu> {
 ///
 /// [`Narrow`]: runner::Narrow
 pub fn runnable(gpu: &Gpu, label: &str, modules: &[&[u32]]) -> bool {
+    // No modules is no gate, and it reads like one. Nothing does it today; this is so that nothing
+    // can — the point of this function is that a gate cannot be wrong, and a gate over an empty
+    // list is the one way left to write one that never fires.
+    assert!(
+        !modules.is_empty(),
+        "runnable({label:?}) was given no modules to ask about, which gates on nothing"
+    );
+
     for spirv in modules {
         let missing = gpu.limits().unsupported_in(spirv);
         if !missing.is_empty() {

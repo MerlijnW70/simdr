@@ -2904,3 +2904,40 @@ The workflow already refused this once — it fails outright when no lavapipe IC
 stated grounds that the tests would otherwise "skip and pass over nothing". That guarded one route
 to an empty run. This guards the others, and it means a gate that starts over-skipping shows up as
 red rather than as a summary line that looks exactly like success.
+
+### The skip count went red on its own first run, twice, and both were real
+
+The check above was written from three local sweeps: 25, 22 and 18. CI disagreed with all three
+immediately, and neither reason was noise.
+
+**It counted 4 of 23.** The grep was `^SKIPPED`, and `--nocapture` is precisely what makes that
+wrong: `libtest` writes `test <name> ... ` without a newline and finishes the line only after the
+body has run, so a skip's own output lands *mid-line*, behind the name of the test it belongs to:
+
+```
+test a_strip_mined_dot_product_folds_four_products_per_lane ... SKIPPED dot-product-strips: written for a 32-wide subgroup
+```
+
+Locally the same count matched all 25, because a PowerShell `2>&1 | Out-String` capture merges the
+two streams differently than a pipe on Linux does. A counting method that agrees with itself on one
+platform is not a measurement.
+
+**And every width was one short.** `session.rs` skips its speed *ratio* when `CI` is set — a
+shared runner's wall clock is not evidence about setup cost, which that file argues at length — so
+CI legitimately skips one test a workstation never does. The numbers are measured on CI now, where
+they are asserted, rather than carried there from a machine that runs a different set.
+
+Both are the same mistake as the one that started this: a number produced somewhere other than
+where it is used, read as if it travelled. The check earning its place by failing on the environment
+it was written for is the outcome to want.
+
+### One more variable of the same shape
+
+`SIMDR_FUZZ_ROUNDS` is how a longer search is asked for, and it was
+`.and_then(|value| value.parse().ok()).unwrap_or(ROUNDS)` — so `100_000`, `1e6` or a stray space
+sent the run quietly back to 256. Somebody would have watched a 30 000-round sweep they never ran.
+It panics with the value now.
+
+Three variables audited, three of the same bug: `SIMDR_DEVICE`, `SPIRV_VAL`, `SIMDR_FUZZ_ROUNDS`.
+Every one of them read as *set-and-wrong is the same as unset*, and every one of them is a variable
+whose entire purpose is to say where something is or how much of it to do.

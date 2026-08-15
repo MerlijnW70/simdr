@@ -54,11 +54,20 @@ fn corpus(domain: Domain, len: usize) -> Vec<u32> {
 }
 
 /// How many rounds to run, taking `SIMDR_FUZZ_ROUNDS` if it is set.
+///
+/// **A value that will not parse is an error rather than the default.** This variable is how a
+/// longer search is asked for, and `and_then(|value| value.parse().ok())` sent every misspelling —
+/// `100_000`, `1e6`, a stray space — quietly back to 256. Somebody would have watched a 30 000-round
+/// sweep they never ran, and the report at the end says how many rounds it *did*, so the two would
+/// have had to be read together to notice.
 fn rounds() -> u64 {
-    std::env::var("SIMDR_FUZZ_ROUNDS")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(ROUNDS)
+    let Some(value) = std::env::var_os("SIMDR_FUZZ_ROUNDS") else {
+        return ROUNDS;
+    };
+    let text = value.to_string_lossy();
+    text.trim().parse().unwrap_or_else(|error| {
+        panic!("SIMDR_FUZZ_ROUNDS is {text:?}, which is not a number of rounds: {error}")
+    })
 }
 
 /// One program, run to find out whether **this device** miscompiles the clustered ladder.

@@ -96,16 +96,22 @@ jobs:
         # `skips` is how many tests legitimately cannot run at that width — a kernel written for a
         # 32-wide subgroup, a narrow type this width cannot hold. It is asserted below. See the
         # step for why a number rather than a shrug.
+        #
+        # **One higher than the same run on a workstation**, and the difference is not a device
+        # difference: `session.rs` skips its speed *ratio* when `CI` is set, because a shared
+        # runner's wall clock is not evidence about setup cost. So these were measured here rather
+        # than assumed from a local sweep — which is how the first version of this check went red on
+        # its own first run, off by exactly that one.
         include:
           - vector: 128
             width: 4
-            skips: 25
+            skips: 26
           - vector: 256
             width: 8
-            skips: 22
+            skips: 23
           - vector: 512
             width: 16
-            skips: 18
+            skips: 19
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -163,10 +169,14 @@ jobs:
         run: |
           set -o pipefail
           cargo test -p runner -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/runner.log"
-          skipped=$(grep -c '^SKIPPED' "$RUNNER_TEMP/runner.log" || true)
-          echo "$skipped tests skipped at subgroup ${{ matrix.width }}, and ${{ matrix.skips }} is what this width is written to skip"
+          # Occurrences rather than lines, and unanchored. `--nocapture` is what makes those two
+          # different: `libtest` writes `test <name> ... ` without a newline and only finishes the
+          # line after the body has run, so a skip's own output lands *mid-line* behind the name of
+          # the test it belongs to. The first version of this counted `^SKIPPED` and found 4 of 23.
+          skipped=$(grep -o 'SKIPPED ' "$RUNNER_TEMP/runner.log" | wc -l)
+          echo "$skipped tests did not run at subgroup ${{ matrix.width }}, and ${{ matrix.skips }} is what this width is written not to run"
           if [ "$skipped" -ne "${{ matrix.skips }}" ]; then
-            echo "::error::${{ matrix.width }}-wide run skipped $skipped tests and the matrix says ${{ matrix.skips }} — read the SKIPPED lines above, then change the code or the number"
+            echo "::error::${{ matrix.width }}-wide run did not run $skipped tests and the matrix says ${{ matrix.skips }} — read the reasons above, then change the code or the number"
             exit 1
           fi
 
