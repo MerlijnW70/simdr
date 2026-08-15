@@ -32,6 +32,30 @@
 //! index and whose right is a constant. The workgroup size is known from `LocalSize`, so dividing
 //! that constant by it gives back the strip count the emitter used.
 //!
+//! # The constant past the run
+//!
+//! `Kernel::load_offset` reads `in[i + half]`, and that `half` used to be outside this entirely —
+//! the safe direction, since it under-counts, but a hole all the same: a fold whose buffer is
+//! exactly `invocations × strips` long reads `half` elements past the end of it and this said the
+//! dispatch fit.
+//!
+//! It needed nothing new to read. The emitter folds the strip's stride and the caller's offset into
+//! **one** constant — `Kernel::address` computes `strip × workgroup + offset` at build time — so the
+//! constant added to the invocation's own lane already carries it, and the strip term is a number
+//! this file has always known:
+//!
+//! ```text
+//! address = group × (workgroup × strips)  +  local + (strip × workgroup + offset)
+//!           \_____________ base _______/           \__________ shift __________/
+//! ```
+//!
+//! The largest `shift` on a binding belongs to its last strip, so `shift - (strips - 1) × workgroup`
+//! is the caller's `offset` and nothing else. A binding with no offset gives zero, which is the
+//! arithmetic agreeing with the answer this file gave before.
+//!
+//! `Kernel::load_offset_by` stays outside it, and must: its offset is a specialization constant,
+//! which is a number chosen after the module was built and has no literal here to read.
+//!
 //! # The walk is deliberately short-sighted
 //!
 //! It follows `OpIAdd` and `OpIMul` and stops at everything else, because those two are the whole
@@ -53,15 +77,26 @@ struct Term {
     right: u32,
 }
 
-/// How many elements one invocation touches in each buffer, keyed by its binding number.
+/// What one binding's addressing asks of the buffer behind it.
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct Needs {
+    /// How many elements each invocation touches — the strip count the emitter used.
+    pub(super) per_invocation: u64,
+    /// A constant number of elements past the run, from `Kernel::load_offset`.
+    ///
+    /// Zero for every binding nobody offsets into, which is most of them.
+    pub(super) offset: u64,
+}
+
+/// What each buffer's addressing asks of it, keyed by its binding number.
 ///
 /// A binding whose address does not vary per invocation is absent rather than zero: the two are
 /// different claims, and only one of them is safe to multiply by an invocation count.
 ///
 /// Empty when the module declares no workgroup size this can divide by, when it has no
 /// `LocalInvocationId` to depend on, or when nothing in it addresses a bound buffer.
-pub(super) fn per_invocation(spirv: &[u32], workgroup: u64) -> BTreeMap<u32, u64> {
-    let mut wanted = BTreeMap::new();
+pub(super) fn needs(spirv: &[u32], workgroup: u64) -> BTreeMap<u32, Needs> {
+    let mut wanted: BTreeMap<u32, Needs> = BTreeMap::new();
     if workgroup == 0 {
         return wanted;
     }
@@ -88,11 +123,43 @@ pub(super) fn per_invocation(spirv: &[u32], workgroup: u64) -> BTreeMap<u32, u64
         // the fallback is for an address that reached the invocation some other way — one element
         // each, as far as anything here can tell.
         let strips = strips_in(&from, &terms, &constants, group, workgroup).max(1);
-        let entry = wanted.entry(binding).or_insert(0);
-        *entry = (*entry).max(strips);
+
+        // What is left of this access's folded constant once its own strip is accounted for. On the
+        // last strip that is the caller's offset exactly; on an earlier one it is less, or nothing,
+        // so the maximum over a binding's accesses is the offset and the others cost nothing.
+        let offset = shift_in(&from, &terms, &constants, local)
+            .saturating_sub((strips - 1).saturating_mul(workgroup));
+
+        let entry = wanted.entry(binding).or_default();
+        entry.per_invocation = entry.per_invocation.max(strips);
+        entry.offset = entry.offset.max(offset);
     }
 
     wanted
+}
+
+/// The largest constant added to the invocation's own lane on the way to this address.
+///
+/// `Kernel::address` emits `i_add(uint, local, shift)` and folds `strip × workgroup + offset` into
+/// that one constant, so this is both terms at once and the caller above separates them. Zero when
+/// the address is the lane itself, which is what the emitter emits when the fold comes to nothing.
+///
+/// The lane is the **left** operand, as `run_start`'s workgroup index is: the order is this
+/// project's own, and reading it the other way round would find nothing and report zero — the safe
+/// direction, and one the offset tests would fail loudly on.
+fn shift_in(
+    from: &BTreeSet<u32>,
+    terms: &BTreeMap<u32, Term>,
+    constants: &BTreeMap<u32, u32>,
+    local: u32,
+) -> u64 {
+    from.iter()
+        .filter_map(|id| terms.get(id))
+        .filter(|term| term.opcode == op::I_ADD && term.left == local)
+        .filter_map(|term| constants.get(&term.right).copied())
+        .map(u64::from)
+        .max()
+        .unwrap_or(0)
 }
 
 /// The largest `workgroup × strips` constant multiplied by the workgroup index, divided back down.

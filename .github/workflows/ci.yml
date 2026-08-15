@@ -105,13 +105,13 @@ jobs:
         include:
           - vector: 128
             width: 4
-            skips: 26
+            skips: 27
           - vector: 256
             width: 8
-            skips: 23
+            skips: 24
           - vector: 512
             width: 16
-            skips: 19
+            skips: 20
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable

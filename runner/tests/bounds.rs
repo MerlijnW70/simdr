@@ -235,3 +235,56 @@ fn a_kernel_this_cannot_read_is_let_through_rather_than_refused() {
     // Far more workgroups than eight words could hold, if it wrote anything.
     assert!(session.dispatch(64, 1).is_ok());
 }
+
+#[test]
+fn a_kernel_reading_past_its_run_is_measured_against_what_it_reads() {
+    // **The hole this file did not cover, because the check could not see it.**
+    // `Kernel::load_offset` reads `in[i + half]`, and the offset was outside `dispatch::extent`
+    // entirely: a buffer exactly as long as the run passed, while the kernel read `half` elements
+    // past the end of it. Every other test here provokes a refusal by widening the *dispatch*; this
+    // one keeps the dispatch at one workgroup and narrows the buffer, which is the only way the
+    // offset shows up at all.
+    //
+    // `clipped_dot` is the kernel that has it for a reason rather than for a test: activations
+    // occupy the first `offset` elements of binding 0 and weights the rest, so it reads exactly
+    // twice its run and always has.
+    let Some(gpu) = device("bounds-offset") else {
+        return;
+    };
+
+    let width = gpu.limits().subgroup_size;
+    if width != 32 {
+        eprintln!("SKIPPED bounds-offset: clipped_dot is written for a 32-wide subgroup");
+        return;
+    }
+
+    // One subgroup folds 256 elements in eight strips, and one workgroup is 64 invocations — so
+    // the run is 512 elements and the weights are 512 more.
+    let run = WORKGROUP_SIZE as usize * 8;
+    let spirv = kernels::network::clipped_dot::<256>(width, run as u32, 255).expect("built");
+    if !common::runnable(&gpu, "bounds-offset", &[&spirv]) {
+        return;
+    }
+
+    let whole = vec![0_u32; run * 2];
+    assert!(
+        gpu.run_u32(&spirv, &whole, 1).is_ok(),
+        "the run and the offset together is what this kernel touches"
+    );
+
+    // One element short of that, which is the case that used to run.
+    let short = vec![0_u32; run * 2 - 1];
+    let outcome = gpu.run_u32(&spirv, &short, 1);
+    assert!(
+        overran(&outcome),
+        "a buffer one element short of the offset read gave {outcome:?}"
+    );
+
+    // And the run alone, which is what a caller who had not read the kernel would allocate.
+    let run_only = vec![0_u32; run];
+    let outcome = gpu.run_u32(&spirv, &run_only, 1);
+    assert!(
+        overran(&outcome),
+        "a buffer of exactly the run gave {outcome:?}, and the weights are the other half"
+    );
+}

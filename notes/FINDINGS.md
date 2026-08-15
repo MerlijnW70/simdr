@@ -2941,3 +2941,52 @@ It panics with the value now.
 Three variables audited, three of the same bug: `SIMDR_DEVICE`, `SPIRV_VAL`, `SIMDR_FUZZ_ROUNDS`.
 Every one of them read as *set-and-wrong is the same as unset*, and every one of them is a variable
 whose entire purpose is to say where something is or how much of it to do.
+
+## The constant the bounds check could not see — 2026-08-15
+
+`dispatch::extent` has said this about itself since it was written:
+
+> What is outside it is a **constant offset past the run**: `Kernel::load_offset` reads
+> `in[i + half]`, and a fold whose dispatch is deliberately narrower than its buffer looks, to this,
+> like a dispatch with room to spare. That direction is safe — it under-counts, so it refuses less
+> than it might and never more.
+
+Under-counting is the safe direction and it is not the same as no hole. A buffer exactly as long as
+the run is one this said a dispatch fit while the kernel read `half` elements past the end of it,
+and `notes/NEXT.md` carried it as open on the grounds that "nothing needs it yet".
+
+**Something did.** `kernels::network::clipped_dot` puts activations in the first `offset` elements
+of binding 0 and the weights after them, so it reads *exactly twice its run* and always has. Handed
+a buffer of only the run, an RTX 4080 dispatched it and returned 512 words of zeros — a full array
+of plausible numbers, read from past the end of a storage buffer. That is the undefined behaviour
+this file exists to refuse, and it was reachable from safe code through `Gpu::run`.
+
+### It needed nothing declared, again
+
+The same thing was true of the strip count, and for the same reason: the number is already in the
+module. `Kernel::address` folds the strip's stride and the caller's offset into **one** constant at
+build time —
+
+```text
+address = group × (workgroup × strips)  +  local + (strip × workgroup + offset)
+          \_____________ base _______/           \__________ shift __________/
+```
+
+— so the constant added to the invocation's own lane carries both terms, and the strip term is a
+number this walk has always recovered. `shift - (strips - 1) × workgroup` is the caller's offset and
+nothing else, because the largest shift on a binding belongs to its last strip. Every other binding
+gives zero, which is the arithmetic agreeing with the answer the file gave before there was an
+offset to add.
+
+A second copy of the offset — carried out of `Kernel::load_offset`, or decorated onto the module —
+would have been a second thing to keep true. There is no second copy.
+
+### Checked by breaking it
+
+Multiplying the recovered offset by zero and re-running: the unit tests fail, and the device test
+fails by *succeeding* — `Ok([0, 0, 0, …])`, 512 words of it, off the end of a buffer on a 4080. The
+failure mode and the evidence for it are the same output.
+
+What stays outside, now stated as two things rather than one: a grid kernel's `row × pitch`, which
+this does not read at all, and `Kernel::load_offset_by`, whose offset is a *specialization* constant
+— a number chosen after the module was built, with no literal in it to find. Both under-count.

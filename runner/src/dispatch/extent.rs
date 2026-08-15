@@ -34,15 +34,22 @@
 //!
 //! # What the check is and is not
 //!
-//! **Necessary, not sufficient.** Three numbers go into it and all three are read from the module:
+//! **Necessary, not sufficient.** Four numbers go into it and all four are read from the module:
 //! how many invocations the dispatch launches, how many *elements* each one touches of a given
-//! binding, and how many bytes an element takes.
+//! binding, how many elements past the end of the run it reaches, and how many bytes an element
+//! takes.
 //!
-//! What is outside it is a **constant offset past the run**: `Kernel::load_offset` reads
-//! `in[i + half]`, and a fold whose dispatch is deliberately narrower than its buffer looks, to
-//! this, like a dispatch with room to spare. That direction is safe — it under-counts, so it
-//! refuses less than it might and never more. The same is true of a grid kernel's `row × pitch`,
-//! which this does not read at all.
+//! The third of those was outside it until now. `Kernel::load_offset` reads `in[i + half]`, and a
+//! buffer exactly as long as the run is one this said a dispatch fit while the kernel read `half`
+//! elements past the end of it. The direction was safe — under-counting refuses less than it might
+//! and never more — but the hole was real, and closing it needed nothing declared: the emitter
+//! folds `strip × workgroup + offset` into one constant, and the strip term is a number this
+//! already knows. See [`addressing`].
+//!
+//! Two things stay outside. A grid kernel's `row × pitch` is not read at all, and
+//! `Kernel::load_offset_by`'s offset is a *specialization* constant — a number chosen after the
+//! module was built, with no literal in it to find. Both under-count, which is the direction this
+//! check must always take when it cannot see.
 
 mod addressing;
 
@@ -64,9 +71,9 @@ pub(crate) struct Bounds {
     workgroup: Option<u64>,
     /// Bytes per element, from the buffer's `ArrayStride`.
     stride: Option<u64>,
-    /// How many elements each invocation touches, per binding. A binding whose address does not
-    /// vary per invocation is absent — see [`addressing`].
-    per_invocation: BTreeMap<u32, u64>,
+    /// What each binding's addressing asks of it. A binding whose address does not vary per
+    /// invocation is absent — see [`addressing`].
+    needs: BTreeMap<u32, addressing::Needs>,
 }
 
 /// A buffer a dispatch would touch past the end of.
@@ -100,7 +107,7 @@ impl Bounds {
         Self {
             workgroup,
             stride: element_bytes(spirv),
-            per_invocation: addressing::per_invocation(spirv, workgroup.unwrap_or(0)),
+            needs: addressing::needs(spirv, workgroup.unwrap_or(0)),
         }
     }
 
@@ -117,11 +124,11 @@ impl Bounds {
         };
         let invocations = invocations(grid, workgroup);
 
-        self.per_invocation
+        self.needs
             .iter()
-            .filter_map(|(&binding, &elements)| {
+            .filter_map(|(&binding, needs)| {
                 let held = *words.get(binding as usize)?;
-                let needed = self.words_for(invocations, elements, stride);
+                let needed = words_for(elements_of(invocations, *needs), stride);
                 (needed > held).then_some(Overrun {
                     binding: Some(binding),
                     needed,
@@ -147,16 +154,21 @@ impl Bounds {
         };
         let invocations = invocations(grid, workgroup);
 
-        // The widest binding, or the floor for a module whose addressing this could not read at
+        // The hungriest binding, or the floor for a module whose addressing this could not read at
         // all. Such a module touches an element per invocation as far as anyone here knows, and
         // treating it as touching *none* would make every dispatch fit every buffer.
+        //
+        // By elements *needed* rather than by elements per invocation: a binding read one at a time
+        // with a constant offset past the run can want more than one read four at a time without
+        // it, and comparing the multipliers alone would pick the wrong one to report.
         let (binding, elements) = self
-            .per_invocation
+            .needs
             .iter()
-            .max_by_key(|&(_, &elements)| elements)
-            .map_or((None, 1), |(&binding, &elements)| (Some(binding), elements));
+            .map(|(&binding, needs)| (Some(binding), elements_of(invocations, *needs)))
+            .max_by_key(|&(_, elements)| elements)
+            .unwrap_or((None, invocations));
 
-        let needed = self.words_for(invocations, elements, stride);
+        let needed = words_for(elements, stride);
         (needed > words).then_some(Overrun {
             binding,
             needed,
@@ -173,20 +185,6 @@ impl Bounds {
         self.overrun_uniform(grid, words).is_none()
     }
 
-    /// How many words `invocations × elements` of `stride` bytes occupy, rounded up.
-    ///
-    /// **Rounded up, and that is not pedantry**: four `i8` share a word, so 129 byte-writing
-    /// invocations need 33 words rather than 32, and the last one has nowhere to write if this
-    /// divides instead.
-    fn words_for(&self, invocations: u64, elements: u64, stride: u64) -> usize {
-        let bytes = invocations
-            .saturating_mul(elements)
-            .saturating_mul(stride)
-            .saturating_add(size_of::<u32>() as u64 - 1);
-
-        usize::try_from(bytes / size_of::<u32>() as u64).unwrap_or(usize::MAX)
-    }
-
     /// How many elements the widest binding gives each invocation, or one for a module this could
     /// not read.
     ///
@@ -195,8 +193,47 @@ impl Bounds {
     /// reader looking for it should not have to know it lives in a map.
     #[cfg(test)]
     pub(crate) fn elements_per_invocation(&self) -> u64 {
-        self.per_invocation.values().copied().max().unwrap_or(1)
+        self.needs
+            .values()
+            .map(|needs| needs.per_invocation)
+            .max()
+            .unwrap_or(1)
     }
+
+    /// The largest constant any binding is read past the end of its run by.
+    #[cfg(test)]
+    pub(crate) fn offset(&self) -> u64 {
+        self.needs
+            .values()
+            .map(|needs| needs.offset)
+            .max()
+            .unwrap_or(0)
+    }
+}
+
+/// The highest element index a dispatch of `invocations` reaches in this binding, as a count.
+///
+/// `invocations × strips` is the run itself, and the offset sits past the end of it: the last
+/// invocation of the last strip lands at `invocations × strips - 1 + offset`, so the buffer needs
+/// one more than that. A binding nobody offsets into has an offset of zero and this is the product
+/// alone, which is the number this file compared before there was an offset to add.
+fn elements_of(invocations: u64, needs: addressing::Needs) -> u64 {
+    invocations
+        .saturating_mul(needs.per_invocation)
+        .saturating_add(needs.offset)
+}
+
+/// How many words `elements` of `stride` bytes occupy, rounded up.
+///
+/// **Rounded up, and that is not pedantry**: four `i8` share a word, so 129 byte-writing
+/// invocations need 33 words rather than 32, and the last one has nowhere to write if this
+/// divides instead.
+fn words_for(elements: u64, stride: u64) -> usize {
+    let bytes = elements
+        .saturating_mul(stride)
+        .saturating_add(size_of::<u32>() as u64 - 1);
+
+    usize::try_from(bytes / size_of::<u32>() as u64).unwrap_or(usize::MAX)
 }
 
 /// The workgroup size declared by `spirv`, as `x * y * z`.
@@ -440,6 +477,66 @@ mod tests {
             "a buffer of one element per invocation is an eighth of what this reads"
         );
         assert!(bounds.fits(Grid::linear(1), workgroup * 8));
+    }
+
+    #[test]
+    fn a_constant_offset_past_the_run_is_read_out_of_the_folded_address() {
+        // `kernels::network::clipped_dot` puts activations in the first `offset` elements of
+        // binding 0 and weights after them, so it is the kernel this check was blind to: everything
+        // it reads past `invocations × strips` is the offset, and the offset is a literal in the
+        // module's own address arithmetic.
+        //
+        // 512 rather than a round number on purpose — it is `WORKGROUP_SIZE × 8`, the same shape as
+        // a strip term, so a walk that subtracted the wrong number of strips would land near it
+        // rather than obviously away from it.
+        let offset = kernels::WORKGROUP_SIZE * 8;
+        let spirv = kernels::network::clipped_dot::<256>(32, offset, 255).expect("built");
+        let bounds = Bounds::of(&spirv);
+
+        assert_eq!(
+            per_invocation(&spirv),
+            8,
+            "256 lanes on a 32-wide subgroup is eight strips"
+        );
+        assert_eq!(
+            bounds.offset(),
+            u64::from(offset),
+            "the strip term is subtracted back off, leaving what the caller asked for"
+        );
+    }
+
+    #[test]
+    fn a_kernel_reading_past_its_run_needs_a_buffer_past_its_run() {
+        // The hole this closed, as the numbers a caller sees. One workgroup of 64 invocations at
+        // eight strips is a run of 512 elements, and the kernel reads 512 more past it — so a
+        // buffer of exactly the run is half of what it touches, and this used to say it fit.
+        let offset = kernels::WORKGROUP_SIZE * 8;
+        let bounds =
+            Bounds::of(&kernels::network::clipped_dot::<256>(32, offset, 255).expect("built"));
+        let run = kernels::WORKGROUP_SIZE as usize * 8;
+
+        assert!(
+            !bounds.fits(Grid::linear(1), run),
+            "the run alone leaves nothing for the half this kernel reads past it"
+        );
+        assert!(!bounds.fits(Grid::linear(1), run + offset as usize - 1));
+        assert!(
+            bounds.fits(Grid::linear(1), run + offset as usize),
+            "the run and the offset is exactly what it touches"
+        );
+    }
+
+    #[test]
+    fn a_kernel_that_offsets_into_nothing_reports_no_offset() {
+        // The other direction, and the one every other kernel here takes: `load` is `load_offset`
+        // with a zero, the emitter folds the zero away rather than emitting an add, and this must
+        // report nothing rather than inventing a term out of the strip stride.
+        assert_eq!(Bounds::of(&kernels::empty(32).expect("built")).offset(), 0);
+        assert_eq!(
+            Bounds::of(&kernels::reduce::lane_sum::<F32, 128>(32).expect("built")).offset(),
+            0,
+            "four strips of address arithmetic, and not one element past the run"
+        );
     }
 
     #[test]

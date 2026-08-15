@@ -1179,15 +1179,27 @@ at all, not whether it reaches *the validation its siblings reach*. `Gpu`'s disp
 members and one bound check; nothing here would have said so, because all six were consumed. That
 question needs a notion of "family" the tree does not currently carry.
 
-**8. `Kernel::load_offset`'s offset is still outside the dispatch bound.** `dispatch::extent`
-under-counts a kernel that reads `in[i + half]`, which is the safe direction and is stated in the
-file. Making it exact means reading the constant folded into the address, which is one more step of
-the same walk `addressing.rs` already does. Nothing needs it yet: the fold kernels size their
-dispatch deliberately narrower than their buffer, so the under-count costs nothing.
+**8. `Kernel::load_offset`'s offset was outside the dispatch bound — done, and something did need
+it.** The item said the under-count cost nothing because the fold kernels size their dispatch
+narrower than their buffer. `kernels::network::clipped_dot` does not: activations occupy the first
+`offset` elements of binding 0 and the weights the rest, so it reads *exactly twice its run*. Handed
+a buffer of only the run it dispatched and returned 512 words of zeros on an RTX 4080 — read from
+past the end of a storage buffer, through `Gpu::run`, from safe code.
 
-**9. A grid kernel's `row × pitch` is outside it too**, for the same reason and with the same
-consequence. The walk stops at the multiply by the workgroup index; a grid's row term is a multiply
-by something else. `Kernel::load_row` callers size their own buffers today.
+It was one more step of the same walk, as written, and it needed nothing declared for the same
+reason the strip count did not: `Kernel::address` folds `strip × workgroup + offset` into one
+constant, so `shift - (strips - 1) × workgroup` is the caller's offset and the strip term is a
+number `addressing.rs` already recovers. Checked by breaking it — with the offset multiplied by
+zero the device test fails by *succeeding*, which is the whole finding in one line of output.
+
+**9. A grid kernel's `row × pitch` is outside it too**, and so is `Kernel::load_offset_by`. The walk
+stops at the multiply by the workgroup index, and a grid's row term is a multiply by something else;
+`load_offset_by` takes a *specialization* constant, which is a number chosen after the module was
+built and has no literal in it to read at all. `Kernel::load_row` callers size their own buffers
+today.
+
+Item 8 is the reason to take this one more seriously than its wording suggests. It carried the same
+"nothing needs it yet" and the thing that needed it was already in the tree.
 
 ### Tier 3 — carried over, unchanged
 
