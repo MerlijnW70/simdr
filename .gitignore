@@ -23,3 +23,7 @@
 mnema.store
 mnema.store.key
 mnema.store.lock
+
+# The sandbox is its own workspace and builds into its own target directory.
+# Deleting `proeftuin/` makes this line dead, which is the intended shape.
+/proeftuin/target/

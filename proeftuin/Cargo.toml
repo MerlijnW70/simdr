@@ -1,0 +1,21 @@
+# A sandbox for tools that test the engine. It is deliberately **not** a workspace member.
+#
+# `[workspace]` with nothing in it makes this its own workspace root, and the repository root
+# excludes this directory by name. Between them, `cargo test --workspace` at the root never builds
+# anything here, CI never sees it, `tests/integrity.rs` does not scan it, and `noha.yaml` does not
+# list it — so nothing here can change what the engine claims about itself.
+#
+# To delete the whole thing: remove this directory and the one `exclude` line in `../Cargo.toml`.
+# Nothing in `src/`, `runner/` or `cli/` refers to it, and a grep for `proeftuin` outside this
+# directory is what proves that.
+[package]
+name = "proeftuin"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+simdr = { path = ".." }
+runner = { path = "../runner" }

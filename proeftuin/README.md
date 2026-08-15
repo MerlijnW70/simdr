@@ -1,0 +1,97 @@
+# proeftuin — a sandbox for tools that test the engine
+
+A place to build workloads that put the engine under pressure, without any of them becoming part of
+what the engine claims about itself.
+
+## The contract
+
+**Nothing in the engine may depend on anything here.** The arrow points one way, as it does between
+`runner` and `simdr`, and for the same reason: a test tool that the thing under test relies on is
+not a test tool.
+
+The isolation is structural rather than promised:
+
+| what | why it cannot see this directory |
+| --- | --- |
+| `cargo test --workspace` at the root | `exclude = ["proeftuin"]` in `../Cargo.toml`, and an empty `[workspace]` here making this its own root |
+| CI | builds `-p simdr`, `-p runner` and the root workspace; none of them reaches an excluded directory |
+| `tests/integrity.rs` | scans `src/`, `runner/src/` and `cli/src/` by name |
+| `noha.yaml` and the mutation gate | list source files explicitly; nothing here is listed |
+| `noha gate`'s zero-dependency boundary | audits `src/` |
+
+So this directory may take dependencies, may be messy, and may be thrown away, and none of that
+touches the emitter's zero-dependency claim or the suite's numbers.
+
+## Deleting it
+
+```bash
+rm -r proeftuin
+# then remove the `exclude = ["proeftuin"]` line from ../Cargo.toml
+```
+
+That is the whole of it. `grep -rn proeftuin --include='*.rs' --include='*.toml' ..` outside this
+directory returns the one `exclude` line, which is the proof rather than the claim.
+
+## What it is for, and why these workloads
+
+A workload is only a test if something can **disagree with it**. Everything this repository has ever
+found came from two things disagreeing — a device against a CPU reference, a module against
+`spirv-val`, a mutant against a test. So the sandbox is not for demonstrations; it is for workloads
+that carry an exact independent oracle.
+
+That rules more out than it sounds. A fluid simulation is float chaos with no cheap exact reference;
+a procedural world has no reference at all beyond looking right, and would spend its time fighting
+`decisions/DR-0003`, which refuses per-lane branches on purpose. **Quantised integer arithmetic has
+an exact reference**, which is why the first tool here is a neural-network layer.
+
+### The gap it aims at, measured
+
+`notes/CLAIMS.md` ends with the class nothing covers: claims about the outside world. Two measured
+holes sit inside it.
+
+* **Narrow types are validated far more widely than they are run.** As of 2026-08-15,
+  `tests/instructions.rs` hands 65 modules to `spirv-val` — five types across five widths and all
+  three mappings. On a *device*, narrow elements reach exactly three operations: `add`, `reduce_sum`
+  and `clamp`, through `kernels::narrow`. Validation says a module is legal. Only execution says it
+  computes the right number.
+* **The packed dot products are fuzzed by nothing.** `dot_signed`, `dot_unsigned`, `dot_mixed` and
+  `dot_signed_saturating` are absent from the fuzzer's vocabulary, and `OpUDot` is the instruction
+  that shipped **invalid** — correct on two devices for weeks, caught by the first `spirv-val` run
+  against it. Being valid now says nothing about being right.
+
+A quantised layer is both at once: `u8` activations, `i8` weights, four of them packed to a word,
+accumulated in `i32`. Its answer is an integer, so the reference is exact rather than approximate,
+and disagreement is a finding rather than a rounding question.
+
+## What the first outing found, which was about the sandbox
+
+The layer stored an `i32` — what a packed dot answers with — into a `u32` buffer. Invalid SPIR-V, and
+mine rather than the engine's: `kernels::dot` does the `reinterpret` this had left out.
+
+What it cost is the point:
+
+| device | what it said |
+| --- | --- |
+| RTX 4080 | **192 of 192 agreed** with the reference |
+| integrated Radeon | **192 of 192 agreed** |
+| lavapipe | `Vulkan(ERROR_UNKNOWN)`, 192 times, with no indication why |
+
+Two devices ran an illegal module and produced the right numbers. The third refused it and could not
+say what was wrong. Nothing in that table points at the store, and the tool had no layer that could —
+because it dispatched without validating.
+
+That is `runner/tests/validated.rs`'s opening paragraph happening again, in the sandbox built to test
+the thing that paragraph is about: *"drivers are lenient about things the validator is not."*
+
+**So the rule here is the engine's rule.** `check` runs `spirv-val` before it runs anything, using
+the emitter's own harness by path rather than a copy, and `Outcome` distinguishes four things a tool
+that only counted agreements would have merged:
+
+* `Refused` — the lane API said no. The mapping working.
+* `Unsupported` — the device does not offer what the module declares. The device being honest.
+* `Invalid` — `spirv-val` rejected it. **This crate's mistake**, and nothing was dispatched.
+* `Errored` — the driver took a *validated* module and failed. The device's mistake, and the only
+  one of the four worth reporting upstream.
+
+With the `reinterpret` in place all four configurations agree: 192 runs each at subgroup 4, 16, 32
+and 64, across all three mappings.
