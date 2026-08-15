@@ -26,7 +26,7 @@ like coverage held.
 
 Because it has already been got wrong twice, in opposite directions, and both cost real time.
 
-**The sandbox, on its first outing.** `proeftuin`'s quantised layer stored an `i32` into a `u32`
+**The sandbox, on its first outing.** A quantised layer in the sandbox stored an `i32` into a `u32`
 buffer — invalid SPIR-V. It had no `Invalid` arm because it did not validate at all, so:
 
 ```text
@@ -57,7 +57,7 @@ Two harnesses, one missing the arm that says *my module was wrong* and one missi
   driver is lenient about exactly what the validator is not. The sandbox reaches the emitter's own
   `tests/common/spirv_val.rs` by `#[path]` rather than copying it.
 * **Report the non-failures.** A run that refused everything must be visibly different from one that
-  agreed with everything. `proeftuin`'s report ends with *"N of 12 combinations executed here"* for
+  agreed with everything. The sandbox's report ended with *"N of 12 combinations executed here"* for
   that reason, and the tests assert a floor on it — eight of twelve — so a sweep cannot pass by
   proving nothing.
 * **A count of agreements is not a result.** The useful number is what did *not* run.
@@ -68,14 +68,15 @@ Two harnesses, one missing the arm that says *my module was wrong* and one missi
 construction and one partially — and no check compares a new harness against it. The gate's
 invariant vocabulary confines an import graph, which this is not.
 
-What it has instead is a worked failure in each direction, above, and a place to look: `Answer` in
-`proeftuin/src/batch.rs` is the fuller of the two, and `runner::fuzz::Outcome` is the one that got
-there first.
+What it has instead is a worked failure in each direction, above, and one place to look:
+`runner::fuzz::Outcome`, which got there first.
 
-**Both have moved since this was written, and in the direction the record argues for.** The sandbox
-had *three* of these — one per tool, the same four arms with different names — which is the shape
-this rule prevents inside a harness and did not prevent between harnesses. They are one generic
-`Answer<T>` now, so a fifth reason is one arm rather than three. And `runner::fuzz::Outcome` gained
-the arm it was missing from the other end: `ProgramError` splits a refusal into *the width has no
-mapping* and *this element type has no such instruction*, which arrived with the first generated
-operation that not every domain has.
+**It has since gained the arm this record said it was missing.** `ProgramError` splits a refusal
+into *the width has no mapping* and *this element type has no such instruction*, which arrived with
+the first generated operation that not every domain has.
+
+The sandbox that supplied the other half of this record is gone, and its own lesson is in
+`notes/FINDINGS.md`: it had **three** of these types, one per tool, the same four arms under
+different names. That is the shape this rule prevents *inside* a harness and did not prevent
+*between* harnesses — a fifth reason would have had to be added three times, and adding it to two of
+the three reads exactly like adding it to all.

@@ -220,9 +220,13 @@ impl<'module> Lanes<'module> {
     /// readings are indistinguishable for the caller this exists for, and part company above it,
     /// where there is no `i32` with that number to convert to anyway.
     ///
-    /// Measured rather than reasoned: `proeftuin/src/conversions.rs` runs all twelve boundary values
-    /// into all six integer targets on four devices, against a reference written from the opcode
-    /// table above rather than from this sentence.
+    /// Measured rather than reasoned, and by something that no longer exists: a sandbox tool ran
+    /// all twelve boundary values into all six integer targets on four devices, against a reference
+    /// written from the opcode table above rather than from this sentence. It agreed everywhere,
+    /// and the `i32` row is the sentence it disagreed with. `notes/FINDINGS.md` has the account.
+    ///
+    /// **A measurement outlives the thing that took it and a check does not.** The table stands;
+    /// nothing runs that sweep today, and this comment says so rather than implying otherwise.
     ///
     /// # Errors
     ///

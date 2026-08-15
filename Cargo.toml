@@ -27,9 +27,6 @@ rust-version = "1.88"
 
 [workspace]
 members = ["runner", "cli"]
-# The sandbox is its own workspace and must stay outside this one — see `proeftuin/README.md`.
-# Removing this line and the directory is the whole of deleting it.
-exclude = ["proeftuin"]
 
 [profile.release]
 opt-level = 3

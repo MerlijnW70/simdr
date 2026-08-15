@@ -1336,8 +1336,9 @@ generator draws has one — so a small distance would have generated two instruc
 What is left of this item: `abs` — gated by `Signed` rather than by `Integer`, so it is a second
 group on the same mechanism and now cheap — the conversions, which change the element type mid-
 program and so do not fit the single-accumulator shape without thought, and the integer dot
-products, whose input is four bytes in a word and which `proeftuin/` already covers at all three
-mappings.
+products, whose input is four bytes in a word and which the sandbox covered at all three mappings
+before it was deleted — see `notes/FINDINGS.md`, which is where that coverage now lives as a record
+rather than as a runnable check.
 
 **2. The reduction and scan chains are the shape DR-0008 rules in** — one question over a whole
 buffer, one submission. `Gpu::sum` at 11.2× over 8 192 elements, `Gpu::scanner_of` at 2.0–3.0×,
@@ -1471,9 +1472,10 @@ a sentence that was true of the general case standing over a case where it is no
 shipped **invalid** — correct on two devices for weeks, caught the first time `spirv-val` was
 pointed at it — and none of the four is in the generator's vocabulary.
 
-`proeftuin/` covers them at all three mappings with an exact reference, so this is not a blind spot
-any more; what it is missing is the *generated combination*, a dot product with a rotate and a
-rolled loop around it. The cost is real: the input is four bytes in a word, which is a different
+The sandbox covered them at all three mappings with an exact reference and has been deleted, so the
+blind spot is **open again as a check and closed as a question**: all twelve combinations were shown
+to agree on three devices, and nothing runs that comparison today. What was missing even then is the
+*generated combination*, a dot product with a rotate and a rolled loop around it. The cost is real: the input is four bytes in a word, which is a different
 buffer shape from every other step here, and the accumulator's type changes mid-program. That is the
 first step that would not fit the single-accumulator straight line this generator is built on.
 
@@ -1499,12 +1501,16 @@ has refused to build it three times, each time for the same good reason: *"it ne
 last three times this file guessed at an API before one existed the guess was refused by its own
 argument."*
 
-**That objection has an answer now, and it arrived sideways.** `proeftuin/` is a caller. Its
-quantised layer runs 192 independent configurations, its conversion sweep 72, its half sweep all
-65 536 bit patterns — each one a batch of independent questions laid out by hand, which is exactly
-the layout DR-0008 says is the only thing that matters. Three tools, three hand-rolled batchings,
-and the duplication between them is the design pressure an invented API would have been missing.
+**That objection got an answer, and then the answer was thrown away — which was the plan.** The
+sandbox was a caller, and the design pressure it supplied was a *mistake* rather than a requirement:
+two of its three tools ran one dispatch per seed where the seeds varied only the data and shared the
+module. A batching API was built there, used, measured, and deleted with the directory.
 
-And it is the right *kind* of first caller: the sandbox is deletable in one command and may not be
-depended on, so an API shaped for it costs nothing if the shape turns out wrong. A guess that can be
-thrown away is not a guess this file has ever refused.
+What survives is the shape, in `notes/FINDINGS.md`. A batch is **N problems laid out so that the
+invocation's own index selects the problem**, which is a constraint on the *kernel* rather than on
+the buffer — so an API here owns the arithmetic a kernel has to be built against, not a container
+for the words. What made the one real workload un-batchable was a constant element offset sized for
+one workgroup, which is right at a batch of one and wrong at every larger size.
+
+That is a better starting point than the file had before, and it is still not a caller. This entry
+stays open.

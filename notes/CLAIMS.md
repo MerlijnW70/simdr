@@ -50,7 +50,7 @@ The class splits three ways and the honest answer differs for each:
   describe the thing it documents. So the number stays and carries a marker,
   `<!--` `count:name` `-->` immediately before the digits, which renders as nothing and resolves in
   `tests/documented.rs` against the tree. Seven counters exist; every marked number in every
-  markdown file in this repository, `proeftuin/` included, is one of them. A marker naming no
+  markdown file in this repository is one of them. A marker naming no
   counter fails rather than rendering as an ordinary number, and a counter no document states fails
   too — which is the rule that emptied `NO_EMITTER`, one level up.
 * **Timings and multiples** — `11.2×`, `52×`, `~100 µs`, `376 ns`. CI *cannot* check these and says
@@ -137,13 +137,17 @@ them**. `tests/documented.rs` reads them now: a quoted path must name a file tha
 because the prose says `scan/plan.rs` and means `runner/src/scan/plan.rs`), and a quoted
 `Type::member` must name something the tree declares, where the type is one the tree declares.
 
-**Including `proeftuin/`, where the counters stop, and the opposite direction is the point.** A
-*count* the workspace states must not depend on the sandbox — deleting it would fail a test in the
-crate it may not touch. A *reference* is checked where it is written, and the sandbox's prose names
-this repository's files and types on almost every page. Those are exactly the names that rot when
-the engine moves under it, and deleting the directory takes the sentences with it and leaves nothing
-owed. That is the test for whether an obligation is a dependency: one that survives the deletion is,
-one that vanishes with it is not.
+**The two reached different distances while the sandbox existed, and the reason is worth keeping.**
+A *count* the workspace states must not depend on a deletable directory — removing it would fail a
+test in the crate it may not touch. A *reference* is checked where it is written, so the sandbox's
+prose was checked and the workspace's counts stopped at its edge. That is the test for whether an
+obligation is a dependency: one that survives the deletion is, one that vanishes with it is not.
+
+The sandbox was deleted the next day, and the distinction paid for itself in the direction nobody
+plans for. The *code* left cleanly, exactly as its README promised. The **prose did not**: seven
+sentences across four documents and one emitter doc comment cited it as the reason something was
+known, and each one failed the path check the moment the files went. `notes/FINDINGS.md` has what
+they were citing.
 
 Both are floors rather than proofs, in the safe direction — the trade `consumed_outside` makes one
 file over. And both found things on their first run:

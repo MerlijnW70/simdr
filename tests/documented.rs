@@ -182,23 +182,12 @@ fn ci_jobs() -> Option<usize> {
     )
 }
 
-/// Whether a path belongs to the workspace rather than to the sandbox beside it.
-///
-/// `proeftuin/` is a separate cargo root, excluded from `--workspace`, and its README says deleting
-/// it is one `rm` and one line. So it must not contribute to a number the workspace's own documents
-/// state — otherwise deleting it would fail a test in the crate it is not allowed to touch, which is
-/// exactly the dependency the sandbox exists to avoid.
-fn in_the_workspace(relative: &str) -> bool {
-    !relative.starts_with("proeftuin/")
-}
-
 /// Every example in the workspace, found by looking for directories named `examples` rather than by
 /// listing the two that exist — a third crate's would otherwise be uncounted and nothing would say.
 fn examples() -> BTreeSet<String> {
     let mut found = BTreeSet::new();
     walk(&root(), &mut |path, relative| {
         if path.extension().is_some_and(|extension| extension == "rs")
-            && in_the_workspace(relative)
             && path
                 .parent()
                 .and_then(Path::file_name)
@@ -217,13 +206,17 @@ fn examples() -> BTreeSet<String> {
 /// test skips where there is no device, and a `cfg` can take a module out. This one is a property of
 /// the source, so it is the same on every machine and it fails when it changes.
 ///
+/// It walks the whole tree. It used to skip a sandbox directory that was excluded from the
+/// workspace and meant to be deletable, so that removing it could not fail a count the workspace
+/// states — see `notes/FINDINGS.md`, which is where that distinction is recorded now that there is
+/// nothing to skip.
+///
 /// The README stopped writing its test count after the third drift. This is the count it can write
 /// again — a narrower quantity, named exactly, with an instrument.
 fn test_functions() -> usize {
     let mut found = 0;
-    walk(&root(), &mut |path, relative| {
+    walk(&root(), &mut |path, _| {
         if path.extension().is_some_and(|extension| extension == "rs")
-            && in_the_workspace(relative)
             && let Ok(text) = fs::read_to_string(path)
         {
             found += text
@@ -237,9 +230,8 @@ fn test_functions() -> usize {
 
 /// Every markdown file in the tree, so a marker cannot be placed somewhere unread.
 ///
-/// This reaches `proeftuin/` too, which is the sandbox and is meant to be deletable in one command.
-/// That costs nothing: the rules below are *per marker found*, so a deleted directory takes its
-/// markers with it and leaves no hole. The counters stay stated by the documents that remain.
+/// The rules below are *per marker found*, which is what let a deletable directory carry markers
+/// without owing anything: removing it took its markers with it and left no hole.
 fn documents() -> BTreeSet<String> {
     let mut found = BTreeSet::new();
     walk(&root(), &mut |path, relative| {
@@ -596,14 +588,12 @@ fn quoted(text: &str) -> Vec<(usize, String)> {
 /// comment naming a file that moved is exactly as wrong as a README naming one, and rustdoc checks
 /// only the links — an intra-doc link is verified and a backtick is decoration.
 ///
-/// **And `proeftuin/` too, where the counters stop.** The two are opposite obligations and it is
-/// worth being clear about why. A *count* the workspace states must not depend on the sandbox, or
-/// deleting the sandbox would fail a test in the crate it may not touch. A *reference* is checked
-/// where it is written: the sandbox's prose names this repository's files and types constantly —
-/// `kernels::dot`, `src/lanes/narrow.rs`, `decisions/DR-0003` — and those are exactly the names
-/// that rot when the engine moves under it. Deleting the directory takes its sentences with it and
-/// leaves nothing owed, which is the test: an obligation that survives the deletion is a
-/// dependency, and an obligation that vanishes with it is not.
+/// **It reaches every file, including any the workspace excludes**, which is the opposite of what
+/// the counters do and deliberately so. A count the workspace states must not depend on a directory
+/// that can be deleted; a reference is checked where it is written, and prose about this repository
+/// rots wherever it lives. The sandbox that made the distinction concrete is gone, and
+/// `notes/FINDINGS.md` records how the deletion went: the code left cleanly and the *citations of
+/// it* did not, which is what this check exists to catch.
 fn claims() -> Vec<(String, usize, String)> {
     let mut found = Vec::new();
 
@@ -699,10 +689,9 @@ fn every_decision_record_the_prose_cites_is_a_record_that_exists() {
 
     let mut dangling = Vec::new();
     walk(&root(), &mut |path, relative| {
-        if !in_the_workspace(relative)
-            || !path
-                .extension()
-                .is_some_and(|extension| extension == "md" || extension == "rs")
+        if !path
+            .extension()
+            .is_some_and(|extension| extension == "md" || extension == "rs")
         {
             return;
         }

@@ -3682,3 +3682,82 @@ quietly is the failure that whole file is about.
 Vocabulary 20 → 23. Six more tests, 176 mutants at 100% over the seven changed files, 232 generated
 modules through `spirv-val`, and all eight domains agreeing over 256 seeds each on the RTX 4080, the
 integrated Radeon and lavapipe at 4, 8 and 16.
+
+## The sandbox, and what it left behind — 2026-08-16
+
+`proeftuin/` was built on 2026-08-15 as a place to put the engine under pressure without any of it
+becoming part of what the engine claims about itself, and deleted on 2026-08-16. Its README opened
+by promising that deleting it was one `rm` and one line; this is the record of what it found, kept
+here because the directory is not.
+
+**Three tools, each carrying an exact oracle**, which was the entry requirement: a workload is only
+a test if something can disagree with it, and disagreement needs an answer that is *right* rather
+than close. That ruled out more than it sounds — a fluid simulation is float chaos with no cheap
+exact reference, a procedural world has none at all beyond looking right.
+
+### What it found about the engine
+
+* **The packed dot products had only ever run whole-subgroup.** `kernels::dot` builds every one
+  through `whole_subgroup!`, so `OpSDot`, `OpUDot`, `OpSUDot` and `OpSDotAccSat` — the family in
+  which `OpUDot` shipped **invalid** — had never executed clustered or strip-mined, where they are a
+  different instruction sequence with a different fold behind them. Twelve combinations, of which
+  four had ever run. All twelve agree, at every width, on three devices.
+* **`convert_u32`'s first sentence needed a qualifier.** It is documented as *"a `u32` value's
+  number, as a value of `T`"*, and for `i32` the opcode is `OpBitcast` — so `0xFFFF_FFFF` converts
+  to −1 rather than to 4 294 967 295. The two readings are identical for every value below
+  `i32::MAX`, which is every loop counter, which is what the method exists for. A reference written
+  from the *sentence* would have agreed with the implementation about everything except the answer;
+  one written from the **opcode table** did not. `src/lanes/mod.rs` carries that table now.
+* **Every `f16` bit pattern survives a load and a store.** All 65 536, exhaustively, on four
+  devices — where the differential fuzzer could reach none of the edges, because `Domain::Half` has
+  a ceiling of 8 and refuses any round leaving ±2048, which is exactly what makes its comparison
+  exact.
+
+### What it found about itself, which is the more useful half
+
+* **It dispatched an invalid module and two devices ran it.** The layer stored an `i32` into a
+  `u32` buffer — `kernels::dot` does the `reinterpret` this had left out. An RTX 4080 and an
+  integrated Radeon each returned 192 correct-looking answers; lavapipe refused it with
+  `ERROR_UNKNOWN` and said nothing about why. A sandbox that dispatches without validating
+  reproduces the exact failure `runner/tests/validated.rs` opens by describing.
+* **It had three copies of one outcome type.** One per tool, the same four "did not run" arms under
+  different names — the shape `decisions/DR-0009` prevents *inside* a harness and did not prevent
+  *between* harnesses. A fifth reason would have had to be added three times, and adding it to two
+  of the three reads exactly like adding it to all.
+* **It was spending round trips the way `decisions/DR-0008` says nothing else matters.** Two of its
+  three tools ran one dispatch per seed where the seeds varied only the *data* and shared the
+  module: 72 in the test and 384 in the report, where 12 would do.
+
+### The batch lesson, which is the one worth carrying forward
+
+`notes/NEXT.md` had refused three times to invent a batching API because it had no caller. The
+sandbox was one, and the design pressure it supplied was a **mistake rather than a requirement**,
+which is the more useful kind.
+
+**What made the layer un-batchable was one number.** `Kernel::load_offset` reaches a second operand
+at a constant element offset, and the layer passed the size of *one workgroup's* operand — correct
+for a single dispatch and wrong for every workgroup after the first, which would have read its
+neighbour's activations. A batch of one problem is the only size at which the per-problem offset and
+the whole-batch offset agree, which is exactly why the mistake survived every test.
+
+So a batch is **N problems laid out so that the invocation's own index selects the problem**, and
+that is a constraint on the *kernel* rather than on the buffer. Any future API here owns the
+arithmetic a kernel has to be built against, not a container for the words.
+
+**And the exception is as informative as the rule.** The conversion sweep stayed at seventy-two
+dispatches on purpose: its probe value is a *constant in the module*, which is what makes twelve
+boundaries twelve modules, and batching them would mean loading the probe from a buffer — a driver
+may fold a constant conversion where it cannot fold a loaded one. Twelve round trips buys a stronger
+question. Not everything with many problems is a batch.
+
+### And what the deletion itself proved
+
+The isolation contract held. `cargo test --workspace`, `noha gate`, CI and the mutation gate were
+unchanged by the removal, because the exclusion was structural — an empty `[workspace]` in the
+sandbox and one `exclude` line at the root — rather than promised.
+
+**What did not vanish on its own was the prose.** Seven sentences across four documents and one
+emitter doc comment named the directory, and `tests/documented.rs` would have failed on every one of
+them the moment the files went. That is the check doing its job, and it is also the finding: a
+deletable directory leaves its *code* cleanly and leaves citations of itself everywhere the rest of
+the tree explained why something is true.
