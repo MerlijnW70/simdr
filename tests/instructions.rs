@@ -362,9 +362,18 @@ fn a_memory_barrier_that_orders_nothing_is_refused() {
     let words = kernel.finish().expect("finished");
     let outcome = validate(&words, "barrier-relaxed", VULKAN_1_1);
 
+    // **On the instruction's name, not on the diagnostic's wording.** Two `spirv-val` builds refuse
+    // this and describe it differently — the one in Ubuntu's `spirv-tools` cites
+    // `VUID-StandaloneSpirv-OpMemoryBarrier-04732` and says "Memory Semantics", a newer one cites
+    // `VUID-StandaloneSpirv-MemorySemantics-10869` and says "MemorySemantics". Asserting on the
+    // second spelling passed here and failed in CI, which is this suite's own lesson arriving from
+    // the other side: a test that pins a detail it is not about is a test about the wrong thing.
+    //
+    // `MemoryBarrier` is in both, and it is the claim — this module is refused, and refused *for
+    // the barrier* rather than for something else that happens to be wrong with it.
     let message = outcome.expect_err("a relaxed memory barrier is not valid SPIR-V");
     assert!(
-        message.contains("MemorySemantics"),
-        "refused for something other than the semantics: {message}"
+        message.contains("MemoryBarrier"),
+        "refused for something other than the barrier: {message}"
     );
 }

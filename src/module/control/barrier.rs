@@ -49,12 +49,17 @@ impl Module {
     ///
     /// # The semantics may not be `Relaxed`, and this cannot check it
     ///
-    /// [`crate::spec::MemorySemantics::None`] encodes to `Relaxed`, and
-    /// `VUID-StandaloneSpirv-MemorySemantics-10869` forbids it **here specifically**: a barrier
-    /// that orders nothing is not a cheaper barrier, it is an invalid module. An atomic with the
-    /// same mask is perfectly legal, which is what makes this easy to get wrong — and the
-    /// documentation on `MemorySemantics::None` recommended exactly that mask without saying where
-    /// it does not apply.
+    /// [`crate::spec::MemorySemantics::None`] encodes to `Relaxed`, and Vulkan requires the mask on
+    /// an `OpMemoryBarrier` to carry one of `Acquire`, `Release`, `AcquireRelease` or
+    /// `SequentiallyConsistent`. A barrier that orders nothing is not a cheaper barrier, it is an
+    /// invalid module. An atomic with the same mask is perfectly legal, which is what makes this
+    /// easy to get wrong — and the documentation on `MemorySemantics::None` recommended exactly
+    /// that mask without saying where it does not apply.
+    ///
+    /// Two `spirv-val` builds refuse it under two different VUIDs —
+    /// `VUID-StandaloneSpirv-OpMemoryBarrier-04732` and
+    /// `VUID-StandaloneSpirv-MemorySemantics-10869` — which is why the requirement is written out
+    /// above rather than cited by number.
     ///
     /// Nothing here can refuse it: the operand is the *id* of a constant by the time it arrives,
     /// and this layer cannot ask what value that constant holds. So it is stated, and

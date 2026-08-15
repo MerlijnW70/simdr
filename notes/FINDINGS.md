@@ -2714,6 +2714,19 @@ error: [VUID-StandaloneSpirv-MemorySemantics-10869]
        MemoryBarrier: MemorySemantics must not use Relaxed memory order with MemoryBarrier
 ```
 
+CI said the same thing in different words, and that mattered. Ubuntu's `spirv-tools` is an older
+build and cites a **different VUID** for the same refusal —
+`VUID-StandaloneSpirv-OpMemoryBarrier-04732`, *"Vulkan specification requires Memory Semantics to
+have one of the following bits set: Acquire, Release, AcquireRelease or SequentiallyConsistent"*.
+The first version of the negative test asserted on the string `MemorySemantics`, which the newer
+message has and the older one spells with a space. It passed here and failed there.
+
+Which is this suite's own lesson arriving from the other side: **a test that pins a detail it is not
+about is a test about the wrong thing.** The claim is that the module is refused *for the barrier*,
+so what is asserted is `MemoryBarrier` — in both messages — and the requirement is written out in
+the two doc comments rather than cited by a number that depends on which build of the validator
+happens to be installed.
+
 `MemorySemantics::None` encodes to `Relaxed`, and this crate's own documentation recommended it —
 *"ordering nothing is cheaper than ordering nothing while saying otherwise"*. That sentence is
 correct about **atomics**, where `Relaxed` is legal and is what `Kernel::atomic_add_at` uses on

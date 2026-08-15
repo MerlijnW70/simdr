@@ -40,9 +40,9 @@ impl StorageClass {
 pub enum MemorySemantics {
     /// No ordering at all — SPIR-V spells it `Relaxed`.
     ///
-    /// **Legal on an atomic and refused on a barrier.**
-    /// `VUID-StandaloneSpirv-MemorySemantics-10869` forbids it on `OpMemoryBarrier`: a barrier that
-    /// orders nothing is an invalid module rather than a cheap one. See
+    /// **Legal on an atomic and refused on a barrier.** Vulkan requires an `OpMemoryBarrier`'s mask
+    /// to carry one of `Acquire`, `Release`, `AcquireRelease` or `SequentiallyConsistent`, so a
+    /// barrier that orders nothing is an invalid module rather than a cheap one. See
     /// [`crate::module::Module::memory_barrier`], which is where that was found — by pointing the
     /// validator at an operation nothing had ever called.
     None,
