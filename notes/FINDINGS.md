@@ -3168,3 +3168,86 @@ both claims.
 the shape to keep building is the one the reduction and scan chains already have: one question over
 a whole buffer, one submission. And the most valuable workload in this repository is not a speed one
 at all — it is the differential fuzzer, whose 30 000 programs are what find emitter bugs.
+
+## Three passes at the fuzzer, which DR-0008 had just put first — 2026-08-15
+
+The boundary decision reordered the tree: batch size beats kernel quality by two orders of
+magnitude, so the differential fuzzer is the most valuable workload here and is not a speed one at
+all. Three passes followed from that, and each found something the one before could not see.
+
+### What it could not generate
+
+Fifteen operations against a lane API with fifty-odd. Two of the gaps were the shape this project
+has already been caught by.
+
+**`Lanes::broadcast` was reached by no generated program.** It is the cross-lane operation whose
+answer is *fully determined* — unlike a shift, every lane reads a lane that exists — and the one
+whose mapping does the most work: a whole-subgroup vector reads lane `source` of the subgroup, a
+clustered one reads position `source` of **its own cluster**, a strip-mined one does it per strip. A
+reference reading `source` as a subgroup lane agrees for the first cluster of every subgroup and
+differs for the rest, which is exactly how `reduce_min` came to fold its strips with a maximum.
+Checked by breaking it: substituting the subgroup for the vector is caught at **seed 5**, by five
+tests including the clustered one.
+
+**`Lanes::shift_down` had no `Op` while `shift_up` did.** An asymmetry rather than a decision, and
+of the two directions the fuzzer proved one instruction emitted, declared and harmless while saying
+nothing at all about the other.
+
+`fill` takes `lanes` as well as `subgroup` now, because they are different bounds: a butterfly's
+mask must stay inside the *subgroup*, a broadcast's position inside the *vector*.
+
+Two things that exposed rather than caused. `the_fuzzer_notices_when_a_scan_is_wrong` rewrites
+`program.lanes` under operands drawn for another mapping — fine until an operand is bounded by the
+vector, and a butterfly's mask has the same shape and had simply never collided at seed 7. And the
+sweep counted refusals without ever saying why; the 32 at subgroup 4 turned out to be the strip
+limit, which took a diagnostic to establish rather than a reading.
+
+### The comparison written twice
+
+The gate over the **whole** fuzz module — 10 files, 3 417 lines, scoped with `NOHA_ONLY` rather than
+by diff, which it had never been. `notes/NEXT.md` records the reason: *"nine of the twelve were in
+the fuzzer or its CPU reference. None was in the emitter."*
+
+**170 of 171, 99.4%, one survivor:**
+
+```
+runner/src/fuzz/generate.rs:70  [<→<=]  let clustered = lanes < subgroup;
+```
+
+Four lines above it the same relationship is already decided three ways, under a comment saying so:
+*"the mapping is a three-way choice and it used to be asked as a yes-or-no."* The pool was fixed and
+the finish beside it stayed a yes-or-no.
+
+The mutant is not cosmetic. `clustered` decides one thing — whether `Finish::SumOrMax` can be drawn
+— and that is the only finish carrying a value out of a branch through an `OpPhi`, which this
+module's header calls *"the failure mode no other layer here catches, because a phi naming the wrong
+predecessor validates cleanly and then computes the wrong thing"*. Flipping it tells a
+whole-subgroup program it is clustered and silently deletes the phi coverage of the commonest
+mapping. Everything stays green.
+
+**The duplication was the survivability, and that is the whole finding.** One `shape_of` returning a
+named three-way `Shape`, with both the pool and the finish derived from it — and flipping the single
+comparison now fails **four** tests, two of which already existed. Coverage that was there all along
+could not reach a second spelling of the thing it covered. Re-run: **172 of 172, 100%.**
+
+### The modules nobody read, handed to nobody
+
+`validated.rs` opens by explaining why it exists — `OpUDot`, valid-looking, correct on two devices
+for weeks, caught by the first `spirv-val` run. The kernel library got that layer. **The generator
+did not**, and it builds thousands of modules a run: a rolled loop feeding a clustered scan, a
+broadcast under a vote, four steps whose combination no author chose. Every one went straight to a
+driver.
+
+This pass was planned as something else — "every opcode the emitter knows appears in a validated
+module", approximated by asking whether each `pub fn` is named in a validating file. **Measured
+before writing: 75 are not, and the instrument is wrong rather than the code.** `Lanes::rotate_up`
+is validated through a kernel that calls it without spelling its name; a grep cannot answer a
+question about what an instruction stream contains. The measurement turned up the sharper gap
+instead.
+
+`every_generated_shape_is_valid_spirv` needs **no device**, which is the point: `Program::build` is
+the emitter alone, so it sweeps every width rather than whichever is plugged in. 232 modules over
+five widths and eight domains, all three mappings, six finishes — and every one valid.
+
+Nothing was found, and that is worth stating plainly: the value of a check is the difference between
+"nothing has looked" and "something looked and it was right", and only one of those is a claim.

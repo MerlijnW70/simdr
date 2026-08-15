@@ -1297,6 +1297,24 @@ It is also where the mutation gate keeps landing: *"nine of the twelve were in t
 reference; none was in the emitter."* Widening the vocabulary is the single highest-value direction
 in the tree.
 
+**Three passes at it, and each found what the one before could not see.** `notes/FINDINGS.md` has
+them in full:
+
+* **What it could not generate.** `Lanes::broadcast` was reached by no generated program at all —
+  the cross-lane operation whose answer is fully determined and whose mapping does the most work —
+  and `shift_down` had no `Op` while `shift_up` did. A wrong broadcast mapping is caught at seed 5.
+* **The gate over the whole module**, scoped by path rather than by diff for the first time: 170 of
+  171, and the one survivor was a comparison written twice. Merging the two spellings made *existing*
+  coverage reach it — the duplication was the survivability. 172 of 172 after.
+* **The generator's modules were never validated.** Thousands a run, straight to a driver, in the
+  component that produces the shapes nobody designed. 232 now go through `spirv-val` at every width,
+  no device required.
+
+What is left here is the rest of the surface: the bit shifts, `abs`, the conversions and the integer
+dot products are all exactly checkable in the integer domains and none of them is generated. They
+need domain-aware pools — a shift has no float form — which is the one piece of machinery the
+generator does not have.
+
 **2. The reduction and scan chains are the shape DR-0008 rules in** — one question over a whole
 buffer, one submission. `Gpu::sum` at 11.2× over 8 192 elements, `Gpu::scanner_of` at 2.0–3.0×,
 `Reducer` at 52× per dispatch against rebuilding. Nothing here needs re-argued; it needs keeping.
