@@ -56,26 +56,28 @@
 //! `Kernel::load_offset_by` stays outside it, and must: its offset is a specialization constant,
 //! which is a number chosen after the module was built and has no literal here to read.
 //!
-//! # One mutant here survives, and the reason is worth writing down once
+//! # Every condition here is redundant on the modules this crate emits
 //!
-//! [`row_of`]'s conjunction has four clauses and **no module this emitter produces needs more than
-//! one of them**: the only `OpIMul` over `group.y` is the row's own base, and the only term using
-//! that base is the row. So the gate reported every weakening of it as unguarded, which is true of
-//! every module — and the answer is not to delete the clauses but to test them against the modules
-//! they are there for, since this reads SPIR-V rather than only the SPIR-V it wrote.
+//! [`row_of`]'s conjunction has four clauses and **no emitted module needs more than one of them**:
+//! the only `OpIMul` over `group.y` is the row's own base, and the only term using that base is the
+//! row. [`shift_in`]'s two are the same story — of the sums in an address exactly one has a constant
+//! on its right, and it is the one the left-hand clause already names. So the mutation gate reported
+//! every weakening of both as unguarded, and it was right to.
 //!
-//! Three edits to a real module do it, none of which changes an address: a second copy of every sum
-//! (two rows, so no row — the uniqueness rule), a sum over the row's base that adds something other
-//! than `local.y` (not a row, so the row is still unique), and a kernel with no `LocalSize` at all.
-//! `super`'s tests hold all three.
+//! The answer is not to delete the clauses. This reads SPIR-V, not only the SPIR-V it wrote, and
+//! each of them rejects a shape a module from somewhere else may have. **It is to write those
+//! modules** — four edits to a real one, none of which changes an address:
 //!
-//! What is left is [`shift_in`]'s `&&`, which is an **equivalent mutant** and stays one. It looks
-//! for an `OpIAdd` whose left is the invocation's lane, then keeps only those whose right operand is
-//! a *constant*. Of the sums in an address exactly one has a constant on the right —
-//! `local + (strip × workgroup + offset)` — and it is the one the left-hand clause already names.
-//! Loosening the filter admits `start` and `address`, whose right operands are ids, and the constant
-//! lookup drops them again. The two clauses cannot be told apart by a module that computes an
-//! address; one that does not reaches no built-in through this walk at all.
+//! | the edit | what it makes | what it pins |
+//! | --- | --- | --- |
+//! | every `OpIAdd` copied under a fresh id | two rows | the match must be *unique* |
+//! | a sum over the row's base adding something that is not `local.y` | not a row | what the sum is over |
+//! | `i_add(index, k)` spliced into an access chain | a constant off the lane | whose sum carries the offset |
+//! | `OpExecutionMode` removed | no workgroup size | the divisor is not zero |
+//!
+//! Three of those four were argued to be **equivalent mutants** before they were written, and the
+//! argument was sound about every module this emitter produces. That is a smaller claim than it
+//! sounds, and it was wrong all three times.
 //!
 //! # The walk is deliberately short-sighted
 //!

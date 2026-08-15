@@ -814,6 +814,107 @@ mod tests {
         );
     }
 
+    /// `spirv` with one more constant folded into the first access chain's index, off the lane.
+    ///
+    /// `i_add(index, k)` spliced in front of a chain and the chain repointed at it: a sum with a
+    /// constant on its right, reachable from an address, whose left is **not** the invocation's
+    /// lane. Nothing here emits one, and it is the shape `shift_in`'s left-hand clause rejects.
+    ///
+    /// Additive and in order, so the module stays well formed — this one has to be *reachable* to
+    /// matter, unlike the row's copies, because the offset walk follows an address rather than
+    /// scanning every term.
+    fn with_a_constant_added_off_the_lane(spirv: &[u32]) -> Vec<u32> {
+        // Any sum's result type is the type an index has; the module declares one integer type and
+        // every address term carries it.
+        let integer = super::decode::body(spirv).find_map(|instruction| {
+            match (instruction.opcode(), instruction.operands()) {
+                (op::I_ADD, [kind, ..]) => Some(*kind),
+                _ => None,
+            }
+        });
+        let (Some(integer), Some(constant)) = (integer, largest_constant(spirv, integer)) else {
+            return spirv.to_vec();
+        };
+
+        let mut words = spirv[..5].to_vec();
+        let fresh = spirv[3];
+        let mut spliced = false;
+        let mut at = 5;
+
+        while at < spirv.len() {
+            let count = (spirv[at] >> 16) as usize;
+            if count == 0 || at + count > spirv.len() {
+                break;
+            }
+            let instruction = &spirv[at..at + count];
+
+            // Type, result, base, member, index, and the instruction word.
+            if !spliced && (spirv[at] & 0xffff) as u16 == op::ACCESS_CHAIN && count == 6 {
+                words.extend_from_slice(&[
+                    (5 << 16) | u32::from(op::I_ADD),
+                    integer,
+                    fresh,
+                    instruction[5],
+                    constant,
+                ]);
+                let mut chain = instruction.to_vec();
+                chain[5] = fresh;
+                words.extend_from_slice(&chain);
+                spliced = true;
+            } else {
+                words.extend_from_slice(instruction);
+            }
+            at += count;
+        }
+
+        words[3] = fresh + 1;
+        words
+    }
+
+    /// The id of the largest `OpConstant` of type `kind` in `spirv`.
+    ///
+    /// The largest, because the walk this feeds takes a **maximum** — a constant under the strip
+    /// stride would be folded away by that and prove nothing. And of the index's own type, so the
+    /// number is an index rather than a float's bit pattern read as one.
+    fn largest_constant(spirv: &[u32], kind: Option<u32>) -> Option<u32> {
+        super::decode::body(spirv)
+            .filter_map(
+                |instruction| match (instruction.opcode(), instruction.operands()) {
+                    (op::CONSTANT, [declared, id, literal]) if Some(*declared) == kind => {
+                        Some((*literal, *id))
+                    }
+                    _ => None,
+                },
+            )
+            .max()
+            .map(|(_, id)| id)
+    }
+
+    #[test]
+    fn a_constant_added_off_the_lane_is_not_the_lanes_offset() {
+        // `shift_in` asks for the sum over the **invocation's own lane**, then keeps the ones with a
+        // constant on the right. Both halves matter and only one of them can be seen from a module
+        // this crate emits, because in an emitted address exactly one sum has a constant on its
+        // right and it is the lane's — so the gate reports the conjunction as unguarded.
+        //
+        // Here is the module where they part. A constant added to the index somewhere other than
+        // the lane is arithmetic this walk has no business reading as an offset past the run: the
+        // loose reading would ask for *more* buffer than the kernel touches, which is the one
+        // direction this check must never take.
+        let spirv = kernels::reduce::lane_sum::<F32, 128>(32).expect("built");
+
+        assert_eq!(
+            Bounds::of(&spirv).offset(),
+            0,
+            "a reduction reads no further than its run"
+        );
+        assert_eq!(
+            Bounds::of(&with_a_constant_added_off_the_lane(&spirv)).offset(),
+            0,
+            "and a constant added off the lane does not make one"
+        );
+    }
+
     /// `spirv` with its `OpExecutionMode` removed, and everything else left alone.
     ///
     /// A module that declares no workgroup size, built out of one that does — so every built-in,
