@@ -165,6 +165,17 @@ ones needing `Int8` or `Int16` declared and a result type whose width the shift 
 never been handed to the validator. They are valid, which is the answer rather than the point: the
 point is that nothing had asked.
 
+Pulling that thread found the general case. **Every module `spirv-val` had ever seen at 8 or 16 bits
+came from `kernels::narrow`**, which reaches seven operations: `add`, `clamp`, `load`, `reduce_sum`,
+`splat_bits`, `store`, `store_scalar`. The comparisons, the selects, the extremes, the shuffles, the
+votes and the scans all accept a narrow element and were validated at 32 bits and nowhere else —
+while narrow is where SPIR-V is fussiest, since the group opcodes differ between the signed and
+unsigned forms of one width and `shaderSubgroupExtendedTypes` is a permission no module can declare.
+
+`the_lane_surface_is_valid_for_every_narrow_integer` fills that grid, and states its own limit: it
+sweeps **type × operation** at one width. The **type × width** grid is still open — a narrow
+butterfly on a four-wide subgroup is a clustered shuffle, and is validated nowhere.
+
 ## What to do about it, worst first
 
 1. **Assert the counts.** Trivial, and the one in the README has now been wrong three times. The fix

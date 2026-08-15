@@ -3323,3 +3323,95 @@ worth is not the refusal but which one.
 Three instances of one shape now: `interpret::strips_of`, `Program::input_len`, and these two. The
 habit that finds it is worth naming — **a relationship decided in two places is decided in one place
 and copied**, and the copy is invisible to every test that guards the original.
+
+## Two shapes, named — 2026-08-15
+
+Everything found this week is one of two things. Both are invisible in the same way: the code reads
+correctly, the tests pass, and the thing that is wrong is *somewhere else*.
+
+### A relationship decided twice
+
+A rule written in two places is not two spellings of one rule. It is **two rules that agree on the
+inputs anybody draws**, and they diverge in the cases nobody does.
+
+Three instances, and the third was found by accident while fixing the second:
+
+| where | how it was written | how it diverged |
+| --- | --- | --- |
+| `interpret::strips_of` | `if lanes > subgroup` | the arms are the same answer at equal widths, so nothing could tell them apart |
+| `fuzz::generate` | `lanes < subgroup` | called a whole-subgroup vector *clustered* under one mutation, silently deleting `SumOrMax` — the only finish that carries a value out of a branch through an `OpPhi` |
+| `kernels::reduce` | `LANES > subgroup` | refused a cluster exactly the subgroup's width, which is not a missing mapping but a whole-subgroup vector |
+
+And the rule they were copies of, `Mapping::of`, decides by **divisibility** rather than by
+comparison — with the reason written beside it: *"a comparison would be indistinguishable from `<=`
+— divisibility says the same thing and says it once."* So a seven-lane vector on an eight-wide
+subgroup is *clustered* to all three copies and **refused** by the original. Only the generator
+drawing powers of two kept four different rules in agreement.
+
+**The asymmetry that makes this class dangerous.** A duplicated *branch* has a mutant, so the
+mutation gate finds it — both of the live ones were found that way, at 99.4% and 96.7%. A duplicated
+claim in *prose* has nothing at all. And the coverage guarding the original cannot see the copy:
+merging the fuzzer's two spellings into one made **existing** tests fail on the mutant, two of which
+had been guarding that relationship all along.
+
+The copies existed for a real reason rather than carelessness. `Lanes::mapping::<LANES>` takes the
+width as a const generic — which is what `decisions/DR-0002` is about — and both callers held a
+width they learned at run time, so neither could reach it. The fix was not to delete the copies but
+to give the rule a runtime face: `Mapping::of(lanes, subgroup)`, with the const-generic method as
+its one-line front.
+
+**The habit:** when a relationship is decided in two places, it is decided in one place and copied.
+Find the copy before the gate does.
+
+### A bound wider than the thing it bounds
+
+An operation that accepts more than it can do. Nothing refuses it, because the refusal would have to
+come from a layer that was never asked.
+
+`Lanes::shift_left` took `T: Element`. `F32` is an `Element`. So a shift of a vector of floats
+compiled, built, and produced `OpShiftLeftLogical` with a float result type — which SPIR-V forbids.
+Reachable from safe code, spelled plausibly, illegal.
+
+**No instrument here could see it, and each for its own reason.** The mutation gate could not: there
+was no branch to flip, so nothing survives. `spirv-val` could not: it only sees modules a test
+builds, and no test built that one. The type system could not: `Element` is exactly the bound that
+was wrong. `clippy` could not: it is a valid Rust call.
+
+That is what makes this class the most expensive of the four in `notes/CLAIMS.md` — it produces
+**invalid modules that run**, and drivers are lenient about what the validator is not.
+
+The fix is a third trait, and the crate had already made the argument for the second one:
+
+> `SAbs` and no `UAbs`. … A `Option<Glsl>` would have made that a runtime error, and an
+> `OpCopyObject` would have made it silently fine. **Refusing at the type is neither.**
+
+`Integer` now bounds the three shifts, so the call cannot be written rather than being caught. Its
+check is a `compile_fail` doctest — the only artefact that can assert what a program *cannot be*.
+
+### And a bound that is right leaves a gap of its own
+
+Narrowing a bound tells you which types an operation accepts. It says nothing about whether they
+were ever tried.
+
+`Integer` admits six types; `tests/instructions.rs` validated the shifts at **two**. The four narrow
+integers had never been handed to the validator. Pulling that thread found the general case: every
+module `spirv-val` had ever seen at 8 or 16 bits came from `kernels::narrow`, which reaches seven
+operations — `add`, `clamp`, `load`, `reduce_sum`, `splat_bits`, `store`, `store_scalar`. The
+comparisons, selects, extremes, shuffles, votes and scans all accept a narrow element and were
+validated at 32 bits and nowhere else.
+
+Narrow is where SPIR-V is fussiest: `Int8` and `Int16` must be declared, the group opcodes differ
+between the signed and unsigned forms of one width, the conversions reach `OpSConvert` or
+`OpUConvert` depending on the *target's* signedness, and `shaderSubgroupExtendedTypes` is a
+permission with no capability in the module at all.
+
+`the_lane_surface_is_valid_for_every_narrow_integer` fills the **type × operation** grid at one
+width. The **type × width** grid is still open, and the test says so rather than implying otherwise:
+a narrow butterfly on a four-wide subgroup is a clustered shuffle and is validated nowhere.
+
+### What the two shapes have in common
+
+Neither is a mistake in the code that contains it. A copy is wrong because of a rule somewhere else;
+a bound is wrong because of a rule in a specification. Both are found by asking a question *about*
+the code rather than running it — which is why the two instruments that found them were a mutation
+gate and a validator, and why `notes/CLAIMS.md` exists to ask which other claims have neither.

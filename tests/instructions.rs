@@ -21,7 +21,7 @@ mod common;
 
 use common::{VULKAN_1_1, expect_valid, validate, validator};
 use simdr::kernel::{Kernel, Shape};
-use simdr::lanes::{F32, I8, I16, I32, Integer, U8, U16, U32};
+use simdr::lanes::{Element, F32, I8, I16, I32, Integer, U8, U16, U32};
 
 /// A 32-wide subgroup, 64 invocations, two buffers — the shape every kernel here shares.
 fn shape() -> Shape {
@@ -423,4 +423,103 @@ fn the_shifts_are_valid_for_every_integer_they_accept() {
     shifts_are_valid_for::<I8>("i8");
     shifts_are_valid_for::<U16>("u16");
     shifts_are_valid_for::<I16>("i16");
+}
+
+/// The breadth of the lane API, at one element type, handed to the validator.
+///
+/// **Narrow types were validated across seven operations and accept the lot.** Everything in
+/// `Lanes` is bounded by `Element`, and `I8`, `U8`, `I16` and `U16` are `Element`s — but every
+/// module `spirv-val` had ever seen at one of those widths came from `kernels::narrow`, which
+/// reaches `add`, `clamp`, `load`, `reduce_sum`, `splat_bits`, `store` and `store_scalar`. The
+/// comparisons, the selects, the extremes, the shuffles, the votes and the scans were validated at
+/// 32 bits and nowhere else.
+///
+/// That is the shape the shifts had, one type bound up: an operation checked at a third of what it
+/// accepts. And narrow is exactly where SPIR-V is fussiest — `Int8` and `Int16` have to be
+/// declared, the group opcodes differ between signed and unsigned, and a result type's width has to
+/// follow its operands'.
+///
+/// One module rather than one per operation, deliberately: they compose, so a single stream reaches
+/// all of them and any one being wrong fails the same run.
+///
+/// # One axis, and the other one is stated rather than implied
+///
+/// This sweeps the **element type** at a single 32-wide subgroup, because that is the axis that was
+/// missing. It does not sweep the *width*: `Kernel` takes the subgroup in its `Shape` and `LANES` is
+/// a const generic, so varying both would mean a macro over the pairs. `runner/tests/validated.rs`
+/// covers widths 4 to 64 for the narrow kernels it has — which are the seven operations above.
+///
+/// So the honest reading is that the **type × operation** grid is filled here and the
+/// **type × width** grid is not. A narrow butterfly on a four-wide subgroup is a clustered shuffle
+/// and is still validated nowhere.
+fn the_lane_surface_is_valid_for<T: Element>(name: &str) {
+    let mut kernel = Kernel::<T>::new(shape()).expect("built");
+    let value = kernel.load::<32>(0).expect("loaded");
+
+    let (folded, scanned) = {
+        let mut lanes = kernel.lanes().expect("lanes");
+        let one = lanes.splat_bits::<T, 32>(1).expect("one");
+        let two = lanes.splat_bits::<T, 32>(2).expect("two");
+
+        // Elementwise: the arithmetic, and the three extended instructions whose GLSL number
+        // differs between the signed and unsigned forms of the same width.
+        let sum = lanes.add(value, one).expect("add");
+        let product = lanes.mul(sum, two).expect("mul");
+        let smaller = lanes.min(product, two).expect("min");
+        let larger = lanes.max(smaller, one).expect("max");
+        let bounded = lanes.clamp(larger, one, two).expect("clamp");
+
+        // A comparison — `OpSGreaterThan` or `OpUGreaterThan`, and the choice is the element's —
+        // then a select on it, and the equality that is one instruction for every integer.
+        let above = lanes.greater_than(bounded, one).expect("greater");
+        let picked = lanes.select(above, bounded, one).expect("select");
+        let same = lanes.equal(picked, one).expect("equal");
+        let either = lanes.select(same, picked, two).expect("select again");
+
+        // Across lanes: four different shuffle opcodes and three capabilities between them.
+        let partner = lanes.butterfly(either, 1).expect("butterfly");
+        let first = lanes.broadcast(partner, 0).expect("broadcast");
+        let up = lanes.shift_up(first, 1).expect("shift up");
+        let down = lanes.shift_down(up, 1).expect("shift down");
+        let rotated = lanes.rotate_up(down, 1).expect("rotate");
+
+        // A scan and the three reductions, which are where `shaderSubgroupExtendedTypes` lives —
+        // the permission with no capability in the module to declare it.
+        let scanned = lanes.prefix_sum(rotated).expect("scan");
+        let total = lanes.reduce_sum(scanned).expect("sum");
+        let biggest = lanes.reduce_max(scanned).expect("max");
+        let smallest = lanes.reduce_min(scanned).expect("min");
+
+        let total = lanes.from_lane_value::<T, 32>(total).expect("as vector");
+        let biggest = lanes.from_lane_value::<T, 32>(biggest).expect("as vector");
+        let smallest = lanes.from_lane_value::<T, 32>(smallest).expect("as vector");
+
+        let folded = lanes.add(total, biggest).expect("add");
+        let folded = lanes.add(folded, smallest).expect("add");
+        (folded, scanned)
+    };
+
+    let combined = kernel
+        .lanes()
+        .expect("lanes")
+        .add(folded, scanned)
+        .expect("add");
+    kernel.store(1, combined).expect("stored");
+    expect_valid(
+        &kernel.finish().expect("finished"),
+        &format!("kernel-surface-{name}"),
+        VULKAN_1_1,
+    );
+}
+
+#[test]
+fn the_lane_surface_is_valid_for_every_narrow_integer() {
+    // The four the shift sweep turned up as never validated beyond a handful of operations. `U32`
+    // is here as the control: it is the width everything else is checked at, so a failure in one of
+    // the four and not in it is a *narrow* problem rather than a broken test.
+    the_lane_surface_is_valid_for::<U32>("u32");
+    the_lane_surface_is_valid_for::<U8>("u8");
+    the_lane_surface_is_valid_for::<I8>("i8");
+    the_lane_surface_is_valid_for::<U16>("u16");
+    the_lane_surface_is_valid_for::<I16>("i16");
 }
