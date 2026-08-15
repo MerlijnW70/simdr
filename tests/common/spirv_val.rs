@@ -29,10 +29,23 @@ pub const VULKAN_1_0: &str = "vulkan1.0";
 pub const VULKAN_1_1: &str = "vulkan1.1";
 
 /// Where to find `spirv-val`, or `None` if it is not installed.
+///
+/// **Set-and-wrong is not the same as unset, and used to be.** `SPIRV_VAL` is how CI says where the
+/// validator is; a path with no file at it returned `None`, which every caller reads as "no
+/// validator installed" and skips over. So a typo in that one variable turned off every validation
+/// in *both* test trees, and left a green run behind — with the skip lines in `eprintln!`, which
+/// `libtest` swallows from a passing test.
+///
+/// Naming a path is asserting something is at it. Unset it to search the usual place instead.
 pub fn validator() -> Option<PathBuf> {
     if let Some(from_env) = std::env::var_os("SPIRV_VAL") {
         let path = PathBuf::from(from_env);
-        return path.is_file().then_some(path);
+        assert!(
+            path.is_file(),
+            "SPIRV_VAL points at {path:?} and there is no file there — every validation test would \
+             skip over that, and skips are invisible. Unset it to look in the usual place."
+        );
+        return Some(path);
     }
 
     let fallback = PathBuf::from(r"H:\tools\spirv-tools\install\bin\spirv-val.exe");

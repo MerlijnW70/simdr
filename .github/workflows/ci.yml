@@ -54,16 +54,21 @@ jobs:
       - name: install spirv-tools
         run: sudo apt-get update && sudo apt-get install -y spirv-tools
 
+      # `--nocapture` for the same reason as the device job below: a skip is printed with
+      # `eprintln!` and `libtest` swallows that from a passing test, so the skips this suite is
+      # written to report loudly were reaching nobody. `SPIRV_VAL` pointing at nothing used to be
+      # one of them — every validation in both test trees skipped over a typo — and is now a
+      # panic in `tests/common/spirv_val.rs` rather than a shrug.
       - name: emitter tests
         env:
           SPIRV_VAL: /usr/bin/spirv-val
-        run: cargo test -p simdr
+        run: cargo test -p simdr -- --nocapture
 
       # The paperwork checks. Four of them skip here because `noha.yaml` is not in the repository;
       # the ones that run are the ones that need no configuration, and they are the interesting
       # half — see `tests/integrity.rs`.
       - name: integrity
-        run: cargo test --test integrity
+        run: cargo test --test integrity -- --nocapture
 
       # **A broken doc link is a build failure, and nothing was making it one.** `README.md` has
       # listed this command among the checks since before this workflow existed, and it had been
@@ -87,13 +92,20 @@ jobs:
         # llvmpipe's subgroup is its vector width over 32, and `minSubgroupSize` equals
         # `maxSubgroupSize` at each setting — so the width is pinned rather than a default the
         # driver may vary. 256 is the default and reports 8.
+        #
+        # `skips` is how many tests legitimately cannot run at that width — a kernel written for a
+        # 32-wide subgroup, a narrow type this width cannot hold. It is asserted below. See the
+        # step for why a number rather than a shrug.
         include:
           - vector: 128
             width: 4
+            skips: 25
           - vector: 256
             width: 8
+            skips: 22
           - vector: 512
             width: 16
+            skips: 18
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -131,11 +143,32 @@ jobs:
       # `--test-threads=1` is not optional at 128 or 512: lavapipe is unstable there under
       # concurrent devices, and about 40% of parallel runs report a disagreement that does not
       # reproduce. See README.
+      #
+      # **`--nocapture` is not cosmetic either.** `libtest` swallows `eprintln!` from a *passing*
+      # test, and a skip here is a pass — so a run that skipped every test printed exactly the
+      # summary of one that ran all of them. Every check for silent skipping made before this flag
+      # was added had been reading a channel that could not carry the answer.
+      #
+      # And the count is asserted rather than printed, because the step above already establishes
+      # the principle: it fails outright when no ICD is found, on the stated grounds that the tests
+      # would otherwise "skip and pass over nothing". That guards one way of ending up with no
+      # coverage. This guards the rest of them — a gate that starts over-skipping, a device that
+      # stops reporting a feature, a harness that quietly finds nothing to run. Adding a test that
+      # legitimately cannot run at some width means changing a number in the matrix above, in a
+      # diff somebody reads.
       - name: runner tests at subgroup ${{ matrix.width }}
         env:
           LP_NATIVE_VECTOR_WIDTH: ${{ matrix.vector }}
           SPIRV_VAL: /usr/bin/spirv-val
-        run: cargo test -p runner -- --test-threads=1
+        run: |
+          set -o pipefail
+          cargo test -p runner -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/runner.log"
+          skipped=$(grep -c '^SKIPPED' "$RUNNER_TEMP/runner.log" || true)
+          echo "$skipped tests skipped at subgroup ${{ matrix.width }}, and ${{ matrix.skips }} is what this width is written to skip"
+          if [ "$skipped" -ne "${{ matrix.skips }}" ]; then
+            echo "::error::${{ matrix.width }}-wide run skipped $skipped tests and the matrix says ${{ matrix.skips }} — read the SKIPPED lines above, then change the code or the number"
+            exit 1
+          fi
 
   msrv:
     name: the version Cargo.toml claims

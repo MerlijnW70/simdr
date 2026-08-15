@@ -2807,3 +2807,100 @@ which is what a correct conversion looks like on devices that offer the whole su
 The project's own rule is that a skipped correctness test which looks green is worse than a red one.
 It turns out the check for that had the same shape as the thing it was checking: a number that read
 as evidence and was produced by a pipe that could not carry it.
+
+## A misspelt device name turned the whole suite off, quietly — 2026-08-15
+
+Measuring the gate conversion above meant running the suite on lavapipe, so:
+`SIMDR_DEVICE=llvmpipe`. It came back **157 skips, zero failures, exit code 0**, every one of them
+reading `SKIPPED …: no Vulkan device` — printed by a machine with two Vulkan devices in it.
+
+The name was wrong. lavapipe calls itself `llvmpipe (LLVM …)` only when its ICD is on the loader's
+path, and it was not; the two devices that *were* there are called something else. Nothing had gone
+wrong with any code under test. The run simply never happened.
+
+`Gpu::open_matching` collapsed two states into one:
+
+```rust
+Err(Error::NoComputeDevice) if pattern.is_some() => Ok(None),
+```
+
+under a doc comment calling a machine "without the part being asked for" a normal state for a test
+suite to find. It is not. **Passing a name is asserting that device is here.** The assertion being
+wrong is a typo, an ICD path never exported, a driver that did not install — and every one of those
+was indistinguishable from having no GPU at all, which is the one state the suite is designed to
+skip over without complaint.
+
+Three outcomes now, each meaning exactly one thing:
+
+| outcome | what it means |
+| --- | --- |
+| `Ok(None)` | no Vulkan loader. The environment is bare, not broken — skip. |
+| `Error::NoComputeDevice` | a loader, and nothing behind it that can compute. |
+| `Error::NoSuchDevice { wanted, present }` | devices are here, and none of them is the one named. |
+
+`NoSuchDevice` carries what *is* here, so the message says what to have typed:
+
+```
+SIMDR_DEVICE names a device that is not here — no device here is called "llvmpipe"
+— SIMDR_DEVICE matches a substring of ["NVIDIA GeForce RTX 4080", "AMD Radeon(TM) Graphics"]
+```
+
+and `common::device` panics on that one rather than skipping. Exit code 101 instead of 0.
+
+The second row lost a condition on the way past. `NoComputeDevice` was an error without a pattern
+and `Ok(None)` with one — for a machine state that a pattern has no bearing on either way. That
+guard existed only to reach the row below it.
+
+### Why the harness has to be the one that fails
+
+A skip is invisible: `libtest` swallows `eprintln!` from a passing test, so 157 of them and 0 of
+them print the same summary. That is exactly the shape this suite is built to refuse — and the CI
+workflow already refuses it once, failing the lavapipe job outright when no ICD is found, on the
+stated grounds that "the tests below would skip and pass over nothing". The same sentence was true
+of `SIMDR_DEVICE` and nothing checked it.
+
+`SIMDR_DEVICE` is not a convenience. It is the *only* way the second subgroup width ever runs —
+DR-0002 is the record the whole lane API is shaped around, and until that variable existed only one
+width had ever been tested. A two-device sweep exists to show that both ran. A typo in the variable
+that chooses them must not be able to report that they did.
+
+`runner/tests/selection.rs` now covers all three answers. There had been no test of any of them.
+
+### The same shape, one directory away
+
+`SPIRV_VAL` is how CI says where `spirv-val` lives. `validator()` read it and returned
+`path.is_file().then_some(path)` — so a path with nothing at it gave `None`, which every caller
+reads as *the validator is not installed* and skips over:
+
+```rust
+let Some(tool) = validator() else {
+    eprintln!("SKIPPED {label}: spirv-val not found (set SPIRV_VAL)");
+    return Ok(());          // <- every validation in both test trees, green
+};
+```
+
+A typo in one environment variable turned off every validation this project has, in both crates, and
+left the run green. It is an `assert!` now, for the same reason: naming a path is asserting
+something is at it.
+
+Two variables, the same mistake, and both are the ones CI depends on to be pointing somewhere.
+
+### And the count of what did not run is now a number CI checks
+
+`--nocapture` on all three test steps, because without it none of these skips were ever reaching a
+log. Then the lavapipe matrix carries the number of tests that legitimately cannot run at its width,
+and the step fails when the run disagrees:
+
+| width | skips | why they skip |
+| --- | --- | --- |
+| 4 | 25 | 11 written for a 32-wide subgroup, 6 narrow types, 3 with no case at 4, 1 that will not strip-mine |
+| 8 | 22 | the same 11, 3 narrow, 3 with no case at 8 |
+| 16 | 18 | the same 11, 3 with no case at 16 |
+
+Not one of them a capability reason, at any width, which is what the module-derived gate above
+should produce on a device offering the whole surface.
+
+The workflow already refused this once — it fails outright when no lavapipe ICD is found, on the
+stated grounds that the tests would otherwise "skip and pass over nothing". That guarded one route
+to an empty run. This guards the others, and it means a gate that starts over-skipping shows up as
+red rather than as a summary line that looks exactly like success.

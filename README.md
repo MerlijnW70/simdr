@@ -518,6 +518,14 @@ $env:SIMDR_DEVICE = "radeon"    # substring, case-insensitive
 cargo test --workspace          # the whole suite, now on a 64-wide subgroup
 ```
 
+**A name nothing here answers to fails the run**, and prints the names it could have matched. That
+is not the tidy-message change it sounds like: a mismatch used to be indistinguishable from having
+no GPU, so the suite skipped every test and exited zero. `SIMDR_DEVICE=llvmpipe` on this machine —
+whose two devices are called something else — was **157 skips reporting `no Vulkan device` beside
+two Vulkan devices**, and with `libtest` swallowing those lines the run looked like any other green
+one. Naming a device is asserting one is there, and an assertion that quietly turns the suite off is
+worse than no assertion.
+
 And against a CPU implementation, which needs no GPU at all. Mesa's lavapipe reports a subgroup
 width of 8 by default:
 

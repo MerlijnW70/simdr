@@ -25,12 +25,25 @@ use runner::Gpu;
 ///
 /// A machine without a GPU is a normal state for a suite to find. It reports loudly rather than
 /// passing quietly, because a skipped correctness test that looks green is worse than a red one.
+///
+/// **A device asked for by name and not here is not that state, and fails the test.** Setting
+/// `SIMDR_DEVICE` asserts a device exists; when the assertion is wrong, every test in the suite
+/// skips, and a skip is invisible — `libtest` swallows `eprintln!` from a passing test, so the run
+/// prints the same summary it would have printed after running all of it. `SIMDR_DEVICE=llvmpipe`
+/// here, where the two devices are called something else, was 157 skips and an exit code of zero.
+///
+/// So that one is a panic. It is the only outcome a two-device sweep can act on: the whole point of
+/// the sweep is that both widths ran, and a typo in the variable that chooses them must not be able
+/// to report that they did.
 pub fn device(label: &str) -> Option<Gpu> {
     match Gpu::open() {
         Ok(Some(gpu)) => Some(gpu),
         Ok(None) => {
             eprintln!("SKIPPED {label}: no Vulkan device");
             None
+        }
+        Err(error @ runner::Error::NoSuchDevice { .. }) => {
+            panic!("SIMDR_DEVICE names a device that is not here — {error}")
         }
         Err(error) => {
             eprintln!("SKIPPED {label}: could not open a device — {error}");

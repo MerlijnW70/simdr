@@ -167,16 +167,27 @@ impl Gpu {
     /// `SIMDR_DEVICE` holds, so an entire test run can be pointed at the other device without a
     /// line of it knowing.
     ///
-    /// Returns `Ok(None)` when the loader is present but no matching device is — a machine without
-    /// a GPU, or without the part being asked for, is a normal state for a test suite to find
-    /// rather than an error to fail on. A loader that will not load at all is not an error either,
-    /// for the same reason: the environment is bare, not broken.
+    /// Three outcomes, and each of them used to mean more than one thing:
+    ///
+    /// * `Ok(None)` — there is no Vulkan loader at all. The environment is bare, not broken, which
+    ///   is a normal state for a test suite to find rather than an error to fail on.
+    /// * [`Error::NoComputeDevice`] — a loader, and nothing behind it that can compute.
+    /// * [`Error::NoSuchDevice`] — devices, and none of them the one `pattern` named.
+    ///
+    /// **The third was the first**, under a comment calling a machine "without the part being asked
+    /// for" a normal state. But naming a device is *asserting* one is here, and the assertion being
+    /// wrong is a typo, an ICD path that was never exported, a driver that did not install — and
+    /// every one of those looked exactly like having no GPU. `SIMDR_DEVICE=llvmpipe` on the author's
+    /// machine, whose two devices are called something else, skipped 157 tests and exited zero. The
+    /// error names what *is* here, so the next line tells the caller what to have typed.
+    ///
+    /// The second used to depend on `pattern` too — an error without one and `Ok(None)` with one,
+    /// for a machine state neither the pattern nor its absence has any bearing on. That guard
+    /// existed only to reach the case above, and went with it.
     ///
     /// # Errors
     ///
-    /// [`Error::Vulkan`] if a call fails, [`Error::NoComputeDevice`] if devices exist and none
-    /// offers a compute queue — which is reported only when no `pattern` was given, since a
-    /// pattern that matches nothing is the `Ok(None)` case above.
+    /// [`Error::Vulkan`] if a call fails, and the two device variants above.
     pub fn open_matching(pattern: Option<&str>) -> Result<Option<Self>, Error> {
         // SAFETY: `load` only reads the loader library from the usual platform location. It is
         // unsafe because dynamic loading is, not because of anything we pass it.
@@ -194,11 +205,7 @@ impl Gpu {
         let instance = unsafe { entry.create_instance(&instance_info, None) }?;
 
         // SAFETY: the instance was just created and nothing else holds it.
-        match unsafe { open_on(&entry, Guard::new(instance), pattern) } {
-            Ok(gpu) => Ok(Some(gpu)),
-            Err(Error::NoComputeDevice) if pattern.is_some() => Ok(None),
-            Err(error) => Err(error),
-        }
+        unsafe { open_on(&entry, Guard::new(instance), pattern) }.map(Some)
     }
 
     /// The names of every device that could run compute work here.
@@ -240,11 +247,7 @@ impl Gpu {
             .map(|physical| {
                 // SAFETY: as above, and a physical device handle needs no destruction — it is
                 // owned by the instance, not by this.
-                let properties = unsafe { guard.get_physical_device_properties(physical) };
-                properties
-                    .device_name_as_c_str()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_else(|_| String::from("<unnamed device>"))
+                unsafe { name_of(&guard, physical) }
             })
             .collect();
 
@@ -314,6 +317,25 @@ impl Drop for Guard {
     }
 }
 
+/// What a device calls itself, or a stand-in when it will not say.
+///
+/// Shared by the enumeration `simdr list` prints and by the name filter, which is the point: the
+/// list a caller reads and the strings it is matched against are now produced by one function
+/// rather than two copies that could describe the same device differently.
+///
+/// # Safety
+///
+/// `instance` must hold a live instance, and `physical` must be a handle it enumerated.
+unsafe fn name_of(instance: &ash::Instance, physical: vk::PhysicalDevice) -> String {
+    // SAFETY: the caller's contract, and a physical device handle needs no destruction — it is
+    // owned by the instance rather than by this.
+    let properties = unsafe { instance.get_physical_device_properties(physical) };
+    properties
+        .device_name_as_c_str()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| String::from("<unnamed device>"))
+}
+
 /// Pick a device on `instance` and build a [`Gpu`] around it.
 ///
 /// The guard destroys the instance on any early return, so nothing here has to remember to.
@@ -331,7 +353,11 @@ unsafe fn open_on(
     let candidates = unsafe { instance.enumerate_physical_devices() }?;
     let wanted = pattern.map(str::to_lowercase);
 
-    let Some((physical, queue_family)) = candidates
+    // Collected rather than filtered straight through, so that "there is no device" and "there is
+    // no device *by that name*" can be told apart below. They used to be the same `NoComputeDevice`
+    // and then the same `Ok(None)`, and a suite that skipped every test over a misspelt
+    // `SIMDR_DEVICE` said `no Vulkan device` beside two Vulkan devices.
+    let compute: Vec<(vk::PhysicalDevice, u32)> = candidates
         .into_iter()
         .filter_map(|physical| {
             // SAFETY: live instance as above, and `physical` came from its own enumeration.
@@ -342,17 +368,25 @@ unsafe fn open_on(
             })?;
             u32::try_from(family).ok().map(|family| (physical, family))
         })
+        .collect();
+
+    if compute.is_empty() {
+        return Err(Error::NoComputeDevice);
+    }
+
+    // SAFETY: as above — the guard holds the instance live, and each handle came from it.
+    let named = |physical| unsafe { name_of(&instance, physical) };
+
+    let Some((physical, queue_family)) = compute
+        .iter()
+        .copied()
         .filter(|&(physical, _)| {
             // A name filter, when there is one. Substring rather than exact: nobody types
             // "AMD Radeon(TM) Graphics" correctly twice.
             let Some(wanted) = wanted.as_deref() else {
                 return true;
             };
-            // SAFETY: as above.
-            let properties = unsafe { instance.get_physical_device_properties(physical) };
-            properties
-                .device_name_as_c_str()
-                .is_ok_and(|name| name.to_string_lossy().to_lowercase().contains(wanted))
+            named(physical).to_lowercase().contains(wanted)
         })
         // Prefer a discrete GPU when nothing was asked for. With a pattern this still applies, and
         // only among the devices that matched it.
@@ -362,7 +396,15 @@ unsafe fn open_on(
             u8::from(properties.device_type == vk::PhysicalDeviceType::DISCRETE_GPU)
         })
     else {
-        return Err(Error::NoComputeDevice);
+        // Only reachable with a pattern: without one the filter passes everything, and `compute`
+        // is not empty by the check above.
+        return Err(Error::NoSuchDevice {
+            wanted: pattern.unwrap_or_default().to_owned(),
+            present: compute
+                .iter()
+                .map(|&(physical, _)| named(physical))
+                .collect(),
+        });
     };
 
     // SAFETY: live instance, and `physical` is one of the handles it enumerated.

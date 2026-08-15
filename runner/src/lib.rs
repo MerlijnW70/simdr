@@ -68,6 +68,23 @@ pub enum Error {
     Vulkan(vk::Result),
     /// The loader started but reported no physical device with a compute queue.
     NoComputeDevice,
+    /// Devices are here, and none of them is the one that was asked for by name.
+    ///
+    /// Apart from [`Error::NoComputeDevice`], and the distinction is the whole reason this variant
+    /// exists. A machine with no GPU is a normal state for a test suite to find and skip over. A
+    /// machine that *has* GPUs while `SIMDR_DEVICE` names one it does not have is somebody asserting
+    /// a device is present and being wrong — a typo, an unset ICD path, a driver that did not
+    /// install — and for as long as both were the same `Ok(None)` the second reported nothing.
+    ///
+    /// It cost a whole suite silently. `SIMDR_DEVICE=llvmpipe` on this machine, whose two devices
+    /// are called something else, skipped **157 tests and exited zero**, reporting `no Vulkan
+    /// device` beside two Vulkan devices.
+    NoSuchDevice {
+        /// The substring that was asked for.
+        wanted: String,
+        /// What was actually there to match, which is the half that makes the message actionable.
+        present: Vec<String>,
+    },
     /// No memory type with the properties a buffer needed was available.
     NoHostVisibleMemory,
     /// The host tried to read or write a buffer that lives only on the device.
@@ -122,6 +139,10 @@ impl fmt::Display for Error {
             Self::NoLoader(error) => write!(f, "the Vulkan loader would not load: {error}"),
             Self::Vulkan(result) => write!(f, "a Vulkan call failed: {result:?}"),
             Self::NoComputeDevice => f.write_str("no physical device offers a compute queue"),
+            Self::NoSuchDevice { wanted, present } => write!(
+                f,
+                "no device here is called {wanted:?} — SIMDR_DEVICE matches a substring of {present:?}"
+            ),
             Self::NoHostVisibleMemory => f.write_str("no memory type offers what a buffer needed"),
             Self::NotMappable => {
                 f.write_str("that buffer lives on the device and the host cannot map it")
