@@ -25,11 +25,72 @@
 //! the boundaries themselves — a sweep of random `u32`s would hit them by accident and prove it by
 //! accident too.
 
-use crate::spirv_val;
+use crate::batch::{self, Answer, Word};
+use runner::Gpu;
 use runner::kernels::WORKGROUP_SIZE;
-use runner::{Error, Gpu};
 use simdr::kernel::{Kernel, Shape};
 use simdr::lanes::{Element, F32, I8, I16, I32, LaneError, U8, U16, U32};
+
+/// A target this tool has a reference for, and how its answer comes back off the device.
+///
+/// **Two stringly-typed decisions, replaced by one trait.** `sweep` used to `match T::STRIDE` to
+/// pick between `run_bytes`, `run_halves` and `run_u32`, and then compare `target == "i8"` to decide
+/// whether to sign-extend what came back. Both are properties of the target type, and both were
+/// written as tests on values a caller passes in — so a new target could be added with a wrong
+/// string and the sign would silently be the other one.
+pub trait Probed: Element {
+    /// The buffer word this target's elements are read back as.
+    type Word: Word;
+
+    /// One returned word, widened to the `u32` the reference speaks in.
+    ///
+    /// Where the signedness lives. `OpSConvert`'s answer comes back in the target's own width and
+    /// has to be read as *signed* to be compared, and `OpUConvert`'s does not — which is the same
+    /// asymmetry the two opcodes have and the reason this is a method rather than a cast.
+    fn widened(word: Self::Word) -> u32;
+}
+
+impl Probed for U32 {
+    type Word = u32;
+    fn widened(word: u32) -> u32 {
+        word
+    }
+}
+
+impl Probed for I32 {
+    type Word = u32;
+    fn widened(word: u32) -> u32 {
+        word
+    }
+}
+
+impl Probed for U8 {
+    type Word = u8;
+    fn widened(word: u8) -> u32 {
+        u32::from(word)
+    }
+}
+
+impl Probed for I8 {
+    type Word = u8;
+    fn widened(word: u8) -> u32 {
+        i32::from(word as i8) as u32
+    }
+}
+
+impl Probed for U16 {
+    type Word = u16;
+    fn widened(word: u16) -> u32 {
+        u32::from(word)
+    }
+}
+
+impl Probed for I16 {
+    type Word = u16;
+    fn widened(word: u16) -> u32 {
+        i32::from(word as i16) as u32
+    }
+}
 
 /// The values where the five instructions part company.
 ///
@@ -84,7 +145,10 @@ pub fn converted(name: &str, value: u32) -> u32 {
 /// # Errors
 ///
 /// [`LaneError`] if the module cannot be built.
-pub fn probe<T: Element, const LANES: u32>(subgroup: u32, value: u32) -> Result<Vec<u32>, LaneError> {
+pub fn probe<T: Element, const LANES: u32>(
+    subgroup: u32,
+    value: u32,
+) -> Result<Vec<u32>, LaneError> {
     let mut kernel = Kernel::<T>::new(Shape::new(subgroup, WORKGROUP_SIZE, 2))?;
 
     let converted = {
@@ -129,82 +193,48 @@ impl Conversion {
 ///
 /// [`Error`] if a dispatch fails after the module validated, which is the device's problem rather
 /// than this crate's.
-pub fn sweep<T: Element, const LANES: u32>(
+pub fn sweep<T: Probed, const LANES: u32>(
     gpu: &Gpu,
     target: &'static str,
-) -> Result<Vec<Conversion>, ConversionsFailed> {
+) -> Answer<Vec<Conversion>>
+where
+    Vec<T::Word>: FromIterator<T::Word>,
+    T::Word: Default,
+{
     let width = gpu.limits().subgroup_size;
     let mut found = Vec::with_capacity(PROBES.len());
 
     for probe_value in PROBES {
-        let spirv = probe::<T, LANES>(width, probe_value).map_err(ConversionsFailed::Refused)?;
-
-        let missing = gpu.limits().unsupported_in(&spirv);
-        if !missing.is_empty() {
-            return Err(ConversionsFailed::Unsupported(missing));
-        }
-        if let Err(complaint) = spirv_val::validate(
-            &spirv,
+        // **One dispatch per probe, and this is the tool the batch layout does not fit.** The probe
+        // is a *constant in the module* — that is what makes twelve boundaries twelve modules — so
+        // batching them would mean loading it from a buffer, and a driver may fold a constant
+        // conversion where it cannot fold a loaded one. Twelve round trips buys a stronger
+        // question, and `batch::run` is the half of that API this uses.
+        let input = vec![T::Word::default(); WORKGROUP_SIZE as usize];
+        let answer = batch::run(
+            gpu,
             &format!("proeftuin-convert-{target}-{probe_value}"),
-            spirv_val::VULKAN_1_1,
-        ) {
-            return Err(ConversionsFailed::Invalid(complaint));
-        }
+            probe::<T, LANES>(width, probe_value),
+            &input,
+            1,
+        );
 
-        let invocations = WORKGROUP_SIZE as usize;
-        let actual = match T::STRIDE {
-            1 => gpu
-                .run_bytes(&spirv, &vec![0_u8; invocations], 1)
-                .map_err(ConversionsFailed::Errored)?
-                .first()
-                .map_or(0, |&byte| {
-                    if target == "i8" {
-                        i32::from(byte as i8) as u32
-                    } else {
-                        u32::from(byte)
-                    }
-                }),
-            2 => gpu
-                .run_halves(&spirv, &vec![0_u16; invocations], 1)
-                .map_err(ConversionsFailed::Errored)?
-                .first()
-                .map_or(0, |&half| {
-                    if target == "i16" {
-                        i32::from(half as i16) as u32
-                    } else {
-                        u32::from(half)
-                    }
-                }),
-            _ => gpu
-                .run_u32(&spirv, &vec![0_u32; invocations], 1)
-                .map_err(ConversionsFailed::Errored)?
-                .first()
-                .copied()
-                .unwrap_or(0),
+        let Answer::Ran(returned) = answer else {
+            // A refusal is a property of the module, and every probe builds the same shape — so
+            // the first one to fail is the answer for the sweep rather than the first of twelve
+            // identical lines.
+            return answer.map(|_| Vec::new());
         };
 
         found.push(Conversion {
             target,
             probe: probe_value,
-            actual,
+            actual: returned.first().copied().map_or(0, T::widened),
             expected: converted(target, probe_value),
         });
     }
 
-    Ok(found)
-}
-
-/// Why a whole sweep did not happen, kept apart for the reason `decisions/DR-0009` gives.
-#[derive(Debug)]
-pub enum ConversionsFailed {
-    /// The lane API refused to build it.
-    Refused(LaneError),
-    /// The device does not offer what the module declares.
-    Unsupported(Vec<simdr::spec::Capability>),
-    /// `spirv-val` rejected it. This crate's mistake.
-    Invalid(String),
-    /// The driver took a validated module and failed. The device's.
-    Errored(Error),
+    Answer::Ran(found)
 }
 
 /// Every target this tool has a reference for.
@@ -212,13 +242,7 @@ pub enum ConversionsFailed {
 /// `F32` and `F16` are absent on purpose: `OpConvertUToF` answers with a float, and a float's bits
 /// are not a number this table can compare with an integer one. They need their own reference and
 /// are the obvious next thing rather than a silent omission.
-///
-/// # Errors
-///
-/// As [`sweep`].
-pub fn every_target<const LANES: u32>(
-    gpu: &Gpu,
-) -> Vec<(&'static str, Result<Vec<Conversion>, ConversionsFailed>)> {
+pub fn every_target<const LANES: u32>(gpu: &Gpu) -> Vec<(&'static str, Answer<Vec<Conversion>>)> {
     vec![
         ("u32", sweep::<U32, LANES>(gpu, "u32")),
         ("i32", sweep::<I32, LANES>(gpu, "i32")),

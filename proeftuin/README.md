@@ -91,7 +91,7 @@ That is `runner/tests/validated.rs`'s opening paragraph happening again, in the 
 the thing that paragraph is about: *"drivers are lenient about things the validator is not."*
 
 **So the rule here is the engine's rule.** `check` runs `spirv-val` before it runs anything, using
-the emitter's own harness by path rather than a copy, and `Outcome` distinguishes four things a tool
+the emitter's own harness by path rather than a copy, and `Answer` distinguishes four things a tool
 that only counted agreements would have merged:
 
 * `Refused` — the lane API said no. The mapping working.
@@ -171,3 +171,63 @@ asks for: a number nothing emits is a copy of the grammar that `spirv-val` never
 Also absent: `OpConvertFToS` and `OpConvertFToU` are not in `op.rs` at all, so float-to-integer is
 not an operation this emitter offers. That is a gap in the surface rather than in the testing of it,
 and it is stated here so the difference is on the record.
+
+## The fourth tool is the other three's plumbing
+
+`src/batch.rs`, added 2026-08-16. Not a workload — the shape the three above turned out to share,
+and the two things they were doing wrong.
+
+### What was duplicated
+
+Every tool had the same four gates in the same order: build, ask the device whether it offers what
+the module declares, validate, dispatch. Each answered four different ways when any of them said no,
+through its own enum — `Outcome`, `ConversionsFailed`, `Roundtrip` — with the same arms under
+different names. And each picked between `run_u32`, `run_bytes` and `run_halves` in its own way, the
+conversions by a `match` on the element's stride followed by `target == "i8"` to decide whether to
+sign-extend what came back.
+
+| | before | after |
+| --- | --- | --- |
+| files calling the capability check and the validator | **3** | **1** |
+| outcome enums with the same four refusal arms | **3** | **1** (`Answer<T>`, generic) |
+| places deciding which dispatch a word width needs | **3**, one a runtime `match` | **1**, a trait with one impl per word |
+| places deciding a target's signedness | **1**, a string comparison | **1**, a method on the target type |
+
+**The line count went up, not down** — 1 134 to 1 487 — and that is the honest number. The extracted
+module is 332 lines of which most is the reasoning and its own tests, and `conversions.rs` traded a
+runtime `match` for a `Probed` trait that states per target what was implicit. What went down is the
+number of places a fifth reason would have to be added: three to one.
+
+### And the batching, which was the actual mistake
+
+`decisions/DR-0008` measured what a caller waits for: a round trip is ~100 µs on the discrete device
+here and the device's own share of it is **2.9%**. `notes/NEXT.md` has refused three times to invent
+a batching API because it had no caller. This directory was one, and not flatteringly:
+
+| tool | dispatches before | after |
+| --- | --- | --- |
+| quantised layer, the test | **72** | **12** |
+| quantised layer, `cargo run` | **384** | **12** |
+| conversions | 72 | 72, deliberately |
+| every `f16` pattern | 1 | 1 |
+
+The quantised seeds vary the *data* and share the module, so seventy-two dispatches were
+seventy-two waits for one dispatch of work. What made it un-batchable was one number:
+`Kernel::load_offset` reaches the second operand at a constant element offset, and the layer passed
+the size of **one workgroup's** operand — correct for a single dispatch and wrong for every workgroup
+after the first, which would have read its neighbour's activations. `Batch::second_operand` is where
+that number comes from now, and 32 seeds × 12 combinations agreeing is what says the layout is
+right: a wrong offset disagrees everywhere except the first workgroup.
+
+**The conversions stay at seventy-two on purpose**, and the exception is as informative as the rule.
+Their probe value is a *constant in the module* — that is what makes twelve boundaries twelve
+modules — so batching them would mean loading it from a buffer, and a driver may fold a constant
+conversion where it cannot fold a loaded one. Twelve round trips buys a stronger question. They use
+the gates and none of the layout.
+
+### What a batch is, then
+
+**N problems laid out so that the invocation's own index selects the problem.** That is a constraint
+on the *kernel* rather than on the buffer, which is why the API is a description of a layout and not
+a container: the words belong to the caller, and what `Batch` owns is the arithmetic that a kernel
+has to be built against.

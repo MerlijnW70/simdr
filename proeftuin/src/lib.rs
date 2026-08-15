@@ -26,11 +26,13 @@
 #[path = "../../tests/common/spirv_val.rs"]
 pub(crate) mod spirv_val;
 
+pub mod batch;
 pub mod conversions;
 pub mod halves;
 
+use crate::batch::{Answer, Batch};
+use runner::Gpu;
 use runner::kernels::WORKGROUP_SIZE;
-use runner::{Error, Gpu};
 use simdr::kernel::{Kernel, Shape};
 use simdr::lanes::{LaneError, U32};
 
@@ -262,86 +264,72 @@ pub fn packed_products(kind: Dot, weights: u32, activations: u32) -> u32 {
     }
 }
 
-/// What one attempt at a mapping came to.
+/// Build the layer at `LANES`, run every seed **in one dispatch**, and compare each.
 ///
-/// **Four outcomes rather than a `Result`, because three of them are not failures and only one is
-/// silence.** A lane count with no mapping is the lane API working; a device that does not offer an
-/// instruction is the device being honest; a driver that accepts the module and then errors is a
-/// finding of its own, and it is neither of the first two. Collapsing them loses exactly the
-/// distinction a tool like this exists to draw.
-#[derive(Debug)]
-pub enum Outcome {
-    /// The mapping refused to build the module, by name.
-    Refused(LaneError),
-    /// The module is legal and this device does not offer what it declares.
-    Unsupported(Vec<simdr::spec::Capability>),
-    /// `spirv-val` rejected the module, so it was never dispatched.
-    ///
-    /// **The outcome this tool did not have on its first outing, and the one that mattered.** The
-    /// layer stored an `i32` into a `u32` buffer; two devices ran it 192 times each and agreed with
-    /// the reference every time, and a third refused it with `ERROR_UNKNOWN`. A sandbox that
-    /// dispatches without validating reproduces the exact failure the engine's own suite exists to
-    /// prevent — `runner/tests/validated.rs` opens by describing it.
-    Invalid(String),
-    /// The device accepted the module and then failed to run it.
-    ///
-    /// Not a disagreement, not a refusal, and — now that the module is validated first — not a
-    /// module this crate got wrong either. `notes/FINDINGS.md` records the precedent: an integrated
-    /// Radeon faults inside `vkCreateComputePipelines` on a clustered scan that `spirv-val` accepts
-    /// and two other implementations run correctly.
-    Errored(Error),
-    /// It ran, and here is whether it agreed.
-    Ran(Checked),
-}
-
-/// Build the layer at `LANES`, run it, and compare against [`reference`].
+/// **This was one dispatch per seed until 2026-08-16**, which is seventy-two round trips where
+/// twelve would do — the seeds vary the data and the module is the same. `decisions/DR-0008`
+/// measured what that costs: a round trip is ~100 µs on the discrete device here and the device's
+/// own share of it is 2.9%, so the seventy-two were about 7 ms of waiting for roughly 200 µs of
+/// work.
+///
+/// What made it un-batchable was one number. `Kernel::load_offset` reaches the second operand at a
+/// constant element offset, and this passed the size of *one* workgroup's operand — correct for a
+/// single dispatch and wrong for every workgroup after the first, which would have read its
+/// neighbour's activations. The offset belongs to the batch, and [`Batch::second_operand`] is where
+/// it now comes from.
+///
+/// The layout is: every problem's weights, then every problem's activations. One workgroup per
+/// problem, so the invocation's own index selects it — which is the whole definition of a batch
+/// here, and a constraint on the *kernel* rather than on the buffer.
 pub fn check<const LANES: u32>(
     gpu: &Gpu,
     kind: Dot,
     mapping: &'static str,
-    seed: u64,
-) -> Outcome {
+    seeds: &[u64],
+) -> Answer<Vec<Checked>> {
     let width = gpu.limits().subgroup_size;
     let strips = (LANES / width.max(1)).max(1);
-    let per_operand = WORKGROUP as usize * strips as usize;
+    let batch = Batch::of(seeds.len(), WORKGROUP as usize * strips as usize);
 
-    let spirv = match layer::<LANES>(kind, width, per_operand as u32) {
-        Ok(spirv) => spirv,
-        Err(refused) => return Outcome::Refused(refused),
-    };
+    // Drawn per problem and then laid out by operand, because the kernel reads one array of
+    // weights followed by one array of activations — not one problem followed by the next.
+    let per_problem: Vec<Vec<u32>> = seeds
+        .iter()
+        .map(|&seed| drawn(seed, batch.per_problem() * 2))
+        .collect();
 
-    let missing = gpu.limits().unsupported_in(&spirv);
-    if !missing.is_empty() {
-        return Outcome::Unsupported(missing);
+    let mut input: Vec<u32> = Vec::with_capacity(batch.words() * 2);
+    for words in &per_problem {
+        input.extend(words.iter().take(batch.per_problem()).copied());
+    }
+    for words in &per_problem {
+        input.extend(words.iter().skip(batch.per_problem()).copied());
     }
 
-    // **Before the device, every time.** A driver is lenient about things the validator is not, and
-    // an invalid module here came back as 192 correct-looking answers on one device and an opaque
-    // `ERROR_UNKNOWN` on another.
-    if let Err(complaint) = spirv_val::validate(
-        &spirv,
-        &format!("proeftuin-layer-{mapping}-{LANES}"),
-        spirv_val::VULKAN_1_1,
-    ) {
-        return Outcome::Invalid(complaint);
-    }
+    let built = layer::<LANES>(kind, width, batch.second_operand());
+    let label = format!("proeftuin-layer-{mapping}-{LANES}");
 
-    let input = drawn(seed, per_operand * 2);
-    let actual = match gpu.run_u32(&spirv, &input, 1) {
-        Ok(actual) => actual,
-        Err(error) => return Outcome::Errored(error),
-    };
-    let expected = reference(kind, &input, per_operand, width, LANES, strips);
-
-    Outcome::Ran(Checked {
-        mapping,
-        lanes: LANES,
-        width,
-        strips,
-        disagreed_at: actual
-            .iter()
-            .zip(&expected)
-            .position(|(left, right)| left != right),
+    batch::run(gpu, &label, built, &input, batch.workgroups()).map(|returned| {
+        // `WORKGROUP` answers a problem, not `per_problem`: the layer reduces and stores one scalar
+        // per invocation. Stating it rather than deriving it is the honest spelling — the input
+        // size says nothing about the kernel's shape.
+        batch
+            .answers(&returned, WORKGROUP as usize)
+            .zip(&per_problem)
+            .map(|(actual, words)| {
+                let expected = reference(kind, words, batch.per_problem(), width, LANES, strips);
+                Checked {
+                    mapping,
+                    lanes: LANES,
+                    width,
+                    strips,
+                    disagreed_at: actual
+                        .iter()
+                        .zip(&expected)
+                        .position(|(left, right)| left != right),
+                }
+            })
+            .collect()
     })
 }
 

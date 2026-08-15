@@ -1,6 +1,7 @@
 //! The conversions, at the boundaries where their five instructions part company.
 
-use proeftuin::conversions::{ConversionsFailed, every_target};
+use proeftuin::batch::Answer;
+use proeftuin::conversions::every_target;
 use runner::Gpu;
 
 #[test]
@@ -30,7 +31,7 @@ fn every_conversion_matches_the_opcode_it_emits() -> Result<(), Box<dyn std::err
 
     for (target, sweep) in sweeps {
         match sweep {
-            Ok(conversions) => {
+            Answer::Ran(conversions) => {
                 ran += 1;
                 for conversion in conversions {
                     if !conversion.agreed() {
@@ -39,23 +40,26 @@ fn every_conversion_matches_the_opcode_it_emits() -> Result<(), Box<dyn std::err
                 }
             }
             // Lost coverage, printed rather than counted silently.
-            Err(ConversionsFailed::Refused(why)) => {
+            Answer::Refused(why) => {
                 eprintln!("  {target}: refused — {why}");
             }
-            Err(ConversionsFailed::Unsupported(missing)) => {
+            Answer::Unsupported(missing) => {
                 eprintln!("  {target}: device lacks {missing:?}");
             }
             // Failures, and which one decides whose they are.
-            Err(ConversionsFailed::Invalid(complaint)) => {
+            Answer::Invalid(complaint) => {
                 complaints.push(format!("{target}: spirv-val rejected it — {complaint}"));
             }
-            Err(ConversionsFailed::Errored(error)) => complaints.push(format!(
+            Answer::Errored(error) => complaints.push(format!(
                 "{target}: the driver failed after accepting a valid module — {error}"
             )),
         }
     }
 
-    assert!(ran >= 4, "only {ran} of six targets swept, so this proves little");
+    assert!(
+        ran >= 4,
+        "only {ran} of six targets swept, so this proves little"
+    );
     assert!(
         complaints.is_empty(),
         "a conversion did not match the instruction it emits:\n{}",

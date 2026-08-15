@@ -6,11 +6,16 @@
 //! at all, and which were refused, unsupported, invalid or *errored* — and a passing test prints
 //! none of that.
 
-use proeftuin::{Dot, Outcome, check};
+use proeftuin::batch::Answer;
+use proeftuin::{Dot, check};
 use runner::Gpu;
 use std::collections::BTreeMap;
 
 /// Seeds per combination. Larger than the test's, because this is not on anybody's critical path.
+///
+/// **And all of them in one dispatch since 2026-08-16.** They were thirty-two round trips per
+/// combination — 384 in all — which `decisions/DR-0008` prices at about 38 ms of waiting for a
+/// millisecond of work. Twelve dispatches now, one per combination.
 const SEEDS: u64 = 32;
 
 /// How one (dot, mapping) pair fared, in the five ways it can.
@@ -40,13 +45,16 @@ impl Tally {
 
 /// The three lane counts around a width, as the three mappings.
 macro_rules! mappings {
-    ($gpu:expr, $kind:expr, $seed:expr, $half:literal, $whole:literal, $double:literal) => {
+    ($gpu:expr, $kind:expr, $seeds:expr, $half:literal, $whole:literal, $double:literal) => {
         vec![
-            ("clustered", check::<$half>($gpu, $kind, "clustered", $seed)),
-            ("whole", check::<$whole>($gpu, $kind, "whole", $seed)),
+            (
+                "clustered",
+                check::<$half>($gpu, $kind, "clustered", $seeds),
+            ),
+            ("whole", check::<$whole>($gpu, $kind, "whole", $seeds)),
             (
                 "strip-mined",
-                check::<$double>($gpu, $kind, "strip-mined", $seed),
+                check::<$double>($gpu, $kind, "strip-mined", $seeds),
             ),
         ]
     };
@@ -63,52 +71,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut tally: BTreeMap<(&str, &str), Tally> = BTreeMap::new();
 
+    let seeds: Vec<u64> = (0..SEEDS).collect();
+
     for kind in Dot::ALL {
-        for seed in 0..SEEDS {
-            let outcomes = match width {
-                4 => mappings!(&gpu, kind, seed, 2, 4, 8),
-                8 => mappings!(&gpu, kind, seed, 4, 8, 16),
-                16 => mappings!(&gpu, kind, seed, 8, 16, 32),
-                32 => mappings!(&gpu, kind, seed, 16, 32, 64),
-                64 => mappings!(&gpu, kind, seed, 32, 64, 128),
-                other => {
-                    println!("no lane counts written for a subgroup of {other}");
-                    return Ok(());
+        let outcomes = match width {
+            4 => mappings!(&gpu, kind, &seeds, 2, 4, 8),
+            8 => mappings!(&gpu, kind, &seeds, 4, 8, 16),
+            16 => mappings!(&gpu, kind, &seeds, 8, 16, 32),
+            32 => mappings!(&gpu, kind, &seeds, 16, 32, 64),
+            64 => mappings!(&gpu, kind, &seeds, 32, 64, 128),
+            other => {
+                println!("no lane counts written for a subgroup of {other}");
+                return Ok(());
+            }
+        };
+
+        for (mapping, outcome) in outcomes {
+            let entry = tally.entry((kind.name(), mapping)).or_default();
+
+            // **The reason it did not run is counted once for the batch**, where it used to be
+            // counted once per seed. A refusal is a property of the module and the seeds share
+            // one, so thirty-two identical refusals were thirty-two copies of one fact.
+            let Answer::Ran(checked) = outcome else {
+                let why = outcome.why().unwrap_or_default();
+                match outcome {
+                    Answer::Refused(_) => entry.refused += 1,
+                    Answer::Unsupported(_) => entry.unsupported += 1,
+                    Answer::Invalid(_) => entry.invalid += 1,
+                    Answer::Errored(_) => entry.errored += 1,
+                    Answer::Ran(_) => {}
                 }
+                entry.note.get_or_insert(why);
+                continue;
             };
 
-            for (mapping, outcome) in outcomes {
-                let entry = tally.entry((kind.name(), mapping)).or_default();
-                match outcome {
-                    Outcome::Ran(checked) if checked.agreed() => entry.agreed += 1,
-                    Outcome::Ran(checked) => {
-                        entry.disagreed += 1;
-                        entry
-                            .note
-                            .get_or_insert_with(|| format!("seed {seed}: {checked:?}"));
-                    }
-                    Outcome::Refused(why) => {
-                        entry.refused += 1;
-                        entry.note.get_or_insert_with(|| format!("refused: {why}"));
-                    }
-                    Outcome::Unsupported(missing) => {
-                        entry.unsupported += 1;
-                        entry
-                            .note
-                            .get_or_insert_with(|| format!("device does not offer {missing:?}"));
-                    }
-                    Outcome::Invalid(complaint) => {
-                        entry.invalid += 1;
-                        entry
-                            .note
-                            .get_or_insert_with(|| format!("spirv-val rejected it: {complaint}"));
-                    }
-                    Outcome::Errored(error) => {
-                        entry.errored += 1;
-                        entry.note.get_or_insert_with(|| {
-                            format!("the driver took a valid module and failed: {error}")
-                        });
-                    }
+            for (seed, one) in checked.iter().enumerate() {
+                if one.agreed() {
+                    entry.agreed += 1;
+                } else {
+                    entry.disagreed += 1;
+                    entry
+                        .note
+                        .get_or_insert_with(|| format!("seed {seed}: {one:?}"));
                 }
             }
         }

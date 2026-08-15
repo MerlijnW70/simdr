@@ -68,6 +68,14 @@ Two harnesses, one missing the arm that says *my module was wrong* and one missi
 construction and one partially — and no check compares a new harness against it. The gate's
 invariant vocabulary confines an import graph, which this is not.
 
-What it has instead is a worked failure in each direction, above, and a place to look: `Outcome` in
-`proeftuin/src/lib.rs` is the fuller of the two, and `runner::fuzz::Outcome` is the one that got
-there first and is missing an arm.
+What it has instead is a worked failure in each direction, above, and a place to look: `Answer` in
+`proeftuin/src/batch.rs` is the fuller of the two, and `runner::fuzz::Outcome` is the one that got
+there first.
+
+**Both have moved since this was written, and in the direction the record argues for.** The sandbox
+had *three* of these — one per tool, the same four arms with different names — which is the shape
+this rule prevents inside a harness and did not prevent between harnesses. They are one generic
+`Answer<T>` now, so a fifth reason is one arm rather than three. And `runner::fuzz::Outcome` gained
+the arm it was missing from the other end: `ProgramError` splits a refusal into *the width has no
+mapping* and *this element type has no such instruction*, which arrived with the first generated
+operation that not every domain has.
