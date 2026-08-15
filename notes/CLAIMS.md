@@ -142,9 +142,28 @@ that claim, so the mutation gate could not see it. No test built such a module, 
 never asked. It was reachable from safe code with a plausible spelling for as long as it existed.
 
 The sweep that found it covered `src/lanes/`, and established that the three shifts were the only
-operations there whose type bound was wider than the instruction allows. **`src/module/`'s typed
-helpers have not had the same sweep** — that is the layer below, and it is where an opcode meets a
-type with no lane API in between.
+operations there whose type bound was wider than the instruction allows.
+
+**`src/module/` has now had the same sweep, and it comes out clean — but not for the reason the
+first one did.** Every helper at that layer takes an `Id`, so the Rust type system cannot help at
+all; the question is instead *where an opcode and a type are chosen independently*. Eighteen raw
+`binary`/`unary` calls exist, and each is one of two shapes:
+
+* **derived from `Element`** — `T::ADD`, `T::EQUAL`, `T::GREATER_THAN`, `T::FROM_U32`, the group
+  opcodes — where the opcode and the type come from the same trait implementation and cannot
+  disagree;
+* **fixed to `uint` or `boolean`** — the bitwise lane arithmetic in `shuffle.rs` and `scan.rs`, the
+  loop counter's comparison, the bitcasts — where the operand is a lane index or a comparison
+  result, never the caller's `T`.
+
+The shifts were the only place a caller-chosen `T` met an opcode SPIR-V restricts. That is now a
+type bound, and the sweep is written down here so the next person redoes it rather than repeats it.
+
+**It did leave one gap, and closing it is what the sweep was for.** Bounding the shifts to `Integer`
+admits six types; `tests/instructions.rs` validated them at *two*. The four narrow integers — the
+ones needing `Int8` or `Int16` declared and a result type whose width the shift must match — had
+never been handed to the validator. They are valid, which is the answer rather than the point: the
+point is that nothing had asked.
 
 ## What to do about it, worst first
 

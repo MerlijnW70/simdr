@@ -21,7 +21,7 @@ mod common;
 
 use common::{VULKAN_1_1, expect_valid, validate, validator};
 use simdr::kernel::{Kernel, Shape};
-use simdr::lanes::{F32, U32};
+use simdr::lanes::{F32, I8, I16, I32, Integer, U8, U16, U32};
 
 /// A 32-wide subgroup, 64 invocations, two buffers — the shape every kernel here shares.
 fn shape() -> Shape {
@@ -376,4 +376,51 @@ fn a_memory_barrier_that_orders_nothing_is_refused() {
         message.contains("MemoryBarrier"),
         "refused for something other than the barrier: {message}"
     );
+}
+
+/// The three shifts, at one element type.
+///
+/// Generic because the point is the *type*: `Integer` admits six and the test above reached two of
+/// them. A shift is an integer instruction whatever the width, but "whatever the width" is a claim
+/// about SPIR-V, and only the validator can settle it — an 8-bit `OpShiftRightArithmetic` is a
+/// different question from a 32-bit one, and asking it costs one line per type.
+fn shifts_are_valid_for<T: Integer>(name: &str) {
+    let mut kernel = Kernel::<T>::new(shape()).expect("built");
+    let value = kernel.load::<32>(0).expect("loaded");
+
+    let shifted = {
+        let mut lanes = kernel.lanes().expect("lanes");
+        // The amount is a `u32` whatever the value's width — SPIR-V lets the two differ, and this
+        // is where that is checked rather than assumed.
+        let by = lanes.splat_bits::<U32, 32>(3).expect("three");
+
+        let up = lanes.shift_left(value, by).expect("left");
+        let down = lanes.shift_right_logical(up, by).expect("logical");
+        lanes.shift_right_arithmetic(down, by).expect("arithmetic")
+    };
+
+    kernel.store(1, shifted).expect("stored");
+    expect_valid(
+        &kernel.finish().expect("finished"),
+        &format!("kernel-shifts-{name}"),
+        VULKAN_1_1,
+    );
+}
+
+#[test]
+fn the_shifts_are_valid_for_every_integer_they_accept() {
+    // **An operation validated at a third of the types it takes.** `the_shifts_are_valid_spirv`
+    // above builds a `U32` kernel and reaches `I32` through a bitcast; the four narrow integers
+    // were never handed to the validator at all, and they are the ones that need `Int8` or `Int16`
+    // declared and a result type of a width the shift has to match.
+    //
+    // Found by sweeping `src/module/` for opcodes paired with a type by hand, which is where the
+    // float-shift bug came from one layer up: the fix bounded the shifts to `Integer`, and nothing
+    // then asked whether every `Integer` actually works.
+    shifts_are_valid_for::<U32>("u32");
+    shifts_are_valid_for::<I32>("i32");
+    shifts_are_valid_for::<U8>("u8");
+    shifts_are_valid_for::<I8>("i8");
+    shifts_are_valid_for::<U16>("u16");
+    shifts_are_valid_for::<I16>("i16");
 }
