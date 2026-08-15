@@ -34,22 +34,25 @@
 //!
 //! # What the check is and is not
 //!
-//! **Necessary, not sufficient.** Four numbers go into it and all four are read from the module:
-//! how many invocations the dispatch launches, how many *elements* each one touches of a given
-//! binding, how many elements past the end of the run it reaches, and how many bytes an element
-//! takes.
+//! **Necessary, not sufficient.** Five numbers go into it and all five are read from the module:
+//! the dispatch's shape, how many *elements* each invocation touches of a given binding, how many
+//! elements past the end of the run it reaches, how far apart that buffer's rows are, and how many
+//! bytes an element takes.
 //!
-//! The third of those was outside it until now. `Kernel::load_offset` reads `in[i + half]`, and a
-//! buffer exactly as long as the run is one this said a dispatch fit while the kernel read `half`
-//! elements past the end of it. The direction was safe — under-counting refuses less than it might
-//! and never more — but the hole was real, and closing it needed nothing declared: the emitter
-//! folds `strip × workgroup + offset` into one constant, and the strip term is a number this
-//! already knows. See [`addressing`].
+//! **The middle two were outside it, and both under-counted.** `Kernel::load_offset` reads
+//! `in[i + half]`, so a buffer exactly as long as the run was one this said a dispatch fit while
+//! the kernel read `half` elements past the end. And a grid's rows are `pitch` elements apart
+//! whether or not the dispatch covers a row, so a kernel reading a narrow slab of a wide matrix
+//! reached its last row `(rows - 1) × pitch` elements in while this counted only the columns
+//! dispatched — 800 elements measured as 128, in the shape `plane`'s own header describes.
 //!
-//! Two things stay outside. A grid kernel's `row × pitch` is not read at all, and
-//! `Kernel::load_offset_by`'s offset is a *specialization* constant — a number chosen after the
-//! module was built, with no literal in it to find. Both under-count, which is the direction this
-//! check must always take when it cannot see.
+//! Neither needed anything declared, for the reason the strip count did not: the numbers are in the
+//! module. The emitter folds `strip × workgroup + offset` into one constant, and it multiplies the
+//! row by the pitch. See [`addressing`].
+//!
+//! One thing stays outside: `Kernel::load_offset_by`'s offset is a *specialization* constant, a
+//! number chosen after the module was built with no literal in it to find. It under-counts, which
+//! is the direction this check must always take when it cannot see.
 
 mod addressing;
 
@@ -66,9 +69,13 @@ use std::collections::BTreeMap;
 /// [`crate::Session`] can be a long way between the two.
 #[derive(Debug, Clone)]
 pub(crate) struct Bounds {
-    /// Invocations per workgroup, from `LocalSize`. `None` when the module declares none, which is
-    /// not a shape this can reason about.
-    workgroup: Option<u64>,
+    /// The three `LocalSize` axes. `None` when the module declares none, which is not a shape this
+    /// can reason about.
+    ///
+    /// Kept as three rather than as their product because for a grid they are two different things:
+    /// x is the columns a workgroup covers and y is its rows, and only x appears in the address
+    /// arithmetic. The product is the invocation count and is taken from these where it is wanted.
+    local: Option<[u64; 3]>,
     /// Bytes per element, from the buffer's `ArrayStride`.
     stride: Option<u64>,
     /// What each binding's addressing asks of it. A binding whose address does not vary per
@@ -103,11 +110,16 @@ impl From<Overrun> for crate::Error {
 impl Bounds {
     /// Read what `spirv` needs.
     pub(crate) fn of(spirv: &[u32]) -> Self {
-        let workgroup = workgroup_size(spirv);
+        let local = local_size(spirv);
         Self {
-            workgroup,
+            local,
             stride: element_bytes(spirv),
-            needs: addressing::needs(spirv, workgroup.unwrap_or(0)),
+            // The **x** axis, not the product. `Kernel::run_start` emits `group.x × (workgroup ×
+            // strips)` where `workgroup` is `Shape::workgroup`, which is `LocalSize`'s x alone — so
+            // dividing that constant by the product would recover the strip count of a grid kernel
+            // as `strips / rows`, and the two agreed only because every kernel with more than one
+            // strip has a y of one.
+            needs: addressing::needs(spirv, local.map_or(0, |sizes| sizes[0])),
         }
     }
 
@@ -119,16 +131,15 @@ impl Bounds {
     /// table beside a one-word answer — so a binding this cannot read is one it must not guess
     /// about. [`Bounds::fits`] takes the other view, and says why.
     pub(crate) fn overrun(&self, grid: Grid, words: &[usize]) -> Option<Overrun> {
-        let (Some(workgroup), Some(stride)) = (self.workgroup, self.stride) else {
+        let (Some(local), Some(stride)) = (self.local, self.stride) else {
             return None;
         };
-        let invocations = invocations(grid, workgroup);
 
         self.needs
             .iter()
             .filter_map(|(&binding, needs)| {
                 let held = *words.get(binding as usize)?;
-                let needed = words_for(elements_of(invocations, *needs), stride);
+                let needed = words_for(elements_of(grid, local, *needs), stride);
                 (needed > held).then_some(Overrun {
                     binding: Some(binding),
                     needed,
@@ -149,10 +160,9 @@ impl Bounds {
     /// against, and refusing on an unknown would turn "this runner cannot tell" into "your module
     /// is wrong".
     pub(crate) fn overrun_uniform(&self, grid: Grid, words: usize) -> Option<Overrun> {
-        let (Some(workgroup), Some(stride)) = (self.workgroup, self.stride) else {
+        let (Some(local), Some(stride)) = (self.local, self.stride) else {
             return None;
         };
-        let invocations = invocations(grid, workgroup);
 
         // The hungriest binding, or the floor for a module whose addressing this could not read at
         // all. Such a module touches an element per invocation as far as anyone here knows, and
@@ -164,9 +174,9 @@ impl Bounds {
         let (binding, elements) = self
             .needs
             .iter()
-            .map(|(&binding, needs)| (Some(binding), elements_of(invocations, *needs)))
+            .map(|(&binding, needs)| (Some(binding), elements_of(grid, local, *needs)))
             .max_by_key(|&(_, elements)| elements)
-            .unwrap_or((None, invocations));
+            .unwrap_or((None, invocations(grid, local)));
 
         let needed = words_for(elements, stride);
         (needed > words).then_some(Overrun {
@@ -211,16 +221,48 @@ impl Bounds {
     }
 }
 
-/// The highest element index a dispatch of `invocations` reaches in this binding, as a count.
+/// How many elements of this binding a dispatch of `grid` reaches, counting from its first.
 ///
-/// `invocations × strips` is the run itself, and the offset sits past the end of it: the last
-/// invocation of the last strip lands at `invocations × strips - 1 + offset`, so the buffer needs
-/// one more than that. A binding nobody offsets into has an offset of zero and this is the product
-/// alone, which is the number this file compared before there was an offset to add.
-fn elements_of(invocations: u64, needs: addressing::Needs) -> u64 {
-    invocations
-        .saturating_mul(needs.per_invocation)
-        .saturating_add(needs.offset)
+/// # A linear buffer
+///
+/// `invocations × strips`, and the offset sits past the end of that: the last invocation of the
+/// last strip lands at `invocations × strips - 1 + offset`, so the buffer needs one more than that.
+/// A binding nobody offsets into has an offset of zero and this is the product alone, which is the
+/// number this file compared before there was an offset to add.
+///
+/// # A plane
+///
+/// **Not that product, and the difference is unbounded.** A grid's rows are `pitch` elements apart
+/// whether or not the dispatch covers a row, so the last row *starts* at `(rows - 1) × pitch` and
+/// the columns are what it reaches from there:
+///
+/// ```text
+/// (grid.y × local.y - 1) × pitch  +  grid.x × local.x × strips  +  offset
+/// ```
+///
+/// Where the dispatch covers a whole row those agree exactly — `pitch = grid.x × local.x × strips`
+/// makes this `grid.y × local.y × pitch`, which is the invocation product — and that is every grid
+/// kernel in this crate, which is why the product served. `plane`'s own header describes the shape
+/// where they do not: a matrix 4096 elements to the row, read 64 columns at a time. There the
+/// product is 64 rows × 64 columns and the kernel's last row begins 258 048 elements in.
+fn elements_of(grid: Grid, local: [u64; 3], needs: addressing::Needs) -> u64 {
+    let columns = u64::from(grid.x)
+        .saturating_mul(local[0])
+        .saturating_mul(needs.per_invocation);
+
+    let reached = match needs.pitch {
+        Some(pitch) => u64::from(grid.y)
+            .saturating_mul(local[1])
+            .saturating_sub(1)
+            .saturating_mul(pitch)
+            .saturating_add(columns),
+        None => columns
+            .saturating_mul(u64::from(grid.y))
+            .saturating_mul(local[1])
+            .saturating_mul(local[2]),
+    };
+
+    reached.saturating_add(needs.offset)
 }
 
 /// How many words `elements` of `stride` bytes occupy, rounded up.
@@ -236,11 +278,17 @@ fn words_for(elements: u64, stride: u64) -> usize {
     usize::try_from(bytes / size_of::<u32>() as u64).unwrap_or(usize::MAX)
 }
 
-/// The workgroup size declared by `spirv`, as `x * y * z`.
+/// The three axes of the workgroup `spirv` declares, as `LocalSize` spells them.
+///
+/// **Separately, because for a grid they mean different things.** `kernel::binding` emits
+/// `LocalSize workgroup rows 1`, so x is how many *columns* a workgroup covers and y is how many
+/// *rows* — and the address arithmetic uses only x. A linear kernel has y and z of one and the two
+/// readings agree, which is why the product served for as long as there were only linear kernels
+/// with more than one strip.
 ///
 /// `None` if the module declares no `LocalSize` at all, which is not a shape this can reason
 /// about — a caller gets no check rather than a wrong one.
-pub(crate) fn workgroup_size(spirv: &[u32]) -> Option<u64> {
+pub(crate) fn local_size(spirv: &[u32]) -> Option<[u64; 3]> {
     decode::body(spirv)
         .filter(|instruction| instruction.opcode() == op::EXECUTION_MODE)
         .find_map(|instruction| {
@@ -254,13 +302,18 @@ pub(crate) fn workgroup_size(spirv: &[u32]) -> Option<u64> {
                 return None;
             }
 
-            Some(u64::from(sizes[0]) * u64::from(sizes[1]) * u64::from(sizes[2]))
+            Some(sizes.map(u64::from))
         })
 }
 
-/// How many invocations `grid` launches of a kernel whose workgroup holds `workgroup` of them.
-pub(crate) const fn invocations(grid: Grid, workgroup: u64) -> u64 {
-    (grid.x as u64) * (grid.y as u64) * workgroup
+/// How many invocations a dispatch of `grid` launches of a workgroup shaped `local`.
+///
+/// Every axis multiplied, which is the whole of it: `LocalSize`'s three are invocations per
+/// workgroup and the grid's two are workgroups. It is a **product** and not a quotient, and the
+/// only shape that can tell those apart is one with a y or z above 1 — so the tests build one by
+/// hand rather than waiting for a kernel to have it.
+pub(crate) const fn invocations(grid: Grid, local: [u64; 3]) -> u64 {
+    (grid.x as u64) * (grid.y as u64) * local[0] * local[1] * local[2]
 }
 
 /// How many bytes one element of this kernel's buffers takes, from the module's `ArrayStride`.
@@ -289,7 +342,7 @@ mod tests {
     // A test may panic — that is how it reports.
     #![allow(clippy::expect_used)]
 
-    use super::{Bounds, Overrun, element_bytes, invocations, workgroup_size};
+    use super::{Bounds, Overrun, element_bytes, invocations, local_size};
     use crate::dispatch::Grid;
     use crate::kernels;
     use simdr::lanes::{F32, I8};
@@ -304,19 +357,20 @@ mod tests {
     #[test]
     fn the_workgroup_size_is_read_out_of_the_module_the_emitter_built() {
         // Not a constant repeated here: `kernels::WORKGROUP_SIZE` is what the kernel was built
-        // for, and this proves the module says the same thing.
+        // for, and this proves the module says the same thing. A linear kernel's other two axes
+        // are one, which is the reading that let the product stand in for the x axis for so long.
         let spirv = kernels::empty(32).expect("built");
         assert_eq!(
-            workgroup_size(&spirv),
-            Some(u64::from(kernels::WORKGROUP_SIZE))
+            local_size(&spirv),
+            Some([u64::from(kernels::WORKGROUP_SIZE), 1, 1])
         );
     }
 
     #[test]
     fn a_module_with_no_execution_mode_at_all_reports_nothing() {
         // The header alone. Nothing to decode, so nothing is claimed.
-        assert_eq!(workgroup_size(&[]), None);
-        assert_eq!(workgroup_size(&[0x0723_0203, 0x0001_0300, 0, 1, 0]), None);
+        assert_eq!(local_size(&[]), None);
+        assert_eq!(local_size(&[0x0723_0203, 0x0001_0300, 0, 1, 0]), None);
     }
 
     /// A module body of one hand-built `OpExecutionMode`, for shapes the emitter does not produce.
@@ -341,10 +395,10 @@ mod tests {
         // advice to a driver, not the shape of a dispatch. Reading its operands as a workgroup
         // size would invent a number out of an unrelated instruction.
         let hint = module_with_execution_mode(ExecutionMode::LocalSize.word() + 1, [2, 3, 4]);
-        assert_eq!(workgroup_size(&hint), None);
+        assert_eq!(local_size(&hint), None);
 
         let real = module_with_execution_mode(ExecutionMode::LocalSize.word(), [2, 3, 4]);
-        assert_eq!(workgroup_size(&real), Some(24));
+        assert_eq!(local_size(&real), Some([2, 3, 4]));
     }
 
     #[test]
@@ -353,16 +407,21 @@ mod tests {
         // `x * 1 * 1` and `x / 1 / 1` are both `x`. So the one shape that tells them apart has to
         // be built by hand, and without it the operator is untested on real modules.
         let module = module_with_execution_mode(ExecutionMode::LocalSize.word(), [2, 3, 4]);
+        let axes = local_size(&module).expect("declared");
 
-        assert_eq!(workgroup_size(&module), Some(24), "2 * 3 * 4");
-        assert_ne!(workgroup_size(&module), Some(0), "2 / 3 / 4");
+        assert_eq!(invocations(Grid::linear(1), axes), 24, "2 * 3 * 4");
+        assert_ne!(invocations(Grid::linear(1), axes), 0, "2 / 3 / 4");
     }
 
     #[test]
     fn invocations_multiply_both_axes_by_the_workgroup() {
-        assert_eq!(invocations(Grid::linear(1), 64), 64);
-        assert_eq!(invocations(Grid::linear(16), 64), 1024);
-        assert_eq!(invocations(Grid::new(4, 4), 64), 1024);
+        assert_eq!(invocations(Grid::linear(1), [64, 1, 1]), 64);
+        assert_eq!(invocations(Grid::linear(16), [64, 1, 1]), 1024);
+        assert_eq!(invocations(Grid::new(4, 4), [64, 1, 1]), 1024);
+
+        // A grid's workgroup is `columns × rows`, so its y is counted twice over — once as
+        // invocations within a workgroup and once as workgroups across the dispatch.
+        assert_eq!(invocations(Grid::new(4, 4), [64, 2, 1]), 2048);
     }
 
     #[test]
@@ -370,7 +429,7 @@ mod tests {
         // 2^20 workgroups of 2^16 invocations is 2^36, which does not fit in the `u32` both
         // factors are. Computed narrowly it is *zero*, and a dispatch of zero invocations fits
         // every buffer — so the wrap would not merely misreport, it would report the safe answer.
-        assert_eq!(invocations(Grid::linear(1 << 20), 1 << 16), 1 << 36);
+        assert_eq!(invocations(Grid::linear(1 << 20), [1 << 16, 1, 1]), 1 << 36);
         assert_eq!(
             (1_u32 << 20).wrapping_mul(1 << 16),
             0,
@@ -537,6 +596,50 @@ mod tests {
             0,
             "four strips of address arithmetic, and not one element past the run"
         );
+    }
+
+    #[test]
+    fn a_plane_is_measured_by_its_pitch_and_not_by_its_invocations() {
+        // **The shape `plane`'s own header describes and this could not see.** A matrix 4096
+        // elements to the row, read 64 columns at a time: the rows are `pitch` apart whether or not
+        // the dispatch covers one, so the last of 64 rows *starts* at 63 × 4096 and the invocation
+        // product — 64 × 64 — is under it by two orders of magnitude.
+        // A grid kernel's workgroup is one subgroup across — `Shape::grid(subgroup, subgroup, …)`
+        // — so 32 is its x axis and not `WORKGROUP_SIZE`.
+        let width = 32_usize;
+        let pitch = 4096;
+        let bounds = Bounds::of(&kernels::row_scale(32, pitch as u32, 1, 3).expect("built"));
+        let grid = Grid::new(1, 64);
+
+        let reached = 63 * pitch + width;
+        assert!(bounds.fits(grid, reached));
+        assert!(
+            !bounds.fits(grid, reached - 1),
+            "one element short of the last row's own columns"
+        );
+        assert!(
+            !bounds.fits(grid, 64 * width),
+            "the invocation product is what this used to compare, and it is 2 048 of 258 080"
+        );
+    }
+
+    #[test]
+    fn a_plane_the_dispatch_covers_whole_agrees_with_the_invocation_product() {
+        // The other side of it, and the reason nothing here ever noticed: where the dispatch covers
+        // a whole row, `(rows - 1) × pitch + columns` *is* `rows × columns`. Every grid kernel in
+        // this crate is dispatched that way — `Grid::new(pitch / width, height / rows)` — so the
+        // two readings agree on all of them, and disagree without bound off them.
+        let width = 32;
+        let pitch = width * 3;
+        let bounds = Bounds::of(&kernels::row_scale(width, pitch, 1, 3).expect("built"));
+
+        // `pitch / width` workgroups across, which is how `plane.rs`'s own tests dispatch every one
+        // of these — three of 32 columns each covers the 96 a row holds.
+        let grid = Grid::new(pitch / width, 8);
+        let whole = 8 * pitch as usize;
+
+        assert!(bounds.fits(grid, whole));
+        assert!(!bounds.fits(grid, whole - 1));
     }
 
     #[test]

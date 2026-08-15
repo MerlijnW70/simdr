@@ -25,7 +25,7 @@ mod common;
 
 use common::{device, ramp};
 use runner::kernels::{self, WORKGROUP_SIZE};
-use runner::{Error, Pass};
+use runner::{Error, Grid, Pass};
 
 /// Words in, for a kernel that reads binding 0 and writes binding 1.
 fn as_words(values: &[f32]) -> Vec<u32> {
@@ -286,5 +286,51 @@ fn a_kernel_reading_past_its_run_is_measured_against_what_it_reads() {
     assert!(
         overran(&outcome),
         "a buffer of exactly the run gave {outcome:?}, and the weights are the other half"
+    );
+}
+
+#[test]
+fn a_plane_narrower_than_its_rows_is_measured_by_the_pitch() {
+    // **The second half of what `dispatch::extent` could not see, and the larger half.** A grid's
+    // rows are `pitch` elements apart whether or not the dispatch covers a row, so a kernel reading
+    // a narrow slab of a wide matrix reaches its last row `(rows - 1) × pitch` elements in — while
+    // the invocation product it used to be measured by counts only the columns dispatched.
+    //
+    // `plane.rs`'s own header describes exactly this shape and calls it supported: "a buffer whose
+    // rows are 4096 long reads a 64-wide slab of it, and `pitch` is 4096". Every grid test in this
+    // crate dispatches `pitch / width` workgroups across instead, which covers a whole row — and on
+    // that shape the two readings agree exactly, which is why nothing had ever disagreed.
+    let Some(gpu) = device("bounds-pitch") else {
+        return;
+    };
+
+    let width = gpu.limits().subgroup_size;
+    let pitch = width * 8;
+    let height = 4;
+
+    // One workgroup across, which is one subgroup of the eight a row holds.
+    let grid = Grid::new(1, height);
+    let spirv = kernels::row_scale(width, pitch, 1, 3).expect("built");
+    if !common::runnable(&gpu, "bounds-pitch", &[&spirv]) {
+        return;
+    }
+
+    // What the kernel actually reaches: the last row starts at `(height - 1) × pitch`, and it reads
+    // one workgroup's columns from there.
+    let reached = ((height - 1) * pitch + width) as usize;
+    let mut session = gpu.session(&spirv, &[reached, reached]).expect("opened");
+    assert!(
+        session.dispatch_grid(grid, 1).is_ok(),
+        "the last row's own columns are what this reaches"
+    );
+
+    // And the invocation product, which is every column this dispatch touches and none of the gaps
+    // between the rows they sit on.
+    let product = (width * height) as usize;
+    let mut session = gpu.session(&spirv, &[product, product]).expect("opened");
+    let outcome = session.dispatch_grid(grid, 1);
+    assert!(
+        overran(&outcome),
+        "a buffer of the columns dispatched, with no room for the pitch between rows, gave {outcome:?}"
     );
 }

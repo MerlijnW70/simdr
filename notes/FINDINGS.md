@@ -2990,3 +2990,44 @@ failure mode and the evidence for it are the same output.
 What stays outside, now stated as two things rather than one: a grid kernel's `row × pitch`, which
 this does not read at all, and `Kernel::load_offset_by`, whose offset is a *specialization* constant
 — a number chosen after the module was built, with no literal in it to find. Both under-count.
+
+### The pitch, which was the larger half — same day
+
+`notes/NEXT.md` item 9 sat beside item 8 with the same wording: outside the check, under-counts, safe
+direction. Having just found what item 8's "nothing needs it yet" was worth, item 9 was the obvious
+next thing to look at, and it is worse.
+
+A grid's rows are `pitch` elements apart **whether or not the dispatch covers a row**. So a kernel
+reading a narrow slab of a wide matrix reaches its last row `(rows - 1) × pitch` elements in, and
+the invocation product this compared against counts only the columns dispatched. The two are not
+off by a constant — they diverge with the pitch:
+
+| shape | what it reaches | what this compared |
+| --- | --- | --- |
+| 4 rows, pitch 256, one 32-wide workgroup across | **800** | 128 |
+| 64 rows, pitch 4096, one 32-wide workgroup across | **258 080** | 2 048 |
+
+`plane.rs`'s own header describes that second shape and calls it supported — "a buffer whose rows
+are 4096 long reads a 64-wide slab of it, and `pitch` is 4096". Every grid test in this crate
+dispatches `pitch / width` workgroups across instead, which covers a whole row; and on a whole row
+`(rows - 1) × pitch + columns` **is** `rows × columns`, exactly. The two readings agree on every
+test that exists and diverge without bound off them.
+
+Checked by breaking it: with the pitch suppressed, the device test fails by succeeding — a session
+holding 128 words per binding dispatched a kernel that writes 800 and returned `Ok(4.16µs)`.
+
+### Two more things the same walk had wrong
+
+**`LocalSize` was being read as a product where the addressing wants the x axis.**
+`Kernel::run_start` emits `group.x × (Shape::workgroup × strips)`, and `Shape::workgroup` is
+`LocalSize`'s x alone — while the strip count was recovered by dividing that constant by
+`x × y × z`. For a grid two rows deep with two strips that is `2 / 2 = 1`, and the strip count comes
+back as one. Nothing has both today, which is the only reason it held.
+
+**The row was matched by its shape, and its shape is not unique.** `row = group.y × rows + local.y`
+and `start = (group.y × pitch) + run` are both an `OpIAdd` over an `OpIMul` over `group.y`. The
+first version of `row_of` found `start`, reported no pitch at all, and quietly went back to counting
+invocations — which looked exactly like working. `local.y` on the right is what tells them apart.
+
+Three of these in one file in one sitting, and all three have the same shape: an expression that
+happens to be unambiguous on every module this crate emits today.

@@ -86,6 +86,11 @@ pub(super) struct Needs {
     ///
     /// Zero for every binding nobody offsets into, which is most of them.
     pub(super) offset: u64,
+    /// Elements from one row of this buffer to the next, when the module addresses it as a plane.
+    ///
+    /// `None` for a linear buffer, which is a different claim from a pitch of zero: the caller
+    /// above multiplies by it and a zero would say every row starts at the beginning.
+    pub(super) pitch: Option<u64>,
 }
 
 /// What each buffer's addressing asks of it, keyed by its binding number.
@@ -95,19 +100,20 @@ pub(super) struct Needs {
 ///
 /// Empty when the module declares no workgroup size this can divide by, when it has no
 /// `LocalInvocationId` to depend on, or when nothing in it addresses a bound buffer.
-pub(super) fn needs(spirv: &[u32], workgroup: u64) -> BTreeMap<u32, Needs> {
+pub(super) fn needs(spirv: &[u32], columns: u64) -> BTreeMap<u32, Needs> {
     let mut wanted: BTreeMap<u32, Needs> = BTreeMap::new();
-    if workgroup == 0 {
+    if columns == 0 {
         return wanted;
     }
 
-    let Some(local) = component_of(spirv, BuiltIn::LocalInvocationId) else {
+    let Some(local) = component_of(spirv, BuiltIn::LocalInvocationId, 0) else {
         return wanted;
     };
-    let group = component_of(spirv, BuiltIn::WorkgroupId);
+    let group = component_of(spirv, BuiltIn::WorkgroupId, 0);
     let bindings = bindings(spirv);
     let constants = constants(spirv);
     let terms = terms(spirv);
+    let row = row_of(spirv, &terms);
 
     for (variable, index) in element_accesses(spirv) {
         let Some(&binding) = bindings.get(&variable) else {
@@ -122,20 +128,80 @@ pub(super) fn needs(spirv: &[u32], workgroup: u64) -> BTreeMap<u32, Needs> {
         // The strip count, or one. `run_start` emits the multiply for every access it computes, so
         // the fallback is for an address that reached the invocation some other way — one element
         // each, as far as anything here can tell.
-        let strips = strips_in(&from, &terms, &constants, group, workgroup).max(1);
+        let strips = strips_in(&from, &terms, &constants, group, columns).max(1);
 
         // What is left of this access's folded constant once its own strip is accounted for. On the
         // last strip that is the caller's offset exactly; on an earlier one it is less, or nothing,
         // so the maximum over a binding's accesses is the offset and the others cost nothing.
         let offset = shift_in(&from, &terms, &constants, local)
-            .saturating_sub((strips - 1).saturating_mul(workgroup));
+            .saturating_sub((strips - 1).saturating_mul(columns));
+
+        let pitch = row.and_then(|row| pitch_in(&from, &terms, &constants, row));
 
         let entry = wanted.entry(binding).or_default();
         entry.per_invocation = entry.per_invocation.max(strips);
         entry.offset = entry.offset.max(offset);
+        entry.pitch = entry.pitch.max(pitch);
     }
 
     wanted
+}
+
+/// The id holding this invocation's row, for a module that has one.
+///
+/// `kernel::binding` computes it two ways and this has to know both, because the shorter one is not
+/// a special case of the longer: a workgroup one row deep is `group.y` alone, with no multiply and
+/// no local component at all — the `LocalSize` declares y as 1, so every invocation of a workgroup
+/// is on that workgroup's row and the arithmetic folds away.
+///
+/// Deeper than that it is `group.y × rows + local.y`, and the row is the **sum**. Finding the sum
+/// rather than the multiply is what keeps `rows` and `pitch` apart: both are constants multiplied
+/// into the row chain, and the one this file wants is the one multiplied by the *finished* row.
+///
+/// **The sum is named by its right operand and not by its shape.** `Kernel::start_of` emits
+/// `i_add(i_mul(group.y, pitch), run)`, which is the same shape as the row and is the address the
+/// row is *used* to compute — matching on the shape alone found that one instead, reported no pitch
+/// at all, and quietly went back to counting invocations. `local.y` is what tells them apart, and a
+/// module with no `local.y` in it is the one-row-deep case where the row is `group.y` alone.
+fn row_of(spirv: &[u32], terms: &BTreeMap<u32, Term>) -> Option<u32> {
+    let group_y = component_of(spirv, BuiltIn::WorkgroupId, 1)?;
+    let Some(local_y) = component_of(spirv, BuiltIn::LocalInvocationId, 1) else {
+        return Some(group_y);
+    };
+
+    let deep = terms.iter().find_map(|(&id, term)| {
+        let left = terms.get(&term.left)?;
+        (term.opcode == op::I_ADD
+            && term.right == local_y
+            && left.opcode == op::I_MUL
+            && left.left == group_y)
+            .then_some(id)
+    });
+
+    Some(deep.unwrap_or(group_y))
+}
+
+/// Elements from one row of this buffer to the next, when `row` is multiplied into the address.
+///
+/// `Kernel::start_of` emits `i_mul(uint, row, pitch)`, so the pitch is the constant beside the row
+/// — and a buffer the module addresses linearly has no such multiply, which is the `None` this
+/// returns and not a pitch of zero.
+///
+/// `Kernel::load_row_at` on a row the *caller* computed reaches no pitch through this, because the
+/// row it multiplies is not the one above. That under-counts, which is the direction this file
+/// takes wherever it cannot see, and the caller of that method already vouches for its own row.
+fn pitch_in(
+    from: &BTreeSet<u32>,
+    terms: &BTreeMap<u32, Term>,
+    constants: &BTreeMap<u32, u32>,
+    row: u32,
+) -> Option<u64> {
+    from.iter()
+        .filter_map(|id| terms.get(id))
+        .filter(|term| term.opcode == op::I_MUL && term.left == row)
+        .filter_map(|term| constants.get(&term.right).copied())
+        .map(u64::from)
+        .max()
 }
 
 /// The largest constant added to the invocation's own lane on the way to this address.
@@ -270,7 +336,7 @@ fn element_accesses(spirv: &[u32]) -> Vec<(u32, u32)> {
         .collect()
 }
 
-/// The scalar **x** component of a built-in vector — the id the address arithmetic actually uses.
+/// One scalar component of a built-in vector — the id the address arithmetic actually uses.
 ///
 /// Traced rather than guessed: the built-in is a three-element vector, loaded once and then
 /// extracted from, and it is the *extracted* id that appears in the arithmetic.
@@ -278,8 +344,9 @@ fn element_accesses(spirv: &[u32]) -> Vec<(u32, u32)> {
 /// **The component index is matched rather than assumed to come first.** A grid kernel extracts
 /// both x and y from the same load — `Kernel::row` is `group.y × rows + local.y` — and taking
 /// whichever `OpCompositeExtract` the walk met first would rest on the order `kernel::binding`
-/// happens to emit them in. It emits x first today. That is not a thing this file should know.
-fn component_of(spirv: &[u32], built_in: BuiltIn) -> Option<u32> {
+/// happens to emit them in. It emits x first today. That is not a thing this file should know, and
+/// the row arithmetic below asks for y by name.
+fn component_of(spirv: &[u32], built_in: BuiltIn, component: u32) -> Option<u32> {
     let variable = decode::body(spirv)
         .filter(|instruction| instruction.opcode() == op::DECORATE)
         .find_map(|instruction| match instruction.operands() {
@@ -301,9 +368,12 @@ fn component_of(spirv: &[u32], built_in: BuiltIn) -> Option<u32> {
     decode::body(spirv)
         .filter(|instruction| instruction.opcode() == op::COMPOSITE_EXTRACT)
         .find_map(|instruction| match instruction.operands() {
-            // The literal after the composite is the component. Zero is x, which is the axis every
-            // linear address is computed on.
-            [_type, id, composite, 0] if *composite == loaded => Some(*id),
+            // The literal after the composite is the component. Zero is x, the axis every linear
+            // address is computed on; one is y, which only a grid extracts and which is where a
+            // row comes from.
+            [_type, id, composite, index] if *composite == loaded && *index == component => {
+                Some(*id)
+            }
             _ => None,
         })
 }

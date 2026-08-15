@@ -1192,14 +1192,25 @@ constant, so `shift - (strips - 1) × workgroup` is the caller's offset and the 
 number `addressing.rs` already recovers. Checked by breaking it — with the offset multiplied by
 zero the device test fails by *succeeding*, which is the whole finding in one line of output.
 
-**9. A grid kernel's `row × pitch` is outside it too**, and so is `Kernel::load_offset_by`. The walk
-stops at the multiply by the workgroup index, and a grid's row term is a multiply by something else;
-`load_offset_by` takes a *specialization* constant, which is a number chosen after the module was
-built and has no literal in it to read at all. `Kernel::load_row` callers size their own buffers
-today.
+**9. A grid kernel's `row × pitch` was outside it too — done, and it was the larger half.** Rows are
+`pitch` elements apart whether or not the dispatch covers a row, so a kernel reading a narrow slab of
+a wide matrix reaches its last row `(rows - 1) × pitch` elements in while the invocation product
+counts only the columns dispatched. Not off by a constant — they diverge with the pitch: 800
+elements measured as 128 at four rows of 256, and **258 080 measured as 2 048** at the 64-of-4096
+shape `plane.rs`'s own header describes and calls supported.
 
-Item 8 is the reason to take this one more seriously than its wording suggests. It carried the same
-"nothing needs it yet" and the thing that needed it was already in the tree.
+Every grid test in this crate dispatches `pitch / width` workgroups across, which covers a whole row
+— and there `(rows - 1) × pitch + columns` *is* `rows × columns`, exactly. The two readings agree on
+every test that exists and diverge without bound off them.
+
+Two more in the same walk while it was open. `LocalSize` was read as a product where the addressing
+wants x alone, so a grid two rows deep with two strips would have recovered a strip count of
+`2 / 2 = 1`; nothing has both today. And the row was matched by its *shape*, which
+`(group.y × pitch) + run` shares — the first version found that instead, reported no pitch, and
+looked exactly like working.
+
+What is left outside is `Kernel::load_offset_by`, whose offset is a specialization constant chosen
+after the module was built with no literal in it to read.
 
 ### Tier 3 — carried over, unchanged
 
