@@ -739,3 +739,126 @@ fn the_pipeline_scanner_finds_the_doors_that_are_there() {
         "the excused file reads as bounded, so the scanner cannot tell a bound from its absence"
     );
 }
+
+/// Opcodes declared in `src/module/op.rs` that nothing emits.
+///
+/// **`decisions/DR-0001` is why an unemitted number is worse than a missing one.** The rule is that
+/// every opcode was read out of Khronos' grammar rather than remembered, and the thing that keeps it
+/// true is that a wrong number produces a module `spirv-val` rejects. A number nothing emits is a
+/// copy of the grammar with no check behind it: it can be wrong for as long as it exists, and the
+/// day somebody reaches for it they inherit the mistake with the convenience.
+///
+/// So each of these is a decision waiting to be made — build the operation, or delete the number and
+/// read it again when it is wanted, which `spirv-as` answers in a minute.
+const NO_EMITTER: [(&str, &str); 7] = [
+    (
+        "F_CONVERT",
+        "`OpFConvert` is a float at a different width, and no `f16`↔`f32` conversion is offered — \
+         `convert_u32::<F16>` reaches `OpConvertUToF` directly instead",
+    ),
+    (
+        "LOGICAL_NOT",
+        "`Module` offers `logical_and` and `logical_or`, and nothing negates a boolean",
+    ),
+    (
+        "GROUP_NON_UNIFORM_I_MUL",
+        "`Element` names `GROUP_ADD`, `GROUP_MAX` and `GROUP_MIN`; there is no product reduction",
+    ),
+    (
+        "ATOMIC_S_MIN",
+        "`Module` offers `atomic_i_add`, `atomic_exchange`, `atomic_increment`, `atomic_load` and \
+         `atomic_store` — no minimum and no maximum, in either signedness",
+    ),
+    ("ATOMIC_U_MIN", "as `ATOMIC_S_MIN`"),
+    ("ATOMIC_S_MAX", "as `ATOMIC_S_MIN`"),
+    ("ATOMIC_U_MAX", "as `ATOMIC_S_MIN`"),
+];
+
+/// Where the opcode numbers live.
+const OPCODES: &str = "src/module/op.rs";
+
+/// Every `pub const NAME: u16` that file declares.
+fn declared_opcodes() -> Vec<String> {
+    let Ok(text) = fs::read_to_string(root().join(OPCODES)) else {
+        return Vec::new();
+    };
+
+    text.lines()
+        .filter_map(|line| {
+            let rest = line.trim_start().strip_prefix("pub const ")?;
+            let name = rest.split(':').next()?.trim();
+            (!name.is_empty()).then(|| name.to_owned())
+        })
+        .collect()
+}
+
+#[test]
+fn every_opcode_is_emitted_by_something() {
+    // **The kind the consumer audit could not see.** Its sibling asks whether every `pub fn` is
+    // named outside the file that declares it, and found an `OpMemoryBarrier` whose semantics
+    // Vulkan forbids sitting there with no caller. An opcode is a `pub const`, so the same shape in
+    // the same tree was invisible to it — and there were **seven**, found by a sandbox looking for
+    // something else.
+    //
+    // A dead opcode is not merely unused. `spirv-val` is what keeps `decisions/DR-0001`'s promise
+    // honest, and it can only check a number that reaches a module.
+    let mentions = mentions();
+    let excused: BTreeSet<&str> = NO_EMITTER.iter().map(|&(name, _)| name).collect();
+
+    let unemitted: Vec<String> = declared_opcodes()
+        .into_iter()
+        .filter(|name| !excused.contains(name.as_str()))
+        .filter(|name| !consumed_outside(name, OPCODES, &mentions))
+        .collect();
+
+    assert!(
+        unemitted.is_empty(),
+        "these opcodes are declared in {OPCODES} and emitted by nothing, so no module contains \
+         them and `spirv-val` has never checked the number. Emit them, or delete them and read the \
+         number out of the grammar again when it is wanted:\n{unemitted:#?}"
+    );
+}
+
+#[test]
+fn nothing_is_excused_from_being_emitted_and_is() {
+    // The other direction, as everywhere here: an excuse whose opcode has since gained an emitter
+    // is a line that reads as true and is not.
+    let mentions = mentions();
+    let declared = declared_opcodes();
+
+    for (name, reason) in NO_EMITTER {
+        assert!(
+            declared.iter().any(|held| held == name),
+            "NO_EMITTER excuses `{name}` ({reason}) and {OPCODES} declares no such opcode"
+        );
+        assert!(
+            !consumed_outside(name, OPCODES, &mentions),
+            "`{name}` is excused from being emitted ({reason}) and something now names it, so the \
+             excuse has expired and the line should go"
+        );
+    }
+}
+
+#[test]
+fn the_opcode_scanner_finds_the_numbers_that_are_there() {
+    // Without this the check above is vacuous in the worst way: a scanner that parsed nothing would
+    // report every opcode as emitted and read as a clean run.
+    let declared = declared_opcodes();
+
+    assert!(
+        declared.len() > 90,
+        "only {} opcodes parsed out of {OPCODES}, so the scanner is reading the wrong shape",
+        declared.len()
+    );
+    for expected in ["I_ADD", "GROUP_NON_UNIFORM_I_ADD", "BITCAST", "F_CONVERT"] {
+        assert!(
+            declared.iter().any(|name| name == expected),
+            "{expected} is declared and the scanner did not see it"
+        );
+    }
+
+    // And that it tells an emitted one from a dead one, rather than answering the same either way.
+    let mentions = mentions();
+    assert!(consumed_outside("I_ADD", OPCODES, &mentions));
+    assert!(!consumed_outside("F_CONVERT", OPCODES, &mentions));
+}

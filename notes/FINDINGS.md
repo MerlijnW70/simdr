@@ -3415,3 +3415,82 @@ Neither is a mistake in the code that contains it. A copy is wrong because of a 
 a bound is wrong because of a rule in a specification. Both are found by asking a question *about*
 the code rather than running it — which is why the two instruments that found them were a mutation
 gate and a validator, and why `notes/CLAIMS.md` exists to ask which other claims have neither.
+
+## Seven numbers nothing emits, and a float edge nothing could reach — 2026-08-15
+
+Two findings from the sandbox, and neither was the thing it was looking for.
+
+### The consumer audit had a kind it could not see
+
+`every_public_operation_has_a_consumer_outside_its_own_file` asks the question of every `pub fn`, and
+it was written after `Module::memory_barrier` turned up emitting an `OpMemoryBarrier` whose semantics
+Vulkan forbids, with no caller and no validator behind it.
+
+**An opcode is a `pub const`**, so the same shape in the same tree was invisible to it. There are
+**seven**:
+
+| opcode | what it is for |
+| --- | --- |
+| `F_CONVERT` | `OpFConvert`, a float at a different width — no `f16`↔`f32` conversion is offered |
+| `LOGICAL_NOT` | `Module` has `logical_and` and `logical_or`, and nothing negates |
+| `GROUP_NON_UNIFORM_I_MUL` | `Element` names `GROUP_ADD`, `GROUP_MAX`, `GROUP_MIN` — no product |
+| `ATOMIC_S_MIN`, `ATOMIC_U_MIN`, `ATOMIC_S_MAX`, `ATOMIC_U_MAX` | `Module` has add, exchange, increment, load and store — no minimum or maximum |
+
+All seven are **half of an operation nobody has asked for**.
+
+`decisions/DR-0001` is why that is worse than it looks. The rule is that every opcode was read out of
+Khronos' grammar rather than remembered, and what keeps the rule honest is that a wrong number
+produces a module `spirv-val` rejects. **A number nothing emits is a copy of the grammar with no
+check behind it** — it can be wrong for as long as it sits there, and whoever reaches for it first
+inherits the mistake along with the convenience.
+
+`every_opcode_is_emitted_by_something` asks it now, with the seven excused by name and a reason
+each, so an eighth cannot appear quietly.
+
+### Float-to-integer: not added, and the reason is DR-0006's
+
+`OpConvertFToS` and `OpConvertFToU` are not in `op.rs` at all — a gap in the *surface* rather than in
+the testing of it. Asked whether they should be added, the answer is no, on two grounds:
+
+* **No caller wants it.** The quantised kernels compute in integers throughout, and `to_f32` exists
+  for the outgoing direction — an integer sum shown as a float. This is `decisions/DR-0006`'s
+  argument for `Grid` having no third axis, verbatim: *"a third term would have no caller… and an
+  untested term is worse than a missing one."*
+* **One instruction is not the operation.** `OpConvertFToS` truncates toward zero, and a caller
+  wanting a *rounded* integer needs `RoundEven` first — so the instruction is half of what anybody
+  would ask for. And SPIR-V leaves the result **undefined** where the value does not fit, so a safe
+  API would have to clamp, which is inventing a semantics the specification does not have and paying
+  for it on every call. This project has refused that trade twice already: the `FMax` note, and the
+  clustered scan by subtraction.
+
+The same argument settles `F_CONVERT`, which is the same shape one type up.
+
+### The f16 edges were outside the fuzzer by construction
+
+`src/half.rs` opens by saying every one of the 65 536 half bit patterns is round-tripped through
+`to_f32` and back — **on the CPU**. Nothing checked a device agreed, and the layer that might have
+could not: `Domain::Half` has a **ceiling of 8** and refuses any round whose arithmetic leaves
+±2048, because that is exactly what lets its comparison be exact.
+
+So denormals, infinities, NaNs, negative zero and every rounding boundary sat outside the differential
+fuzzer *by construction rather than by oversight* — on the one type whose whole difficulty is at the
+edges, and whose storage path was therefore exercised at values below 8 and nowhere else.
+
+All 65 536 now go through an identity kernel — a load and a store, nothing between them, because
+every instruction in between would be a licence for the device to change the value. They survive on
+the RTX 4080, the integrated Radeon and lavapipe at 4 and 16.
+
+**What is asserted and what is only reported is the whole design**, and this project has been caught
+on that line before: a test once asserted that a sum of sixty-four negative zeros keeps its sign,
+which IEEE 754 says and **Vulkan does not require** — it is `shaderSignedZeroInfNanPreserveFloat32`,
+binding only a module declaring the matching execution mode. Two GPUs and a local lavapipe preserved
+it; Ubuntu's Mesa folded it to `+0.0`.
+
+So bit-exactness through a load and a store is **asserted** — no arithmetic happens, so no rounding
+mode, denormal flush or NaN quieting is licensed to touch it — and NaNs are counted apart and
+**printed**, because a device may reshape a payload and Vulkan permits it. Asserting there would be
+the signed-zero mistake a second time.
+
+Exhaustive rather than sampled, for the reason the conversion probes are boundaries rather than
+samples: the interesting patterns are a few hundred of 65 536, and a sweep finds them by luck and
+proves it by luck too.

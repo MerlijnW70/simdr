@@ -201,12 +201,19 @@ has to come back through — and the validator is the only layer downstream of i
 
 ## What to do about it, worst first
 
-0. **The `pub fn` check has a type it does not cover.** `every_public_operation_has_a_consumer_outside_its_own_file`
-   asks it of functions, and an opcode is a `pub const` — so `op::F_CONVERT` sits in `src/module/op.rs`,
-   declared and documented as *"`OpFConvert` — a float's value at a different width"*, with **the only
-   reference in the tree being its own declaration**. That is exactly the shape the check was written
-   for, in a kind it cannot see. Found by the sandbox while looking for float conversions;
-   `proeftuin/README.md` has it.
+0. **~~The `pub fn` check has a type it does not cover.~~ — done, and it was seven rather than one.**
+   `every_public_operation_has_a_consumer_outside_its_own_file` asks it of functions, and an opcode
+   is a `pub const`, so the same shape was invisible in the same tree.
+   `every_opcode_is_emitted_by_something` asks it now: `F_CONVERT`, `LOGICAL_NOT`,
+   `GROUP_NON_UNIFORM_I_MUL` and the four atomic min/max opcodes are declared and emitted by nothing
+   — each of them half of an operation nobody has asked for. They are excused by name with a reason
+   apiece so an eighth cannot appear quietly, and `notes/FINDINGS.md` records why an unemitted number
+   is worse than a missing one: `spirv-val` is what keeps `decisions/DR-0001` honest, and it can only
+   check a number that reaches a module.
+
+   **The open half is what to do with the seven.** Build the operations, or delete the numbers and
+   read them out of the grammar again when they are wanted. Deleting is the consistent reading of
+   DR-0001 and costs the doc comments; excusing them is where they are now.
 1. **Assert the counts.** Trivial, and the one in the README has now been wrong three times. The fix
    is not to bump the number a fourth time — it is to make the test print it.
 2. **Sweep `src/module/` for type bounds wider than the instruction allows**, the way `src/lanes/`
