@@ -19,6 +19,30 @@
 use super::{Domain, Finish, Rng, generate};
 use crate::fuzz::Op;
 
+/// The finish that carries a value out of a branch, on the mapping that is most of the sweep.
+///
+/// **A coverage assertion the mutation gate asked for.** `Finish::SumOrMax` is withheld from
+/// clustered programs, and the comparison that withholds it was one character away from withholding
+/// it from *whole-subgroup* programs too — every test passed, because a program without it still
+/// builds, still runs and still agrees. What is lost is the `OpPhi` across a branch, which this
+/// module's header names as the failure no other layer catches.
+///
+/// So the claim is made where it can fail: over a sweep of seeds, a vector exactly the subgroup's
+/// width reaches that finish.
+#[test]
+fn a_whole_subgroup_program_reaches_the_finish_that_carries_a_phi() {
+    let reached = (0..512_u64).any(|seed| {
+        let program = generate(&mut Rng::new(seed), Domain::Unsigned, 32, 64);
+        program.lanes == 32 && matches!(program.finish, Finish::SumOrMax { .. })
+    });
+
+    assert!(
+        reached,
+        "no whole-subgroup program in 512 seeds ends in `SumOrMax`, so nothing generated here \
+         carries a value out of a branch on the mapping the sweep spends most of its time in"
+    );
+}
+
 /// Every operation the generator knows about, reached across a sweep of seeds.
 ///
 /// The gap a mutation run found: replacing the `^` in the generator's finaliser with `&`

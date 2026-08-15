@@ -60,14 +60,16 @@ pub fn generate(rng: &mut Rng, domain: Domain, subgroup: u32, workgroup: u32) ->
     //
     // **Three pools rather than two**, since the rotate arrived: the mapping is a three-way choice
     // and it used to be asked as a yes-or-no. `lanes == subgroup` was the case that had no name.
-    let pool = if lanes < subgroup {
-        CLUSTERED
-    } else if lanes == subgroup {
-        WHOLE
-    } else {
-        STRIPPED
+    //
+    // And it is asked **once**. The pool became a three-way choice and the finish stayed a
+    // yes-or-no beside it, so the same relationship was written twice — which the mutation gate
+    // found by flipping the second one: see [`shape_of`].
+    let shape = shape_of(lanes, subgroup);
+    let pool = match shape {
+        Shape::Clustered => CLUSTERED,
+        Shape::Whole => WHOLE,
+        Shape::Stripped => STRIPPED,
     };
-    let clustered = lanes < subgroup;
     let mut steps = Vec::with_capacity(steps_wanted);
 
     // Loop trip counts stay small. A rolled loop of four is the same shape as one of four hundred
@@ -89,7 +91,40 @@ pub fn generate(rng: &mut Rng, domain: Domain, subgroup: u32, workgroup: u32) ->
         groups: 1 + rng.below(2) as u32,
         lanes,
         steps,
-        finish: finish(rng, domain, clustered),
+        finish: finish(rng, domain, shape),
+    }
+}
+
+/// Which of the three mappings a vector of `lanes` has on a `subgroup`-wide device.
+///
+/// Named rather than described by a pair of comparisons, because two places need it and they were
+/// asking separately: the pool as a three-way choice and the finish as a yes-or-no beside it.
+///
+/// **The mutation gate found the second.** Flipping its `lanes < subgroup` to `<=` tells a
+/// *whole-subgroup* program that it is clustered, which withholds [`Finish::SumOrMax`] from it — the
+/// only finish that carries a value out of a branch through an `OpPhi`, and the failure mode this
+/// module's header says no other layer here catches. Every test passed: the programs still built,
+/// still ran and still agreed, with the phi coverage of the commonest mapping silently gone.
+///
+/// One comparison cannot disagree with itself, and the test below pins all three of its edges.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shape {
+    /// Narrower than the subgroup: several vectors share it.
+    Clustered,
+    /// Exactly the subgroup's width.
+    Whole,
+    /// Wider, so each lane holds several elements.
+    Stripped,
+}
+
+/// [`Shape`] for a vector of `lanes` on a `subgroup`-wide device.
+const fn shape_of(lanes: u32, subgroup: u32) -> Shape {
+    if lanes < subgroup {
+        Shape::Clustered
+    } else if lanes == subgroup {
+        Shape::Whole
+    } else {
+        Shape::Stripped
     }
 }
 
@@ -104,8 +139,12 @@ pub fn generate(rng: &mut Rng, domain: Domain, subgroup: u32, workgroup: u32) ->
 /// reduction instead — and the ladder is the most intricate thing in the tree with the least
 /// differential coverage. It has all three mappings now: an instruction at the width, a carry
 /// between strips above it, and the ladder below.
-fn finish(rng: &mut Rng, domain: Domain, clustered: bool) -> Finish {
-    match rng.below(if clustered { 5 } else { 6 }) {
+fn finish(rng: &mut Rng, domain: Domain, shape: Shape) -> Finish {
+    match rng.below(if matches!(shape, Shape::Clustered) {
+        5
+    } else {
+        6
+    }) {
         0 => Finish::Sum,
         1 => Finish::Max,
         2 => Finish::Min,
@@ -122,6 +161,22 @@ fn finish(rng: &mut Rng, domain: Domain, clustered: bool) -> Finish {
 mod tests {
     use super::*;
     use crate::fuzz::Op;
+
+    #[test]
+    fn the_mapping_boundaries_are_where_they_are_written() {
+        // The two edges, and the case between them that used to have no name. `lanes == subgroup`
+        // is **whole**, not clustered — telling it otherwise costs it a finish and fails nothing,
+        // which is how the yes-or-no spelling of this survived the gate.
+        assert_eq!(shape_of(4, 8), Shape::Clustered);
+        assert_eq!(shape_of(7, 8), Shape::Clustered);
+        assert_eq!(
+            shape_of(8, 8),
+            Shape::Whole,
+            "equal widths are a whole subgroup, not a cluster of the same size"
+        );
+        assert_eq!(shape_of(9, 8), Shape::Stripped);
+        assert_eq!(shape_of(16, 8), Shape::Stripped);
+    }
 
     #[test]
     fn the_generator_is_deterministic_in_its_seed() {
