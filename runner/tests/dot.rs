@@ -6,7 +6,7 @@
 
 mod common;
 
-use common::device;
+use common::{device, runnable};
 use runner::kernels::{self, WORKGROUP_SIZE};
 use simdr::lanes::I32;
 
@@ -22,8 +22,9 @@ fn a_subgroup_dot_product_matches_the_reference_exactly() {
     };
     let limits = gpu.limits().clone();
 
-    if !limits.subgroup_arithmetic {
-        eprintln!("SKIPPED dot-product: no subgroup arithmetic reported");
+    let spirv =
+        kernels::dot_product_whole::<I32>(limits.subgroup_size, WORKGROUP_SIZE).expect("built");
+    if !runnable(&gpu, "dot-product", &[&spirv]) {
         return;
     }
 
@@ -39,14 +40,7 @@ fn a_subgroup_dot_product_matches_the_reference_exactly() {
     input.extend((0..count).map(|index| (index % 7) as u32));
     input.extend((0..count).map(|index| (index % 5 + 1) as u32));
 
-    let output = gpu
-        .run_u32(
-            &kernels::dot_product_whole::<I32>(limits.subgroup_size, WORKGROUP_SIZE)
-                .expect("built"),
-            &input,
-            1,
-        )
-        .expect("dispatched");
+    let output = gpu.run_u32(&spirv, &input, 1).expect("dispatched");
 
     // Every lane of a subgroup holds that subgroup's whole dot product.
     let expected: Vec<u32> = (0..count)
@@ -79,11 +73,6 @@ fn a_strip_mined_dot_product_folds_four_products_per_lane() {
     };
     let limits = gpu.limits().clone();
 
-    if !limits.subgroup_arithmetic {
-        eprintln!("SKIPPED dot-product-strips: no subgroup arithmetic reported");
-        return;
-    }
-
     if limits.subgroup_size != 32 {
         eprintln!("SKIPPED dot-product-strips: written for a 32-wide subgroup");
         return;
@@ -95,13 +84,12 @@ fn a_strip_mined_dot_product_folds_four_products_per_lane() {
     input.extend((0..per_operand).map(|index| (index % 7) as u32));
     input.extend((0..per_operand).map(|index| (index % 5 + 1) as u32));
 
-    let output = gpu
-        .run_u32(
-            &kernels::dot_product::<I32, 128>(32, per_operand as u32).expect("built"),
-            &input,
-            1,
-        )
-        .expect("dispatched");
+    let spirv = kernels::dot_product::<I32, 128>(32, per_operand as u32).expect("built");
+    if !runnable(&gpu, "dot-product-strips", &[&spirv]) {
+        return;
+    }
+
+    let output = gpu.run_u32(&spirv, &input, 1).expect("dispatched");
 
     // Subgroup 0 covers invocations 0..32, which read strips at 0..32, 64..96, 128..160, 192..224.
     // Subgroup 1 covers 32..64, reading 32..64, 96..128, 160..192, 224..256.

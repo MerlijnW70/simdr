@@ -7,7 +7,7 @@
 
 mod common;
 
-use common::{device, elements};
+use common::{device, elements, runnable};
 use runner::Specialization;
 use runner::kernels::{self, WORKGROUP_SIZE, specialized::spec_id};
 use simdr::lanes::U32;
@@ -211,10 +211,6 @@ fn a_clustered_reduction_takes_its_cluster_size_from_the_pipeline() {
     };
     let limits = gpu.limits().clone();
 
-    if !limits.subgroup_clustered || !limits.subgroup_arithmetic {
-        eprintln!("SKIPPED specialize-cluster: no clustered subgroup arithmetic");
-        return;
-    }
     if limits.subgroup_size != 32 {
         eprintln!("SKIPPED specialize-cluster: the sizes below assume a 32-wide subgroup");
         return;
@@ -223,6 +219,9 @@ fn a_clustered_reduction_takes_its_cluster_size_from_the_pipeline() {
     // The default is 32 — the whole subgroup — so every override below asks for something the
     // default would not have given.
     let spirv = kernels::specialized_cluster(32, 32).expect("built");
+    if !runnable(&gpu, "specialize-cluster", &[&spirv]) {
+        return;
+    }
     let input = ramp(limits.subgroup_size);
 
     for cluster in [4_u32, 8, 16] {

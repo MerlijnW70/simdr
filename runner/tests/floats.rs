@@ -21,7 +21,7 @@
 
 mod common;
 
-use common::device;
+use common::{device, runnable};
 use runner::kernels::{self, WORKGROUP_SIZE};
 use simdr::lanes::F32;
 
@@ -55,8 +55,8 @@ fn a_sum_containing_an_infinity_is_infinite_and_does_not_corrupt_the_other_subgr
     };
     let limits = gpu.limits().clone();
 
-    if !limits.subgroup_arithmetic {
-        eprintln!("SKIPPED infinity-sum: no subgroup arithmetic");
+    let spirv = kernels::lane_sum_whole::<F32>(limits.subgroup_size).expect("built");
+    if !runnable(&gpu, "infinity-sum", &[&spirv]) {
         return;
     }
 
@@ -64,13 +64,7 @@ fn a_sum_containing_an_infinity_is_infinite_and_does_not_corrupt_the_other_subgr
     let count = WORKGROUP_SIZE as usize;
     let input = ramp_with(count, inside_first_subgroup(width), f32::INFINITY);
 
-    let output = gpu
-        .run(
-            &kernels::lane_sum_whole::<F32>(limits.subgroup_size).expect("built"),
-            &input,
-            1,
-        )
-        .expect("dispatched");
+    let output = gpu.run(&spirv, &input, 1).expect("dispatched");
 
     // Adding an infinity to finite values gives an infinity, whatever the order — this one is
     // fully defined, so it is asserted rather than reported.
@@ -92,8 +86,8 @@ fn a_sum_containing_a_nan_is_nan_in_that_subgroup_only() {
     let Some(gpu) = device("nan-sum") else { return };
     let limits = gpu.limits().clone();
 
-    if !limits.subgroup_arithmetic {
-        eprintln!("SKIPPED nan-sum: no subgroup arithmetic");
+    let spirv = kernels::lane_sum_whole::<F32>(limits.subgroup_size).expect("built");
+    if !runnable(&gpu, "nan-sum", &[&spirv]) {
         return;
     }
 
@@ -101,13 +95,7 @@ fn a_sum_containing_a_nan_is_nan_in_that_subgroup_only() {
     let count = WORKGROUP_SIZE as usize;
     let input = ramp_with(count, inside_first_subgroup(width), f32::NAN);
 
-    let output = gpu
-        .run(
-            &kernels::lane_sum_whole::<F32>(limits.subgroup_size).expect("built"),
-            &input,
-            1,
-        )
-        .expect("dispatched");
+    let output = gpu.run(&spirv, &input, 1).expect("dispatched");
 
     // NaN propagates through addition under any order, so this is defined too.
     assert!(
@@ -139,12 +127,14 @@ fn a_maximum_containing_a_nan_behaves_the_same_on_both_reduction_paths() {
     let Some(gpu) = device("nan-max") else { return };
     let limits = gpu.limits().clone();
 
-    if !limits.subgroup_arithmetic {
-        eprintln!("SKIPPED nan-max: no subgroup arithmetic");
-        return;
-    }
     if limits.subgroup_size != 32 {
         eprintln!("SKIPPED nan-max: the lane counts here are written for a 32-wide subgroup");
+        return;
+    }
+
+    let direct_spirv = kernels::lane_max::<F32, 32>(32).expect("built");
+    let folded_spirv = kernels::lane_max::<F32, 64>(32).expect("built");
+    if !runnable(&gpu, "nan-max", &[&direct_spirv, &folded_spirv]) {
         return;
     }
 
@@ -152,11 +142,7 @@ fn a_maximum_containing_a_nan_behaves_the_same_on_both_reduction_paths() {
     let count = WORKGROUP_SIZE as usize;
     let direct_input = ramp_with(count, inside_first_subgroup(width), f32::NAN);
     let direct = gpu
-        .run(
-            &kernels::lane_max::<F32, 32>(32).expect("built"),
-            &direct_input,
-            1,
-        )
+        .run(&direct_spirv, &direct_input, 1)
         .expect("dispatched")
         .first()
         .copied()
@@ -165,11 +151,7 @@ fn a_maximum_containing_a_nan_behaves_the_same_on_both_reduction_paths() {
     // Twice as long, and the NaN placed in the first strip so the compare-and-select fold sees it.
     let folded_input = ramp_with(count * 2, inside_first_subgroup(width), f32::NAN);
     let folded = gpu
-        .run(
-            &kernels::lane_max::<F32, 64>(32).expect("built"),
-            &folded_input,
-            1,
-        )
+        .run(&folded_spirv, &folded_input, 1)
         .expect("dispatched")
         .first()
         .copied()
@@ -197,8 +179,8 @@ fn a_sum_of_negative_zeros_is_zero_and_its_sign_is_the_implementations_business(
     };
     let limits = gpu.limits().clone();
 
-    if !limits.subgroup_arithmetic {
-        eprintln!("SKIPPED signed-zero: no subgroup arithmetic");
+    let spirv = kernels::lane_sum_whole::<F32>(limits.subgroup_size).expect("built");
+    if !runnable(&gpu, "signed-zero", &[&spirv]) {
         return;
     }
 
@@ -207,13 +189,7 @@ fn a_sum_of_negative_zeros_is_zero_and_its_sign_is_the_implementations_business(
     // whatever the reduction order — and it is the case a naive `== 0.0` comparison hides.
     let input = vec![-0.0_f32; count];
 
-    let output = gpu
-        .run(
-            &kernels::lane_sum_whole::<F32>(limits.subgroup_size).expect("built"),
-            &input,
-            1,
-        )
-        .expect("dispatched");
+    let output = gpu.run(&spirv, &input, 1).expect("dispatched");
 
     let total = output.first().copied().expect("an answer");
     eprintln!(
@@ -253,8 +229,8 @@ fn a_very_large_value_does_not_disturb_the_lanes_around_it() {
     };
     let limits = gpu.limits().clone();
 
-    if !limits.subgroup_arithmetic {
-        eprintln!("SKIPPED large-value: no subgroup arithmetic");
+    let spirv = kernels::lane_sum_whole::<F32>(limits.subgroup_size).expect("built");
+    if !runnable(&gpu, "large-value", &[&spirv]) {
         return;
     }
 
@@ -265,13 +241,7 @@ fn a_very_large_value_does_not_disturb_the_lanes_around_it() {
     // addend vanishes into the large one regardless of when it arrives.
     let input = ramp_with(count, 0, 1.0e30);
 
-    let output = gpu
-        .run(
-            &kernels::lane_sum_whole::<F32>(limits.subgroup_size).expect("built"),
-            &input,
-            1,
-        )
-        .expect("dispatched");
+    let output = gpu.run(&spirv, &input, 1).expect("dispatched");
 
     assert_eq!(
         output.first().copied(),

@@ -6,7 +6,7 @@
 
 mod common;
 
-use common::{device, grouped_sums, ramp};
+use common::{device, grouped_sums, ramp, runnable};
 use runner::kernels::{self, WORKGROUP_SIZE};
 use simdr::lanes::F32;
 use std::time::Instant;
@@ -23,15 +23,13 @@ fn a_session_gives_the_same_answer_as_a_fresh_run() {
     };
     let limits = gpu.limits().clone();
 
-    if !limits.subgroup_arithmetic {
-        eprintln!("SKIPPED session-agrees: no subgroup arithmetic reported");
-        return;
-    }
-
     let width = limits.subgroup_size;
     let count = WORKGROUP_SIZE as usize;
     let input = ramp(count);
     let spirv = kernels::lane_sum_whole::<F32>(width).expect("built");
+    if !runnable(&gpu, "session-agrees", &[&spirv]) {
+        return;
+    }
 
     let once = gpu.run(&spirv, &input, 1).expect("dispatched");
 
@@ -54,14 +52,13 @@ fn a_session_reused_does_not_return_the_first_answer_again() {
     };
     let limits = gpu.limits().clone();
 
-    if !limits.subgroup_arithmetic {
-        eprintln!("SKIPPED session-reuse: no subgroup arithmetic reported");
-        return;
-    }
-
     let width = limits.subgroup_size;
     let count = WORKGROUP_SIZE as usize;
     let spirv = kernels::lane_sum_whole::<F32>(width).expect("built");
+    if !runnable(&gpu, "session-reuse", &[&spirv]) {
+        return;
+    }
+
     let mut session = gpu.session(&spirv, &[count, count]).expect("opened");
 
     let mut seen = Vec::new();

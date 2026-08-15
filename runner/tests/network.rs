@@ -7,7 +7,7 @@
 
 mod common;
 
-use common::device;
+use common::{device, runnable};
 use runner::kernels::WORKGROUP_SIZE;
 use runner::kernels::network::{Layer, bits, clipped_dot, clipped_dot_split, reference};
 
@@ -50,10 +50,6 @@ fn a_clipped_dot_product_matches_the_engines_own_loop() {
     };
     let limits = gpu.limits().clone();
 
-    if !limits.subgroup_arithmetic {
-        eprintln!("SKIPPED clipped-dot: no subgroup arithmetic reported");
-        return;
-    }
     if limits.subgroup_size != 32 {
         eprintln!("SKIPPED clipped-dot: written for a 32-wide subgroup");
         return;
@@ -66,13 +62,12 @@ fn a_clipped_dot_product_matches_the_engines_own_loop() {
     let weights = weights(per_operand);
     let input = packed(&activations, &weights);
 
-    let output = gpu
-        .run_u32(
-            &clipped_dot::<256>(32, per_operand as u32, Layer::QA).expect("built"),
-            &input,
-            1,
-        )
-        .expect("dispatched");
+    let spirv = clipped_dot::<256>(32, per_operand as u32, Layer::QA).expect("built");
+    if !runnable(&gpu, "clipped-dot", &[&spirv]) {
+        return;
+    }
+
+    let output = gpu.run_u32(&spirv, &input, 1).expect("dispatched");
 
     // Which elements each subgroup covers: the layout blocks by workgroup and strides within it,
     // so subgroup 0 reads lanes 0..32 of every strip and subgroup 1 reads lanes 32..64.
@@ -118,8 +113,8 @@ fn the_split_form_agrees_with_the_concatenated_one() {
     };
     let limits = gpu.limits().clone();
 
-    if !limits.subgroup_arithmetic || limits.subgroup_size != 32 {
-        eprintln!("SKIPPED clipped-dot-split: needs a 32-wide subgroup with arithmetic");
+    if limits.subgroup_size != 32 {
+        eprintln!("SKIPPED clipped-dot-split: written for a 32-wide subgroup");
         return;
     }
 
@@ -127,18 +122,20 @@ fn the_split_form_agrees_with_the_concatenated_one() {
     let activations = activations(per_operand);
     let weights = weights(per_operand);
 
+    let joined_spirv = clipped_dot::<256>(32, per_operand as u32, Layer::QA).expect("built");
+    let split_spirv = clipped_dot_split::<256>(32, Layer::QA).expect("built");
+    if !runnable(&gpu, "clipped-dot-split", &[&joined_spirv, &split_spirv]) {
+        return;
+    }
+
     let joined = gpu
-        .run_u32(
-            &clipped_dot::<256>(32, per_operand as u32, Layer::QA).expect("built"),
-            &packed(&activations, &weights),
-            1,
-        )
+        .run_u32(&joined_spirv, &packed(&activations, &weights), 1)
         .expect("dispatched");
 
     let as_words = |values: &[i32]| -> Vec<u32> { values.iter().map(|&v| bits(v)).collect() };
     let split = gpu
         .run_bound(
-            &clipped_dot_split::<256>(32, Layer::QA).expect("built"),
+            &split_spirv,
             &[&as_words(&activations), &as_words(&weights)],
             per_operand,
             1,
@@ -176,13 +173,16 @@ fn the_clamp_is_actually_applied_and_not_merely_present() {
     let Some(gpu) = device("clipped-dot-clamp") else {
         return;
     };
-    if gpu.limits().subgroup_size != 32 || !gpu.limits().subgroup_arithmetic {
-        eprintln!("SKIPPED clipped-dot-clamp: needs a 32-wide subgroup with arithmetic");
+    if gpu.limits().subgroup_size != 32 {
+        eprintln!("SKIPPED clipped-dot-clamp: written for a 32-wide subgroup");
         return;
     }
 
     let per_operand = WORKGROUP_SIZE as usize * 8;
     let spirv = clipped_dot::<256>(32, per_operand as u32, Layer::QA).expect("built");
+    if !runnable(&gpu, "clipped-dot-clamp", &[&spirv]) {
+        return;
+    }
 
     // All activations far above the ceiling, all weights one: the answer must be the *clamped*
     // total, not the raw one. Without the clamp it would be a hundred times larger.
@@ -211,8 +211,8 @@ fn a_batch_of_positions_each_get_their_own_answer() {
     let Some(gpu) = device("clipped-dot-batch") else {
         return;
     };
-    if gpu.limits().subgroup_size != 32 || !gpu.limits().subgroup_arithmetic {
-        eprintln!("SKIPPED clipped-dot-batch: needs a 32-wide subgroup with arithmetic");
+    if gpu.limits().subgroup_size != 32 {
+        eprintln!("SKIPPED clipped-dot-batch: written for a 32-wide subgroup");
         return;
     }
 
@@ -227,9 +227,14 @@ fn a_batch_of_positions_each_get_their_own_answer() {
         .collect();
     let weights = vec![1_i32; total];
 
+    let batch_spirv = clipped_dot::<256>(32, total as u32, Layer::QA).expect("built");
+    if !runnable(&gpu, "clipped-dot-batch", &[&batch_spirv]) {
+        return;
+    }
+
     let output = gpu
         .run_u32(
-            &clipped_dot::<256>(32, total as u32, Layer::QA).expect("built"),
+            &batch_spirv,
             &packed(&activations, &weights),
             positions as u32,
         )

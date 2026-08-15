@@ -464,6 +464,28 @@ A machine with no Vulkan device is a normal state for the suite to find. Those t
 `SKIPPED` with a reason rather than passing quietly — a skipped correctness test that looks green
 is worse than a red one.
 
+**Add `-- --nocapture` to see them.** `libtest` swallows `eprintln!` from a *passing* test, so a run
+that skipped half the suite prints the same summary as one that ran all of it. Counting `SKIPPED`
+lines without it counts nothing, which is the check for silent skipping having the shape of the
+thing it checks.
+
+### A gate that cannot name the wrong feature
+
+A test skips when the device cannot run its kernel, and deciding that used to mean picking a feature
+bit by hand — 61 times. `Limits::unsupported_in` reads the requirement out of the module's own
+`OpCapability` instructions instead, so a kernel that starts needing something new brings its own
+gate with it; `common::runnable` is the wrapper the tests call.
+
+It matters in both directions. Five gates **under-named** what their kernel needed — `sum_or_max`
+and `scale_if_any_above` vote, and were gated on arithmetic alone — and one **over-named** it, so a
+device missing any part of the subgroup surface skipped every test in `unrun.rs` including the ones
+that never touch it. Neither can fire on the three implementations here, which all offer everything;
+that is exactly why both survived.
+
+Three exceptions stay by hand, each with its reason in the file: `Reducer` and `Scanner` build their
+modules inside themselves so there is nothing to ask, the fuzzer does not know what it is about to
+generate, and `shaderSubgroupExtendedTypes` has no SPIR-V capability at all.
+
 ### Examples
 
 ```powershell

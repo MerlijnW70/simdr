@@ -9,7 +9,7 @@
 
 mod common;
 
-use common::{device, ramp};
+use common::{device, ramp, runnable};
 use runner::kernels::{self, WORKGROUP_SIZE};
 
 #[test]
@@ -33,11 +33,6 @@ fn a_butterfly_shuffle_pairs_each_lane_with_the_one_the_mask_names() {
         return;
     };
 
-    if !gpu.limits().subgroup_shuffle {
-        eprintln!("SKIPPED butterfly: the device offers no subgroup shuffles");
-        return;
-    }
-
     let width = gpu.limits().subgroup_size;
     let count = WORKGROUP_SIZE as usize;
     let input = ramp(count);
@@ -57,6 +52,10 @@ fn a_butterfly_shuffle_pairs_each_lane_with_the_one_the_mask_names() {
 
     for mask in distances {
         let spirv = kernels::butterfly_pair_sum(width, mask as u32).expect("built");
+        if !runnable(&gpu, "butterfly", &[&spirv]) {
+            return;
+        }
+
         let output = gpu.run(&spirv, &input, 1).expect("dispatched");
 
         let expected: Vec<f32> = (0..count)
@@ -73,24 +72,20 @@ fn a_vote_answers_for_the_whole_subgroup_and_every_lane_agrees() {
         return;
     };
 
-    if !gpu.limits().subgroup_arithmetic {
-        eprintln!("SKIPPED any-above: no subgroup vote support reported");
-        return;
-    }
-
     let width = gpu.limits().subgroup_size as usize;
     let count = WORKGROUP_SIZE as usize;
     let input = ramp(count);
 
+    // The gate said `subgroup_arithmetic` and its message said "vote" — and `any_above` needs both.
+    // The module names them; this no longer has to.
+    let spirv = kernels::any_above(width as u32, 40.0).expect("built");
+    if !runnable(&gpu, "any-above", &[&spirv]) {
+        return;
+    }
+
     // A ramp of 0..64: on a 32-wide device the first subgroup holds 0..31 and the second 32..63,
     // so a threshold of 40 separates them.
-    let output = gpu
-        .run(
-            &kernels::any_above(width as u32, 40.0).expect("built"),
-            &input,
-            1,
-        )
-        .expect("dispatched");
+    let output = gpu.run(&spirv, &input, 1).expect("dispatched");
 
     let expected: Vec<f32> = (0..count)
         .map(|lane| {

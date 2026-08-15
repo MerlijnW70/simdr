@@ -10,7 +10,7 @@
 
 mod common;
 
-use common::{device, ramp};
+use common::{device, ramp, runnable};
 use runner::kernels::{self, WORKGROUP_SIZE};
 
 /// An unrolled loop, checked against the built-in reduction it reimplements.
@@ -25,8 +25,12 @@ fn an_unrolled_loop_reimplements_the_subgroup_sum_exactly() {
     };
     let limits = gpu.limits().clone();
 
-    if !limits.subgroup_arithmetic || !limits.subgroup_shuffle {
-        eprintln!("SKIPPED butterfly-tree: the device lacks part of the subgroup surface");
+    // "Part of the subgroup surface" is what a hand-picked gate has to say when it is guessing.
+    // The modules know exactly which part.
+    let tree_spirv = kernels::butterfly_tree_sum(limits.subgroup_size).expect("built");
+    let builtin_spirv =
+        kernels::lane_sum_whole::<simdr::lanes::F32>(limits.subgroup_size).expect("built");
+    if !runnable(&gpu, "butterfly-tree", &[&tree_spirv, &builtin_spirv]) {
         return;
     }
 
@@ -34,29 +38,17 @@ fn an_unrolled_loop_reimplements_the_subgroup_sum_exactly() {
     let count = WORKGROUP_SIZE as usize;
     let input = ramp(count);
 
-    let tree = gpu
-        .run(
-            &kernels::butterfly_tree_sum(limits.subgroup_size).expect("built"),
-            &input,
-            1,
-        )
-        .expect("dispatched");
+    let tree = gpu.run(&tree_spirv, &input, 1).expect("dispatched");
 
     let expected = common::grouped_sums(count, width);
     assert_eq!(tree, expected, "the tree and the reference disagree");
 
     // And against the built-in, which is the stronger comparison: two implementations of the same
     // operation, neither of them the reference.
-    let builtin = gpu
-        .run(
-            // The *whole* subgroup, not a 32-lane vector: the tree above folds `log2(width)`
-            // times, so on a 64-wide device it reduces 64 lanes and a `lane_sum::<_, 32>` would
-            // reduce a cluster of 32. The two agreed on every device until there was a second one.
-            &kernels::lane_sum_whole::<simdr::lanes::F32>(limits.subgroup_size).expect("built"),
-            &input,
-            1,
-        )
-        .expect("dispatched");
+    // The *whole* subgroup, not a 32-lane vector: the tree above folds `log2(width)` times, so on a
+    // 64-wide device it reduces 64 lanes and a `lane_sum::<_, 32>` would reduce a cluster of 32.
+    // The two agreed on every device until there was a second one.
+    let builtin = gpu.run(&builtin_spirv, &input, 1).expect("dispatched");
     assert_eq!(tree, builtin);
 }
 
@@ -81,11 +73,6 @@ fn a_butterfly_tree_inside_a_cluster_agrees_with_the_clustered_reduce() {
     };
     let limits = gpu.limits().clone();
 
-    if !limits.subgroup_arithmetic || !limits.subgroup_shuffle || !limits.subgroup_clustered {
-        eprintln!("SKIPPED butterfly-cluster: the device lacks part of the subgroup surface");
-        return;
-    }
-
     let width = limits.subgroup_size;
     let count = WORKGROUP_SIZE as usize;
     let input = ramp(count);
@@ -106,16 +93,18 @@ fn a_butterfly_tree_inside_a_cluster_agrees_with_the_clustered_reduce() {
             continue;
         }
 
-        let tree = gpu
-            .run(
-                &kernels::butterfly_cluster_sum(width, cluster).expect("built"),
-                &input,
-                1,
-            )
-            .expect("dispatched");
-        let reduced = gpu
-            .run(&builtin(width).expect("built"), &input, 1)
-            .expect("dispatched");
+        // Per case rather than once for the test: a clustered tree and a clustered reduce declare
+        // different capabilities — shuffles against clustered arithmetic — and both are dispatched
+        // here. The gate this replaced named three bits by hand for exactly that reason, which is
+        // three chances to name the wrong one.
+        let tree_spirv = kernels::butterfly_cluster_sum(width, cluster).expect("built");
+        let reduce_spirv = builtin(width).expect("built");
+        if !runnable(&gpu, "butterfly-cluster", &[&tree_spirv, &reduce_spirv]) {
+            return;
+        }
+
+        let tree = gpu.run(&tree_spirv, &input, 1).expect("dispatched");
+        let reduced = gpu.run(&reduce_spirv, &input, 1).expect("dispatched");
 
         assert_eq!(
             tree,
@@ -168,8 +157,10 @@ fn a_value_computed_in_one_arm_arrives_at_the_merge() {
     };
     let limits = gpu.limits().clone();
 
-    if !limits.subgroup_arithmetic {
-        eprintln!("SKIPPED sum-or-max: no subgroup arithmetic reported");
+    // `sum_or_max` votes, so it declares `GroupNonUniformVote` on top of the arithmetic this gate
+    // used to name alone — the under-specified shape that made this conversion worth doing.
+    let spirv = kernels::sum_or_max(limits.subgroup_size, 40.0).expect("built");
+    if !runnable(&gpu, "sum-or-max", &[&spirv]) {
         return;
     }
 
@@ -179,13 +170,7 @@ fn a_value_computed_in_one_arm_arrives_at_the_merge() {
 
     // A ramp of 0..64 over two 32-wide subgroups. At 40 the first takes the max arm and the second
     // the sum arm, so one dispatch exercises both edges — and the two answers are far apart.
-    let output = gpu
-        .run(
-            &kernels::sum_or_max(limits.subgroup_size, 40.0).expect("built"),
-            &input,
-            1,
-        )
-        .expect("dispatched");
+    let output = gpu.run(&spirv, &input, 1).expect("dispatched");
 
     let sums = common::grouped_sums(count, width);
     let expected: Vec<f32> = (0..count)
@@ -241,8 +226,9 @@ fn each_arm_is_the_whole_answer_when_every_subgroup_agrees() {
     };
     let limits = gpu.limits().clone();
 
-    if !limits.subgroup_arithmetic {
-        eprintln!("SKIPPED sum-or-max-uniform: no subgroup arithmetic reported");
+    let always = kernels::sum_or_max(limits.subgroup_size, -1.0).expect("built");
+    let never = kernels::sum_or_max(limits.subgroup_size, 1_000.0).expect("built");
+    if !runnable(&gpu, "sum-or-max-uniform", &[&always, &never]) {
         return;
     }
 
@@ -250,22 +236,10 @@ fn each_arm_is_the_whole_answer_when_every_subgroup_agrees() {
     let count = WORKGROUP_SIZE as usize;
     let input = ramp(count);
 
-    let summed = gpu
-        .run(
-            &kernels::sum_or_max(limits.subgroup_size, -1.0).expect("built"),
-            &input,
-            1,
-        )
-        .expect("dispatched");
+    let summed = gpu.run(&always, &input, 1).expect("dispatched");
     assert_eq!(summed, common::grouped_sums(count, width));
 
-    let maxed = gpu
-        .run(
-            &kernels::sum_or_max(limits.subgroup_size, 1_000.0).expect("built"),
-            &input,
-            1,
-        )
-        .expect("dispatched");
+    let maxed = gpu.run(&never, &input, 1).expect("dispatched");
     let expected: Vec<f32> = (0..count)
         .map(|lane| ((lane / width * width) + width - 1).min(count - 1) as f32)
         .collect();
@@ -312,15 +286,17 @@ fn control_flow_nests_both_ways_round() {
     };
     let limits = gpu.limits().clone();
 
-    if !limits.subgroup_arithmetic {
-        eprintln!("SKIPPED nesting: no subgroup arithmetic reported");
-        return;
-    }
-
     let width = limits.subgroup_size as usize;
     let count = WORKGROUP_SIZE as usize;
     let input = ramp(count);
     let times = 3_u32;
+
+    // Both nestings, gated together: they are different modules and this test dispatches each.
+    let branch_in_loop = kernels::branch_in_loop(limits.subgroup_size, times, 40.0).expect("built");
+    let loop_in_branch = kernels::loop_in_branch(limits.subgroup_size, times, 40.0).expect("built");
+    if !runnable(&gpu, "nesting", &[&branch_in_loop, &loop_in_branch]) {
+        return;
+    }
 
     // A ramp of 0..64 over two 32-wide subgroups: at 40 the first subgroup fails the vote and the
     // second passes it, so one dispatch exercises both arms.
@@ -330,13 +306,7 @@ fn control_flow_nests_both_ways_round() {
     };
 
     // Inside a loop: the taken arm doubles each trip, the other adds one each trip.
-    let output = gpu
-        .run(
-            &kernels::branch_in_loop(limits.subgroup_size, times, 40.0).expect("built"),
-            &input,
-            1,
-        )
-        .expect("dispatched");
+    let output = gpu.run(&branch_in_loop, &input, 1).expect("dispatched");
 
     let expected: Vec<f32> = (0..count)
         .map(|lane| {
@@ -351,13 +321,7 @@ fn control_flow_nests_both_ways_round() {
     assert_eq!(output, expected, "a branch inside a loop");
 
     // Inside a branch: the taken arm runs the whole loop, the other returns the input.
-    let output = gpu
-        .run(
-            &kernels::loop_in_branch(limits.subgroup_size, times, 40.0).expect("built"),
-            &input,
-            1,
-        )
-        .expect("dispatched");
+    let output = gpu.run(&loop_in_branch, &input, 1).expect("dispatched");
 
     let expected: Vec<f32> = (0..count)
         .map(|lane| {

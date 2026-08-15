@@ -39,6 +39,42 @@ pub fn device(label: &str) -> Option<Gpu> {
     }
 }
 
+/// Whether this device offers everything `modules` declare, reporting by name when it does not.
+///
+/// **The gate that cannot name the wrong feature.** Every skip in this suite used to pick a feature
+/// bit by hand, and picking is where it goes wrong: three kernels using votes were gated on the
+/// *ballot*, which is a different capability and a different bit. That was right on all three
+/// implementations here — no device offers one without the other — and would have been wrong on the
+/// first that did.
+///
+/// It is not only a past mistake. Five gates in this suite named `subgroup_arithmetic` alone for
+/// kernels that also reach `any_uniform`, and a vote is `GroupNonUniformVote`: on a device with
+/// arithmetic and no vote they would have run and failed at pipeline creation rather than skipping.
+///
+/// `Limits::unsupported_in` reads the requirement out of the module's own `OpCapability`
+/// instructions, so a kernel that starts needing something new brings its own gate with it and no
+/// caller has to remember. Pass every module the test dispatches: a test that gates on one and runs
+/// another is the same class of mistake one level up.
+///
+/// # What it cannot see
+///
+/// A permission that leaves no trace in the module. `shaderSubgroupExtendedTypes` is the one this
+/// crate meets — a device may accept `OpGroupNonUniformIAdd` on a 32-bit integer and refuse it on an
+/// 8-bit one with nothing in the SPIR-V to say so — so the narrow-type tests still ask [`Narrow`] by
+/// hand, and say why where they do.
+///
+/// [`Narrow`]: runner::Narrow
+pub fn runnable(gpu: &Gpu, label: &str, modules: &[&[u32]]) -> bool {
+    for spirv in modules {
+        let missing = gpu.limits().unsupported_in(spirv);
+        if !missing.is_empty() {
+            eprintln!("SKIPPED {label}: this device does not offer {missing:?}");
+            return false;
+        }
+    }
+    true
+}
+
 /// How many elements a kernel built for `lanes` touches, on a device of `width` lanes.
 ///
 /// **A buffer of one workgroup is wrong for most kernels here, and was wrong for eleven tests.**

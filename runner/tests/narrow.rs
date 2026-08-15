@@ -15,7 +15,7 @@
 
 mod common;
 
-use common::{device, elements};
+use common::{device, elements, runnable};
 use runner::kernels::{self, WORKGROUP_SIZE};
 use simdr::half;
 use simdr::lanes::{F16, I8, I16, U8, U16};
@@ -25,8 +25,13 @@ fn a_byte_kernel_adds_at_eight_bits_and_wraps_there() {
     let Some(gpu) = device("i8-add") else { return };
     let limits = gpu.limits().clone();
 
-    if !limits.narrow.byte_kernel() {
-        eprintln!("SKIPPED i8-add: no shaderInt8 or storageBuffer8BitAccess");
+    // `byte_kernel()` is `shaderInt8 && storageBuffer8BitAccess`, and an `i8` kernel declares
+    // exactly `Int8` and `StorageBuffer8BitAccess` — so asking the module says the same thing and
+    // keeps saying it if the kernel's needs change. What the module *cannot* say is
+    // `shaderSubgroupExtendedTypes`, which has no capability; the reduction test below still asks
+    // `Narrow` for that one by hand, and says why.
+    let spirv = kernels::narrow_add::<I8, 32>(limits.subgroup_size, 100).expect("built");
+    if !runnable(&gpu, "i8-add", &[&spirv]) {
         return;
     }
 
@@ -37,13 +42,7 @@ fn a_byte_kernel_adds_at_eight_bits_and_wraps_there() {
         .map(|index| index as u8)
         .collect();
 
-    let output = gpu
-        .run_bytes(
-            &kernels::narrow_add::<I8, 32>(limits.subgroup_size, 100).expect("built"),
-            &input,
-            1,
-        )
-        .expect("dispatched");
+    let output = gpu.run_bytes(&spirv, &input, 1).expect("dispatched");
 
     let expected: Vec<u8> = (0..elements(limits.subgroup_size, 32))
         .map(|index| (index as i8).wrapping_add(100) as u8)
@@ -61,8 +60,8 @@ fn an_unsigned_byte_kernel_wraps_the_other_way() {
     let Some(gpu) = device("u8-add") else { return };
     let limits = gpu.limits().clone();
 
-    if !limits.narrow.byte_kernel() {
-        eprintln!("SKIPPED u8-add: no shaderInt8 or storageBuffer8BitAccess");
+    let spirv = kernels::narrow_add::<U8, 32>(limits.subgroup_size, 200).expect("built");
+    if !runnable(&gpu, "u8-add", &[&spirv]) {
         return;
     }
 
@@ -70,13 +69,7 @@ fn an_unsigned_byte_kernel_wraps_the_other_way() {
         .map(|index| (index * 4) as u8)
         .collect();
 
-    let output = gpu
-        .run_bytes(
-            &kernels::narrow_add::<U8, 32>(limits.subgroup_size, 200).expect("built"),
-            &input,
-            1,
-        )
-        .expect("dispatched");
+    let output = gpu.run_bytes(&spirv, &input, 1).expect("dispatched");
 
     let expected: Vec<u8> = input.iter().map(|byte| byte.wrapping_add(200)).collect();
     assert_eq!(output, expected);
@@ -92,8 +85,8 @@ fn every_element_of_a_byte_buffer_is_its_own_byte() {
     };
     let limits = gpu.limits().clone();
 
-    if !limits.narrow.byte_kernel() {
-        eprintln!("SKIPPED i8-stride: no shaderInt8 or storageBuffer8BitAccess");
+    let spirv = kernels::narrow_add::<U8, 32>(limits.subgroup_size, 0).expect("built");
+    if !runnable(&gpu, "i8-stride", &[&spirv]) {
         return;
     }
 
@@ -101,13 +94,7 @@ fn every_element_of_a_byte_buffer_is_its_own_byte() {
         .map(|index| (index % 61) as u8)
         .collect();
 
-    let output = gpu
-        .run_bytes(
-            &kernels::narrow_add::<U8, 32>(limits.subgroup_size, 0).expect("built"),
-            &input,
-            1,
-        )
-        .expect("dispatched");
+    let output = gpu.run_bytes(&spirv, &input, 1).expect("dispatched");
 
     assert_eq!(
         output, input,
@@ -120,8 +107,8 @@ fn a_16_bit_kernel_adds_at_sixteen_bits() {
     let Some(gpu) = device("i16-add") else { return };
     let limits = gpu.limits().clone();
 
-    if !limits.narrow.short_kernel() {
-        eprintln!("SKIPPED i16-add: no shaderInt16 or storageBuffer16BitAccess");
+    let spirv = kernels::narrow_add::<I16, 32>(limits.subgroup_size, 30_000).expect("built");
+    if !runnable(&gpu, "i16-add", &[&spirv]) {
         return;
     }
 
@@ -131,13 +118,7 @@ fn a_16_bit_kernel_adds_at_sixteen_bits() {
         .map(|index| (index % 60) as u16 * 1000)
         .collect();
 
-    let output = gpu
-        .run_halves(
-            &kernels::narrow_add::<I16, 32>(limits.subgroup_size, 30_000).expect("built"),
-            &input,
-            1,
-        )
-        .expect("dispatched");
+    let output = gpu.run_halves(&spirv, &input, 1).expect("dispatched");
 
     let expected: Vec<u16> = input
         .iter()
@@ -160,8 +141,10 @@ fn an_unsigned_16_bit_clamp_holds_its_bounds() {
     };
     let limits = gpu.limits().clone();
 
-    if !limits.narrow.short_kernel() {
-        eprintln!("SKIPPED u16-clamp: no shaderInt16 or storageBuffer16BitAccess");
+    let spirv =
+        kernels::narrow_clamp::<U16, 32>(limits.subgroup_size, WORKGROUP_SIZE, 1_000, 20_000)
+            .expect("built");
+    if !runnable(&gpu, "u16-clamp", &[&spirv]) {
         return;
     }
 
@@ -170,14 +153,7 @@ fn an_unsigned_16_bit_clamp_holds_its_bounds() {
         .map(|index| (index % 90) as u16 * 700)
         .collect();
 
-    let output = gpu
-        .run_halves(
-            &kernels::narrow_clamp::<U16, 32>(limits.subgroup_size, WORKGROUP_SIZE, 1_000, 20_000)
-                .expect("built"),
-            &input,
-            1,
-        )
-        .expect("dispatched");
+    let output = gpu.run_halves(&spirv, &input, 1).expect("dispatched");
 
     let expected: Vec<u16> = input
         .iter()
@@ -191,8 +167,10 @@ fn a_half_kernel_computes_in_halves_and_not_in_floats() {
     let Some(gpu) = device("f16-add") else { return };
     let limits = gpu.limits().clone();
 
-    if !limits.narrow.half_kernel() {
-        eprintln!("SKIPPED f16-add: no shaderFloat16 or storageBuffer16BitAccess");
+    let spirv =
+        kernels::narrow_add::<F16, 32>(limits.subgroup_size, u32::from(half::from_f32(1.0)))
+            .expect("built");
+    if !runnable(&gpu, "f16-add", &[&spirv]) {
         return;
     }
 
@@ -203,14 +181,7 @@ fn a_half_kernel_computes_in_halves_and_not_in_floats() {
         .map(|index| half::from_f32(2048.0 + index as f32))
         .collect();
 
-    let output = gpu
-        .run_halves(
-            &kernels::narrow_add::<F16, 32>(limits.subgroup_size, u32::from(half::from_f32(1.0)))
-                .expect("built"),
-            &input,
-            1,
-        )
-        .expect("dispatched");
+    let output = gpu.run_halves(&spirv, &input, 1).expect("dispatched");
 
     let got: Vec<f32> = output.iter().copied().map(half::to_f32).collect();
 
@@ -235,15 +206,17 @@ fn a_narrow_reduction_runs_when_the_device_has_extended_types() {
     let Some(gpu) = device("i8-sum") else { return };
     let limits = gpu.limits().clone();
 
-    if !limits.narrow.byte_kernel() || !limits.narrow.subgroup_extended_types {
+    // **The one permission the module cannot declare, and therefore the one gate that stays by
+    // hand.** `shaderSubgroupExtendedTypes` has no SPIR-V capability at all: a device may accept
+    // `OpGroupNonUniformIAdd` on a 32-bit integer and refuse it on an 8-bit one, and the two
+    // modules are identical apart from the element type. Everything else this kernel needs —
+    // `Int8`, `StorageBuffer8BitAccess`, the subgroup arithmetic — it declares, so `runnable` asks
+    // it rather than this test guessing.
+    if !limits.narrow.subgroup_extended_types {
         eprintln!(
-            "SKIPPED i8-sum: narrow subgroup operations need shaderSubgroupExtendedTypes \
-             as well as shaderInt8 and storageBuffer8BitAccess"
+            "SKIPPED i8-sum: narrow subgroup operations need shaderSubgroupExtendedTypes, \
+             which no capability in the module can express"
         );
-        return;
-    }
-    if !limits.subgroup_arithmetic {
-        eprintln!("SKIPPED i8-sum: no subgroup arithmetic reported");
         return;
     }
 
@@ -255,17 +228,16 @@ fn a_narrow_reduction_runs_when_the_device_has_extended_types() {
     // than a statement about wrapping.
     // `narrow_sum_whole` is built for the device's own width, so it is one element per invocation
     // whatever that width is — unlike every other kernel in this file, which is built for 32.
+    let spirv = kernels::narrow_sum_whole::<I8>(limits.subgroup_size).expect("built");
+    if !runnable(&gpu, "i8-sum", &[&spirv]) {
+        return;
+    }
+
     let input: Vec<u8> = (0..elements(limits.subgroup_size, limits.subgroup_size))
         .map(|index| (index % 4) as u8)
         .collect();
 
-    let output = gpu
-        .run_bytes(
-            &kernels::narrow_sum_whole::<I8>(limits.subgroup_size).expect("built"),
-            &input,
-            1,
-        )
-        .expect("dispatched");
+    let output = gpu.run_bytes(&spirv, &input, 1).expect("dispatched");
 
     let expected: Vec<u8> = (0..elements(limits.subgroup_size, limits.subgroup_size))
         .map(|lane| {
@@ -292,25 +264,20 @@ fn a_strip_mined_byte_kernel_reaches_every_strip() {
     };
     let limits = gpu.limits().clone();
 
-    if !limits.narrow.byte_kernel() {
-        eprintln!("SKIPPED i8-strips: no shaderInt8 or storageBuffer8BitAccess");
-        return;
-    }
     if limits.subgroup_size != 32 {
         eprintln!("SKIPPED i8-strips: the lane count here is written for a 32-wide subgroup");
+        return;
+    }
+
+    let spirv = kernels::narrow_add::<U8, 128>(32, 1).expect("built");
+    if !runnable(&gpu, "i8-strips", &[&spirv]) {
         return;
     }
 
     let elements = elements(limits.subgroup_size, 32) * 4;
     let input: Vec<u8> = (0..elements).map(|index| (index % 61) as u8).collect();
 
-    let output = gpu
-        .run_bytes(
-            &kernels::narrow_add::<U8, 128>(32, 1).expect("built"),
-            &input,
-            1,
-        )
-        .expect("dispatched");
+    let output = gpu.run_bytes(&spirv, &input, 1).expect("dispatched");
 
     let expected: Vec<u8> = input.iter().map(|byte| byte.wrapping_add(1)).collect();
     assert_eq!(output, expected);

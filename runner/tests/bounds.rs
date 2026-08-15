@@ -165,6 +165,11 @@ fn a_held_reduction_checks_every_stage_it_plans() {
     let Some(gpu) = device("bounds-reducer") else {
         return;
     };
+    // **Hand-picked, and it has to be.** Every other gate in this suite asks the module what it
+    // needs — `common::runnable` reads its `OpCapability` list — but a `Reducer` and a `Scanner`
+    // build their modules *inside* themselves, so there is nothing here to ask. Naming the bit is
+    // the only option, and it is written down as a limitation rather than left looking like a
+    // choice.
     if !gpu.limits().subgroup_arithmetic {
         eprintln!("SKIPPED bounds-reducer: no subgroup arithmetic reported");
         return;
@@ -190,6 +195,11 @@ fn a_held_scan_checks_every_pass_it_records() {
     let Some(gpu) = device("bounds-scanner") else {
         return;
     };
+    // **Hand-picked, and it has to be.** Every other gate in this suite asks the module what it
+    // needs — `common::runnable` reads its `OpCapability` list — but a `Reducer` and a `Scanner`
+    // build their modules *inside* themselves, so there is nothing here to ask. Naming the bit is
+    // the only option, and it is written down as a limitation rather than left looking like a
+    // choice.
     if !gpu.limits().subgroup_arithmetic {
         eprintln!("SKIPPED bounds-scanner: no subgroup arithmetic reported");
         return;

@@ -9,7 +9,7 @@
 
 mod common;
 
-use common::device;
+use common::{device, runnable};
 use runner::Gpu;
 use runner::kernels::{self, WORKGROUP_SIZE};
 use simdr::lanes::U32;
@@ -19,14 +19,16 @@ fn ready(label: &'static str) -> Option<(Gpu, u32)> {
     let gpu = device(label)?;
     let limits = gpu.limits().clone();
 
-    // Every feature the kernels in this file reach for, and it used to be three of the five: the
-    // shifts declare `GroupNonUniformShuffleRelative` and the votes declare `GroupNonUniformVote`,
-    // and neither was named here. Both are offered by every device that offers the other three, so
-    // the gate was right by luck — `Limits::subgroup_surface` is the same list written once.
-    if !limits.subgroup_surface() || !limits.subgroup_ballot {
-        eprintln!("SKIPPED {label}: the device lacks part of the subgroup surface");
-        return None;
-    }
+    // **No capability gate here any more, and that is the point.** This asked
+    // `subgroup_surface() && subgroup_ballot` — the union of everything *any* kernel in this file
+    // reaches — which was itself a correction, because the list had been three of the five. A union
+    // over-gates in the silent direction: a device missing one feature skipped every test in the
+    // file, including the ones that never touch it.
+    //
+    // A shared helper cannot know which module its caller is about to build, so the question moved
+    // to where the module is. Each test calls `common::runnable`, which reads the requirement out
+    // of that module's own `OpCapability` list. What stays here is the width, which no module
+    // declares.
     if limits.subgroup_size != 32 {
         eprintln!("SKIPPED {label}: written for a 32-wide subgroup");
         return None;
@@ -52,13 +54,12 @@ fn a_prefix_sum_is_inclusive_and_not_exclusive() {
     let count = WORKGROUP_SIZE as usize;
     let input = ramp(count);
 
-    let output = gpu
-        .run_u32(
-            &kernels::prefix_sum::<U32>(width).expect("built"),
-            &input,
-            1,
-        )
-        .expect("dispatched");
+    let spirv = kernels::prefix_sum::<U32>(width).expect("built");
+    if !runnable(&gpu, "prefix-sum", &[&spirv]) {
+        return;
+    }
+
+    let output = gpu.run_u32(&spirv, &input, 1).expect("dispatched");
 
     let lanes = width as usize;
     let expected: Vec<u32> = (0..count)
@@ -89,13 +90,12 @@ fn a_broadcast_hands_every_lane_the_source_lanes_value() {
     let lanes = width as usize;
 
     for source in [0_u32, 1, 7, 31] {
-        let output = gpu
-            .run_u32(
-                &kernels::broadcast::<U32>(width, source).expect("built"),
-                &input,
-                1,
-            )
-            .expect("dispatched");
+        let spirv = kernels::broadcast::<U32>(width, source).expect("built");
+        if !runnable(&gpu, "broadcast", &[&spirv]) {
+            return;
+        }
+
+        let output = gpu.run_u32(&spirv, &input, 1).expect("dispatched");
 
         let expected: Vec<u32> = (0..count)
             .map(|lane| (lane / lanes * lanes + source as usize) as u32 + 1)
@@ -124,10 +124,6 @@ fn a_clustered_broadcast_hands_each_vector_its_own_source_lane() {
         return;
     };
     let limits = gpu.limits().clone();
-    if !limits.subgroup_shuffle {
-        eprintln!("SKIPPED broadcast-cluster: no subgroup shuffle");
-        return;
-    }
     let width = limits.subgroup_size;
 
     let count = WORKGROUP_SIZE as usize;
@@ -138,13 +134,12 @@ fn a_clustered_broadcast_hands_each_vector_its_own_source_lane() {
             continue;
         }
 
-        let output = gpu
-            .run_u32(
-                &kernels::broadcast_in_cluster::<U32>(width, cluster, source).expect("built"),
-                &input,
-                1,
-            )
-            .expect("dispatched");
+        let spirv = kernels::broadcast_in_cluster::<U32>(width, cluster, source).expect("built");
+        if !runnable(&gpu, "broadcast-cluster", &[&spirv]) {
+            return;
+        }
+
+        let output = gpu.run_u32(&spirv, &input, 1).expect("dispatched");
 
         let size = cluster as usize;
         let expected: Vec<u32> = (0..count)
@@ -169,20 +164,14 @@ fn a_shift_moves_values_by_the_delta_where_the_source_lane_exists() {
     let lanes = width as usize;
     let delta = 4_usize;
 
-    let down = gpu
-        .run_u32(
-            &kernels::shift_down::<U32>(width, delta as u32).expect("built"),
-            &input,
-            1,
-        )
-        .expect("dispatched");
-    let up = gpu
-        .run_u32(
-            &kernels::shift_up::<U32>(width, delta as u32).expect("built"),
-            &input,
-            1,
-        )
-        .expect("dispatched");
+    let down_spirv = kernels::shift_down::<U32>(width, delta as u32).expect("built");
+    let up_spirv = kernels::shift_up::<U32>(width, delta as u32).expect("built");
+    if !runnable(&gpu, "shift", &[&down_spirv, &up_spirv]) {
+        return;
+    }
+
+    let down = gpu.run_u32(&down_spirv, &input, 1).expect("dispatched");
+    let up = gpu.run_u32(&up_spirv, &input, 1).expect("dispatched");
 
     for lane in 0..count {
         let within = lane % lanes;
@@ -221,13 +210,12 @@ fn reduce_min_finds_the_smallest_including_when_strips_are_folded() {
 
     // Whole-subgroup first: no strip fold, so this is the group instruction alone.
     let input = ramp(count);
-    let plain = gpu
-        .run_u32(
-            &kernels::lane_min::<U32, 32>(width).expect("built"),
-            &input,
-            1,
-        )
-        .expect("dispatched");
+    let spirv = kernels::lane_min::<U32, 32>(width).expect("built");
+    if !runnable(&gpu, "lane-min", &[&spirv]) {
+        return;
+    }
+
+    let plain = gpu.run_u32(&spirv, &input, 1).expect("dispatched");
 
     let expected: Vec<u32> = (0..count)
         .map(|lane| (lane / lanes * lanes) as u32 + 1)
@@ -281,16 +269,16 @@ fn the_two_votes_answer_differently_on_the_same_input() {
     // `all` says no. That is the whole difference between the two instructions.
     let threshold = 16_u32;
 
-    let all = gpu
-        .run_u32(
-            &kernels::all_above(width, threshold).expect("built"),
-            &input,
-            1,
-        )
-        .expect("dispatched");
+    let all_spirv = kernels::all_above(width, threshold).expect("built");
+    let any_spirv = kernels::any_above(width, threshold as f32).expect("built");
+    if !runnable(&gpu, "votes", &[&all_spirv, &any_spirv]) {
+        return;
+    }
+
+    let all = gpu.run_u32(&all_spirv, &input, 1).expect("dispatched");
     let any = gpu
         .run(
-            &kernels::any_above(width, threshold as f32).expect("built"),
+            &any_spirv,
             &input.iter().map(|&value| value as f32).collect::<Vec<_>>(),
             1,
         )
@@ -321,13 +309,12 @@ fn a_ballot_sets_one_bit_per_qualifying_lane() {
     let lanes = width as usize;
 
     for threshold in [0_u32, 16, 40, 1_000] {
-        let output = gpu
-            .run_u32(
-                &kernels::ballot_above(width, threshold).expect("built"),
-                &input,
-                1,
-            )
-            .expect("dispatched");
+        let spirv = kernels::ballot_above(width, threshold).expect("built");
+        if !runnable(&gpu, "ballot", &[&spirv]) {
+            return;
+        }
+
+        let output = gpu.run_u32(&spirv, &input, 1).expect("dispatched");
 
         let expected: Vec<u32> = (0..count)
             .map(|lane| {
@@ -360,14 +347,12 @@ fn a_vote_on_a_value_tells_an_agreeing_subgroup_from_a_divergent_one() {
         return;
     };
     let limits = gpu.limits().clone();
-    if !limits.subgroup_vote {
-        eprintln!("SKIPPED all-equal: no subgroup vote");
-        return;
-    }
-
     let width = limits.subgroup_size as usize;
     let count = WORKGROUP_SIZE as usize;
     let spirv = kernels::subgroup_agrees(limits.subgroup_size).expect("built");
+    if !runnable(&gpu, "all-equal", &[&spirv]) {
+        return;
+    }
 
     let agreeing: Vec<u32> = vec![7; count];
     let agreed = gpu.run_u32(&spirv, &agreeing, 1).expect("dispatched");
@@ -433,11 +418,6 @@ fn a_strip_mined_vote_on_a_value_sees_strips_that_differ_from_each_other() {
         return;
     };
     let limits = gpu.limits().clone();
-    if !limits.subgroup_vote {
-        eprintln!("SKIPPED all-equal-wide: no subgroup vote");
-        return;
-    }
-
     let width = limits.subgroup_size as usize;
     let count = WORKGROUP_SIZE as usize;
     // Two strips per lane over one workgroup: the buffer is twice the invocation count, laid out
@@ -456,6 +436,9 @@ fn a_strip_mined_vote_on_a_value_sees_strips_that_differ_from_each_other() {
         }
     }
     .expect("built");
+    if !runnable(&gpu, "all-equal-wide", &[&spirv]) {
+        return;
+    }
 
     // Everything the same: both halves of the question say yes.
     // The buffer is twice the invocation count and the kernel writes one slot each, so only the

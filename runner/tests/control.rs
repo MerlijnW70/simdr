@@ -6,7 +6,7 @@
 
 mod common;
 
-use common::{device, ramp};
+use common::{device, ramp, runnable};
 use runner::kernels::{self, WORKGROUP_SIZE};
 
 #[test]
@@ -16,8 +16,12 @@ fn a_uniform_branch_is_taken_by_a_whole_subgroup_or_by_none_of_it() {
     };
     let limits = gpu.limits().clone();
 
-    if !limits.subgroup_arithmetic {
-        eprintln!("SKIPPED uniform-branch: no subgroup vote support reported");
+    // **The gate that made this worth converting.** It said `subgroup_arithmetic` while its message
+    // said "no subgroup vote support" — and the kernel needs both, because `any_uniform` declares
+    // `GroupNonUniformVote`. On a device offering arithmetic and no vote this would have run and
+    // failed at pipeline creation instead of skipping. `runnable` asks the module.
+    let spirv = kernels::scale_if_any_above(limits.subgroup_size, 40.0).expect("built");
+    if !runnable(&gpu, "uniform-branch", &[&spirv]) {
         return;
     }
 
@@ -27,13 +31,7 @@ fn a_uniform_branch_is_taken_by_a_whole_subgroup_or_by_none_of_it() {
 
     // A ramp of 0..64 over two 32-wide subgroups: the first holds 0..31 and the second 32..63, so
     // a threshold of 40 is exceeded by the second and not the first.
-    let output = gpu
-        .run(
-            &kernels::scale_if_any_above(limits.subgroup_size, 40.0).expect("built"),
-            &input,
-            1,
-        )
-        .expect("dispatched");
+    let output = gpu.run(&spirv, &input, 1).expect("dispatched");
 
     let expected: Vec<f32> = (0..count)
         .map(|lane| {
@@ -64,19 +62,13 @@ fn a_threshold_nobody_meets_leaves_every_lane_alone() {
     };
     let limits = gpu.limits().clone();
 
-    if !limits.subgroup_arithmetic {
-        eprintln!("SKIPPED branch-never: no subgroup vote support reported");
+    let spirv = kernels::scale_if_any_above(limits.subgroup_size, 1_000.0).expect("built");
+    if !runnable(&gpu, "branch-never", &[&spirv]) {
         return;
     }
 
     let input = ramp(WORKGROUP_SIZE as usize);
-    let output = gpu
-        .run(
-            &kernels::scale_if_any_above(limits.subgroup_size, 1_000.0).expect("built"),
-            &input,
-            1,
-        )
-        .expect("dispatched");
+    let output = gpu.run(&spirv, &input, 1).expect("dispatched");
 
     assert_eq!(output, input, "no subgroup qualified, so nothing changed");
 }
@@ -88,19 +80,13 @@ fn a_threshold_everyone_meets_scales_every_lane() {
     };
     let limits = gpu.limits().clone();
 
-    if !limits.subgroup_arithmetic {
-        eprintln!("SKIPPED branch-always: no subgroup vote support reported");
+    let spirv = kernels::scale_if_any_above(limits.subgroup_size, -1.0).expect("built");
+    if !runnable(&gpu, "branch-always", &[&spirv]) {
         return;
     }
 
     let input = ramp(WORKGROUP_SIZE as usize);
-    let output = gpu
-        .run(
-            &kernels::scale_if_any_above(limits.subgroup_size, -1.0).expect("built"),
-            &input,
-            1,
-        )
-        .expect("dispatched");
+    let output = gpu.run(&spirv, &input, 1).expect("dispatched");
 
     let expected: Vec<f32> = input.iter().map(|value| value * 10.0).collect();
     assert_eq!(output, expected);
@@ -117,21 +103,22 @@ fn a_helper_built_selection_runs_and_leaves_the_result_alone() {
     };
     let limits = gpu.limits().clone();
 
-    if !limits.subgroup_arithmetic {
-        eprintln!("SKIPPED branch-only: no subgroup vote support reported");
+    let input = ramp(WORKGROUP_SIZE as usize);
+
+    // Every threshold's module, then one gate: they are the same kernel with a different constant,
+    // so they declare the same capabilities — but asking the modules rather than assuming that is
+    // the whole point of the change.
+    let built: Vec<Vec<u32>> = [-1.0_f32, 40.0, 1_000.0]
+        .into_iter()
+        .map(|threshold| kernels::branch_only(limits.subgroup_size, threshold).expect("built"))
+        .collect();
+    let modules: Vec<&[u32]> = built.iter().map(Vec::as_slice).collect();
+    if !runnable(&gpu, "branch-only", &modules) {
         return;
     }
 
-    let input = ramp(WORKGROUP_SIZE as usize);
-
-    for threshold in [-1.0_f32, 40.0, 1_000.0] {
-        let output = gpu
-            .run(
-                &kernels::branch_only(limits.subgroup_size, threshold).expect("built"),
-                &input,
-                1,
-            )
-            .expect("dispatched");
+    for spirv in &built {
+        let output = gpu.run(spirv, &input, 1).expect("dispatched");
 
         assert_eq!(
             output, input,

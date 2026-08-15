@@ -7,6 +7,19 @@
 //!
 //! Seeds are fixed, so a failure names the seed that produced it and re-running reproduces it
 //! exactly. `SIMDR_FUZZ_ROUNDS` searches harder.
+//!
+//! # Why the gates here ask for the whole surface
+//!
+//! Every other file asks the *module* what it needs — `common::runnable` reads its `OpCapability`
+//! list, so a gate cannot name the wrong feature. That works because those tests know which kernel
+//! they are about to run. These do not: the program is drawn from a seed, and which capabilities it
+//! declares depends on what the draw produced. Gating per round would skip an unknown subset and
+//! report a coverage number over whatever was left, which is worse than skipping the sweep.
+//!
+//! So `Limits::subgroup_surface` — the union of everything a generated program can reach — is the
+//! honest gate here, and it is the one place in this suite where a union is the right shape.
+//! `shaderSubgroupExtendedTypes` is asked separately for the narrow domains, because no capability
+//! in any module can express it.
 
 mod common;
 

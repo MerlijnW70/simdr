@@ -7,7 +7,7 @@
 
 mod common;
 
-use common::{device, grouped_sums, ramp};
+use common::{device, grouped_sums, ramp, runnable};
 use runner::kernels::{self, WORKGROUP_SIZE};
 use simdr::lanes::{F32, U32};
 
@@ -24,8 +24,11 @@ fn a_workgroup_reduction_crosses_between_subgroups() {
     };
     let limits = gpu.limits().clone();
 
-    if !limits.subgroup_arithmetic {
-        eprintln!("SKIPPED workgroup-sum: no subgroup arithmetic reported");
+    // **Both modules, and gated on what they declare rather than on a bit chosen here.** This test
+    // dispatches two kernels; a gate that named one of them would be a gate the other walked past.
+    let workgroup = kernels::workgroup_sum::<F32>(limits.subgroup_size).expect("built");
+    let per_subgroup = kernels::reduce::lane_sum_whole::<F32>(limits.subgroup_size).expect("built");
+    if !runnable(&gpu, "workgroup-sum", &[&workgroup, &per_subgroup]) {
         return;
     }
 
@@ -33,13 +36,7 @@ fn a_workgroup_reduction_crosses_between_subgroups() {
     let input = ramp(count);
     let whole: f32 = input.iter().sum();
 
-    let output = gpu
-        .run(
-            &kernels::workgroup_sum::<F32>(limits.subgroup_size).expect("built"),
-            &input,
-            1,
-        )
-        .expect("dispatched");
+    let output = gpu.run(&workgroup, &input, 1).expect("dispatched");
 
     assert_eq!(
         output,
@@ -55,13 +52,7 @@ fn a_workgroup_reduction_crosses_between_subgroups() {
     // spelling read eight times this buffer — and it read a *different input* than the workgroup
     // sum above, which is not the comparison this test claims to be making. It passed anyway,
     // because the first 64 elements were right and the rest was off the end.
-    let per_subgroup = gpu
-        .run(
-            &kernels::reduce::lane_sum_whole::<F32>(limits.subgroup_size).expect("built"),
-            &input,
-            1,
-        )
-        .expect("dispatched");
+    let per_subgroup = gpu.run(&per_subgroup, &input, 1).expect("dispatched");
     // **Whether they should differ depends on the device.** A workgroup holds
     // `WORKGROUP_SIZE / width` subgroups, and on a 64-wide one that is exactly one — so there is
     // nothing to cross between, and the two reductions are the same reduction. Asserting they
@@ -88,8 +79,8 @@ fn a_workgroup_reduction_is_exact_over_integers() {
     };
     let limits = gpu.limits().clone();
 
-    if !limits.subgroup_arithmetic {
-        eprintln!("SKIPPED workgroup-sum-u32: no subgroup arithmetic reported");
+    let spirv = kernels::workgroup_sum::<U32>(limits.subgroup_size).expect("built");
+    if !runnable(&gpu, "workgroup-sum-u32", &[&spirv]) {
         return;
     }
 
@@ -97,13 +88,7 @@ fn a_workgroup_reduction_is_exact_over_integers() {
     let input: Vec<u32> = (0..count as u32).map(|index| index * 3 + 1).collect();
     let whole: u32 = input.iter().sum();
 
-    let output = gpu
-        .run_u32(
-            &kernels::workgroup_sum::<U32>(limits.subgroup_size).expect("built"),
-            &input,
-            1,
-        )
-        .expect("dispatched");
+    let output = gpu.run_u32(&spirv, &input, 1).expect("dispatched");
 
     assert_eq!(output, vec![whole; count]);
 }
@@ -131,18 +116,16 @@ fn the_lane_api_reduces_over_exactly_the_lanes_its_width_names() {
     };
     let limits = gpu.limits().clone();
 
-    if !limits.subgroup_arithmetic || !limits.subgroup_clustered {
-        eprintln!("SKIPPED lane-sum: the device lacks clustered subgroup arithmetic");
-        return;
-    }
-
     let width = limits.subgroup_size;
     let count = WORKGROUP_SIZE as usize;
     let input = ramp(count);
 
-    let mut runs: Vec<(u32, Vec<f32>)> = Vec::new();
+    // Every module first, then one gate over all of them. Built before the loop because the check
+    // is about what this device can run, and a test that discovered that half way through would
+    // have already asserted on the half it ran.
+    let mut built: Vec<(u32, Vec<u32>)> = Vec::new();
     for size in [2_u32, 4, 8, width] {
-        if size > width || runs.iter().any(|(had, _)| *had == size) {
+        if size > width || built.iter().any(|(had, _)| *had == size) {
             continue;
         }
 
@@ -155,8 +138,18 @@ fn the_lane_api_reduces_over_exactly_the_lanes_its_width_names() {
             _ => kernels::lane_sum_whole::<F32>(width),
         }
         .expect("built");
+        built.push((size, spirv));
+    }
 
-        let output = gpu.run(&spirv, &input, 1).expect("dispatched");
+    let modules: Vec<&[u32]> = built.iter().map(|(_, spirv)| spirv.as_slice()).collect();
+    if !runnable(&gpu, "lane-sum", &modules) {
+        return;
+    }
+
+    let mut runs: Vec<(u32, Vec<f32>)> = Vec::new();
+    for (size, spirv) in &built {
+        let size = *size;
+        let output = gpu.run(spirv, &input, 1).expect("dispatched");
         assert_eq!(
             output,
             grouped_sums(count, size as usize),
@@ -194,11 +187,6 @@ fn a_strip_mined_vector_reduces_over_more_elements_than_there_are_lanes() {
     };
     let limits = gpu.limits().clone();
 
-    if !limits.subgroup_arithmetic {
-        eprintln!("SKIPPED strip-mined: no subgroup arithmetic");
-        return;
-    }
-
     let width = limits.subgroup_size as usize;
     let strips = 2_usize;
     let stride = WORKGROUP_SIZE as usize;
@@ -213,6 +201,9 @@ fn a_strip_mined_vector_reduces_over_more_elements_than_there_are_lanes() {
             return;
         }
     };
+    if !runnable(&gpu, "strip-mined", &[&spirv]) {
+        return;
+    }
 
     let output = gpu.run(&spirv, &input, 1).expect("dispatched");
 
@@ -248,11 +239,6 @@ fn a_second_workgroup_reads_its_own_run_rather_than_the_first_ones() {
     };
     let limits = gpu.limits().clone();
 
-    if !limits.subgroup_arithmetic {
-        eprintln!("SKIPPED two-workgroups: no subgroup arithmetic");
-        return;
-    }
-
     let width = limits.subgroup_size as usize;
     let groups = 2_usize;
     let count = WORKGROUP_SIZE as usize * groups;
@@ -266,6 +252,9 @@ fn a_second_workgroup_reads_its_own_run_rather_than_the_first_ones() {
             return;
         }
     };
+    if !runnable(&gpu, "two-workgroups", &[&spirv]) {
+        return;
+    }
 
     let output = gpu.run(&spirv, &input, groups as u32).expect("dispatched");
 
@@ -290,11 +279,6 @@ fn an_integer_reduction_uses_the_integer_instruction_and_still_adds_up() {
     };
     let limits = gpu.limits().clone();
 
-    if !limits.subgroup_arithmetic {
-        eprintln!("SKIPPED integer-sum: no subgroup arithmetic");
-        return;
-    }
-
     let width = limits.subgroup_size as usize;
     let count = WORKGROUP_SIZE as usize;
     let input: Vec<u32> = (0..count as u32).collect();
@@ -307,6 +291,9 @@ fn an_integer_reduction_uses_the_integer_instruction_and_still_adds_up() {
             return;
         }
     };
+    if !runnable(&gpu, "integer-sum", &[&spirv]) {
+        return;
+    }
 
     let output = gpu.run_u32(&spirv, &input, 1).expect("dispatched");
 
@@ -328,24 +315,18 @@ fn a_maximum_reduction_finds_the_largest_element_in_each_group() {
     };
     let limits = gpu.limits().clone();
 
-    if !limits.subgroup_arithmetic || !limits.subgroup_clustered {
-        eprintln!("SKIPPED lane-max: the device lacks clustered subgroup arithmetic");
-        return;
-    }
-
     let width = limits.subgroup_size;
     let count = WORKGROUP_SIZE as usize;
     let input = ramp(count);
 
     // Four, which is a divisor of every subgroup width a Vulkan implementation is known to report
     // — so it is a cluster everywhere and this row runs on every device.
-    let four = gpu
-        .run(
-            &kernels::lane_max::<F32, 4>(width).expect("built"),
-            &input,
-            1,
-        )
-        .expect("dispatched");
+    let clusters_of_four = kernels::lane_max::<F32, 4>(width).expect("built");
+    if !runnable(&gpu, "lane-max", &[&clusters_of_four]) {
+        return;
+    }
+
+    let four = gpu.run(&clusters_of_four, &input, 1).expect("dispatched");
     let expected: Vec<f32> = (0..count).map(|lane| (lane / 4 * 4 + 3) as f32).collect();
     assert_eq!(four, expected, "clusters of four");
 

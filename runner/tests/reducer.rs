@@ -11,6 +11,16 @@
 //! tests here run *different* inputs through one reducer and compare each against its own answer,
 //! rather than running the same input twice and finding it stable.
 
+//! # Why the gates here name a feature bit by hand
+//!
+//! Every other file in this suite asks the *module* what it needs — `common::runnable` reads the
+//! `OpCapability` list out of it, so a kernel that starts needing something new brings its own gate.
+//! A `Reducer` builds its modules **inside itself**, from a length rather than from a caller's
+//! SPIR-V, so there is nothing here to ask. Naming `subgroup_arithmetic` is the only option, and it
+//! is a limitation of the type's shape rather than a choice made here.
+//!
+//! The same is true of `scan.rs`'s `Scanner` and of the two held cases in `bounds.rs`.
+
 mod common;
 
 use common::device;

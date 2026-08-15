@@ -2752,3 +2752,58 @@ somebody has to keep, and the grep re-derives it from the tree every time.
 
 **An operation with no consumer is not dead code. It is untested code that reads as dead**, and the
 two are the same thing right up until somebody calls it.
+
+## Sixty-one gates that named a feature by hand — 2026-08-15
+
+`Limits::unsupported_in` was built on 2026-08-14 for one reason: three kernels using **votes** were
+gated on the **ballot**, which is a different capability and a different feature bit. It reads the
+requirement out of a module's own `OpCapability` list, so a gate cannot name the wrong feature.
+
+It was used in one assertion test and **zero gates**. The 61 hand-picked gates it was written to
+replace were all still there.
+
+Not a stylistic point. Five of them were **under-specified**, in the same shape as the bug that
+prompted the tool:
+
+| where | gated on | the kernel also needs |
+| --- | --- | --- |
+| `control.rs` ×3 | `subgroup_arithmetic` | `GroupNonUniformVote` — `scale_if_any_above`, `branch_only` |
+| `loops.rs` ×2 | `subgroup_arithmetic` | `GroupNonUniformVote` — `sum_or_max` |
+| `execution.rs` | `subgroup_arithmetic` | the same, and its message already said "vote" |
+
+On a device with arithmetic and no vote, those would have run and failed at pipeline creation
+instead of skipping. All three implementations here offer both, which is why it survived — the same
+sentence the ballot bug earned.
+
+And one over-specified, which fails the other way. `unrun.rs::ready` gated on
+`subgroup_surface() && subgroup_ballot` — the union of everything *any* kernel in that file reaches
+— so a device missing one feature skipped **every** test in the file, including the ones that never
+touch it. That is lost coverage, and it is silent.
+
+47 sites now call `common::runnable`, which asks each module. Three exceptions remain, each with the
+reason written where it is:
+
+- **`Reducer` and `Scanner` build their modules inside themselves**, from a length rather than from
+  a caller's SPIR-V, so there is nothing to ask. `reducer.rs`, `reduction.rs`, `scan.rs` and two
+  cases in `bounds.rs`.
+- **The fuzzer does not know what it is about to generate.** A program's capabilities depend on the
+  draw, so `subgroup_surface` — the union — is the honest gate there, and the one place a union is
+  the right shape.
+- **`shaderSubgroupExtendedTypes` has no capability at all.** A device may accept
+  `OpGroupNonUniformIAdd` on a 32-bit integer and refuse it on an 8-bit one with nothing in the
+  SPIR-V to say so, so `narrow.rs` and `fuzzing.rs` ask `Narrow` by hand for that one.
+
+### The verification found a hole in the verification
+
+Checking the change meant checking that no test had *started* skipping — and every run in this
+session had been counting `SKIPPED` lines out of captured output. **libtest swallows `eprintln!`
+from a passing test.** Every "skips: 0" measured nothing at all.
+
+With `--nocapture`, the real numbers: **0 skips at width 32, 17 at 64, 25 at 4** — and every one of
+them a *width-shape* reason ("written for a 32-wide subgroup", "no case written for a subgroup of
+4") or the known AMD clustered-ladder fault. **Not one capability-reason skip on any of the three**,
+which is what a correct conversion looks like on devices that offer the whole surface.
+
+The project's own rule is that a skipped correctness test which looks green is worse than a red one.
+It turns out the check for that had the same shape as the thing it was checking: a number that read
+as evidence and was produced by a pipe that could not carry it.
