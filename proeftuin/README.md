@@ -49,15 +49,22 @@ an exact reference**, which is why the first tool here is a neural-network layer
 `notes/CLAIMS.md` ends with the class nothing covers: claims about the outside world. Two measured
 holes sit inside it.
 
-* **Narrow types are validated far more widely than they are run.** As of 2026-08-15,
-  `tests/instructions.rs` hands 65 modules to `spirv-val` — five types across five widths and all
-  three mappings. On a *device*, narrow elements reach exactly three operations: `add`, `reduce_sum`
-  and `clamp`, through `kernels::narrow`. Validation says a module is legal. Only execution says it
-  computes the right number.
 * **The packed dot products are fuzzed by nothing.** `dot_signed`, `dot_unsigned`, `dot_mixed` and
-  `dot_signed_saturating` are absent from the fuzzer's vocabulary, and `OpUDot` is the instruction
-  that shipped **invalid** — correct on two devices for weeks, caught by the first `spirv-val` run
-  against it. Being valid now says nothing about being right.
+  `dot_signed_saturating` are absent from the fuzzer's vocabulary, and every kernel that uses one is
+  built through `whole_subgroup!` — so they had only ever run as **whole-subgroup vectors**, never
+  clustered and never strip-mined. `OpUDot` is the instruction that shipped **invalid**: correct on
+  two devices for weeks, caught by the first `spirv-val` run against it. Being valid now says
+  nothing about being right, and being right at one mapping says nothing about the other two.
+* **The four differ only where it hides.** `OpSDot` and `OpUDot` agree on every byte with its top
+  bit clear; `OpSUDot` agrees with both wherever the weights happen to be positive; and
+  `OpSDotAccSat` differs from `OpSDot` *only at the overflow*. A corpus of small values proves one
+  instruction and reads as proving four.
+
+An earlier version of this section claimed narrow types "reach exactly three operations on a
+device". That is true of `kernels::narrow` and **false of the tree** — the fuzzer has `Byte`,
+`UnsignedByte`, `Short` and `UnsignedShort` among its domains and dispatches them through
+`Gpu::run_bytes` and `run_halves`, so its whole vocabulary runs at 8 and 16 bits. Narrow *execution*
+was never the gap. `notes/CLAIMS.md` carries the correction.
 
 A quantised layer is both at once: `u8` activations, `i8` weights, four of them packed to a word,
 accumulated in `i32`. Its answer is an integer, so the reference is exact rather than approximate,

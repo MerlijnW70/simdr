@@ -58,6 +58,63 @@ impl Checked {
     }
 }
 
+/// Which packed dot product the layer uses.
+///
+/// **All four, because they differ in exactly the way that hides.** `OpSDot` and `OpUDot` agree on
+/// every byte with its top bit clear, and `OpSUDot` agrees with both when the weights happen to be
+/// positive — so a corpus of small values proves one instruction and reads as proving three. That
+/// is the shape `OpUDot` was invalid in: correct on two devices for weeks, with a signed result
+/// type, until the first `spirv-val` run against it.
+///
+/// The saturating one differs from `OpSDot` **only at the overflow**, which is the sharpest version
+/// of the same trap: an accumulator nowhere near the limit makes the two indistinguishable. So the
+/// accumulator here starts near `i32::MAX` on purpose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dot {
+    /// `OpSDot` — both operands signed bytes.
+    Signed,
+    /// `OpUDot` — both unsigned.
+    Unsigned,
+    /// `OpSUDot` — signed weights against unsigned activations, which is what a quantised layer is.
+    Mixed,
+    /// `OpSDotAccSat` — signed, accumulating with saturation.
+    SignedSaturating,
+}
+
+impl Dot {
+    /// The four, in a fixed order so a report reads the same twice.
+    pub const ALL: [Self; 4] = [
+        Self::Signed,
+        Self::Unsigned,
+        Self::Mixed,
+        Self::SignedSaturating,
+    ];
+
+    /// How this spells in a report.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Signed => "OpSDot",
+            Self::Unsigned => "OpUDot",
+            Self::Mixed => "OpSUDot",
+            Self::SignedSaturating => "OpSDotAccSat",
+        }
+    }
+}
+
+/// Where the saturating accumulator starts.
+///
+/// **Chosen by measuring, and the first choice was nearly useless.** Four signed byte products sum
+/// to roughly ±65 000, so an accumulator at `i32::MAX - 40_000` only saturates on the top of that
+/// range: swapping the reference's `saturating_add` for a `wrapping_add` — which is exactly the
+/// mistake the instruction exists to prevent — disagreed on **one seed in thirty-two** for one
+/// mapping and on none at all for the other two.
+///
+/// A thousand from the ceiling saturates whenever the products are positive, which is about half
+/// the lanes, so both sides of the saturation are reached every seed. An instruction that differs
+/// only at the overflow is only tested at the overflow.
+pub const ACCUMULATOR: i32 = i32::MAX - 1_000;
+
 /// A quantised layer: `Σ w[j] × a[j]`, four products to a word, reduced across the vector.
 ///
 /// Binding 0 holds the weights and then the activations, so one buffer carries both operands and
@@ -70,25 +127,46 @@ impl Checked {
 /// # Errors
 ///
 /// [`LaneError`] if `LANES` has no mapping onto this subgroup, or the module cannot be built.
-pub fn layer<const LANES: u32>(subgroup: u32, offset: u32) -> Result<Vec<u32>, LaneError> {
+pub fn layer<const LANES: u32>(
+    kind: Dot,
+    subgroup: u32,
+    offset: u32,
+) -> Result<Vec<u32>, LaneError> {
     let mut kernel = Kernel::<U32>::new(Shape::new(subgroup, WORKGROUP, 2))?;
     let weights = kernel.load::<LANES>(0)?;
     let activations = kernel.load_offset::<LANES>(0, offset)?;
 
     let total = {
         let mut lanes = kernel.lanes()?;
-        let products = lanes.dot_mixed(weights, activations)?;
 
-        // **`reinterpret`, and the first version of this had it missing.** A packed dot answers with
-        // an `i32` and this kernel's buffer holds `u32`, so the store was a type mismatch — invalid
-        // SPIR-V. An RTX 4080 and an integrated Radeon ran it 192 times each and agreed with the
-        // reference every time; lavapipe refused the module with `ERROR_UNKNOWN` and said nothing
-        // about why. That is `OpUDot`'s story with the parts in the same order.
-        let products = lanes.reinterpret(products)?;
+        // **`reinterpret`, and the first version of this had it missing.** Three of the four answer
+        // with an `i32` and this kernel's buffer holds `u32`, so the store was a type mismatch —
+        // invalid SPIR-V. An RTX 4080 and an integrated Radeon ran it 192 times each and agreed
+        // with the reference every time; lavapipe refused the module with `ERROR_UNKNOWN` and said
+        // nothing about why. That is `OpUDot`'s story with the parts in the same order.
+        //
+        // `OpUDot` answers with a `u32` and needs none, which is the asymmetry the bug lived in.
+        let packed = match kind {
+            Dot::Signed => {
+                let products = lanes.dot_signed(weights, activations)?;
+                lanes.reinterpret(products)?
+            }
+            Dot::Unsigned => lanes.dot_unsigned(weights, activations)?,
+            Dot::Mixed => {
+                let products = lanes.dot_mixed(weights, activations)?;
+                lanes.reinterpret(products)?
+            }
+            Dot::SignedSaturating => {
+                let carried = lanes.splat_bits::<simdr::lanes::I32, LANES>(ACCUMULATOR as u32)?;
+                let products = lanes.dot_signed_saturating(weights, activations, carried)?;
+                lanes.reinterpret(products)?
+            }
+        };
 
         // The reduction is what makes the mapping visible: whole-subgroup it is one instruction,
-        // clustered it folds inside the cluster, and strip-mined it folds the strips first.
-        lanes.reduce_sum(products)?
+        // clustered it folds inside the cluster, and strip-mined it folds the strips first. It runs
+        // on the `u32` bits in every case, so the reference below folds one way rather than four.
+        lanes.reduce_sum(packed)?
     };
 
     kernel.store_scalar(1, total)?;
@@ -105,50 +183,80 @@ pub fn layer<const LANES: u32>(subgroup: u32, offset: u32) -> Result<Vec<u32>, L
 /// workgroup holds elements `i`, `i + workgroup`, `i + 2·workgroup`, and the vector it belongs to is
 /// `min(lanes, width)` invocations wide.
 #[must_use]
-pub fn reference(input: &[u32], offset: usize, width: u32, lanes: u32, strips: u32) -> Vec<u32> {
+pub fn reference(
+    kind: Dot,
+    input: &[u32],
+    offset: usize,
+    width: u32,
+    lanes: u32,
+    strips: u32,
+) -> Vec<u32> {
     let invocations = WORKGROUP as usize;
     let vector = (lanes.min(width) as usize).max(1);
 
-    // Step one: each invocation's own total, over its strips and the four bytes in each word.
-    let mine: Vec<i32> = (0..invocations)
+    // Step one: each invocation's own total, over its strips. The dot is *per strip* — the emitter
+    // zips the strips of both operands and the accumulator — so a saturating one saturates once per
+    // strip rather than once per lane, and folding the strips first would hide that.
+    let mine: Vec<u32> = (0..invocations)
         .map(|invocation| {
             (0..strips as usize)
                 .map(|strip| {
                     let at = invocation + strip * invocations;
                     let weights = input.get(at).copied().unwrap_or(0);
                     let activations = input.get(offset + at).copied().unwrap_or(0);
-                    packed_products(weights, activations)
+                    packed_products(kind, weights, activations)
                 })
-                .fold(0_i32, i32::wrapping_add)
+                .fold(0_u32, u32::wrapping_add)
         })
         .collect();
 
-    // Step two: the fold across the vector the mapping describes.
+    // Step two: the fold across the vector the mapping describes, on the `u32` bits — which is what
+    // the kernel reduces, whatever the dot answered with.
     (0..invocations)
         .map(|invocation| {
             let base = invocation / vector * vector;
             mine[base..(base + vector).min(invocations)]
                 .iter()
-                .fold(0_i32, |carried, &value| carried.wrapping_add(value))
-                as u32
+                .fold(0_u32, |carried, &value| carried.wrapping_add(value))
         })
         .collect()
 }
 
-/// `Σ` of four signed weights times four unsigned activations, from one word of each.
+/// One word of each operand, through one of the four dot products, as the `u32` bits it stores as.
 ///
-/// The byte order is the little-endian one SPIR-V's packed dot products define: component zero is
-/// the low byte. Getting that backwards is a wrong answer that looks plausible, and it is the only
-/// thing in this reference that is a *choice* rather than arithmetic.
+/// The byte order is the little-endian one SPIR-V's packed formats define: component zero is the
+/// low byte. Getting that backwards is a wrong answer that looks plausible, and it is the only
+/// thing in this reference that is a *choice* rather than arithmetic — so reversing it is the check
+/// that this file can disagree at all.
 #[must_use]
-pub fn packed_products(weights: u32, activations: u32) -> i32 {
-    (0..4)
-        .map(|byte| {
-            let weight = i32::from(((weights >> (byte * 8)) & 0xff) as u8 as i8);
-            let activation = i32::from(((activations >> (byte * 8)) & 0xff) as u8);
-            weight.wrapping_mul(activation)
-        })
-        .fold(0_i32, i32::wrapping_add)
+pub fn packed_products(kind: Dot, weights: u32, activations: u32) -> u32 {
+    let byte = |word: u32, index: u32| ((word >> (index * 8)) & 0xff) as u8;
+
+    match kind {
+        Dot::Unsigned => (0..4).fold(0_u32, |carried, index| {
+            let product = u32::from(byte(weights, index)) * u32::from(byte(activations, index));
+            carried.wrapping_add(product)
+        }),
+        Dot::Signed | Dot::Mixed | Dot::SignedSaturating => {
+            let products = (0..4).fold(0_i32, |carried, index| {
+                let weight = i32::from(byte(weights, index) as i8);
+                // The one difference between `OpSDot` and `OpSUDot`, and it only shows where the
+                // second operand's top bit is set: −1 or 255.
+                let activation = match kind {
+                    Dot::Mixed => i32::from(byte(activations, index)),
+                    _ => i32::from(byte(activations, index) as i8),
+                };
+                carried.wrapping_add(weight.wrapping_mul(activation))
+            });
+
+            match kind {
+                // Saturating, not wrapping: the whole point of the instruction, and invisible
+                // unless the accumulator is near the ceiling — which is why `ACCUMULATOR` is.
+                Dot::SignedSaturating => ACCUMULATOR.saturating_add(products) as u32,
+                _ => products as u32,
+            }
+        }
+    }
 }
 
 /// What one attempt at a mapping came to.
@@ -184,12 +292,17 @@ pub enum Outcome {
 }
 
 /// Build the layer at `LANES`, run it, and compare against [`reference`].
-pub fn check<const LANES: u32>(gpu: &Gpu, mapping: &'static str, seed: u64) -> Outcome {
+pub fn check<const LANES: u32>(
+    gpu: &Gpu,
+    kind: Dot,
+    mapping: &'static str,
+    seed: u64,
+) -> Outcome {
     let width = gpu.limits().subgroup_size;
     let strips = (LANES / width.max(1)).max(1);
     let per_operand = WORKGROUP as usize * strips as usize;
 
-    let spirv = match layer::<LANES>(width, per_operand as u32) {
+    let spirv = match layer::<LANES>(kind, width, per_operand as u32) {
         Ok(spirv) => spirv,
         Err(refused) => return Outcome::Refused(refused),
     };
@@ -215,7 +328,7 @@ pub fn check<const LANES: u32>(gpu: &Gpu, mapping: &'static str, seed: u64) -> O
         Ok(actual) => actual,
         Err(error) => return Outcome::Errored(error),
     };
-    let expected = reference(&input, per_operand, width, LANES, strips);
+    let expected = reference(kind, &input, per_operand, width, LANES, strips);
 
     Outcome::Ran(Checked {
         mapping,

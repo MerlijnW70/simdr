@@ -1,4 +1,4 @@
-﻿//! SIMD on the GPU: portable-SIMD semantics lowered onto SPIR-V subgroup operations.
+//! SIMD on the GPU: portable-SIMD semantics lowered onto SPIR-V subgroup operations.
 //!
 //! A `Simd<T, N>` is a vector of `N` lanes, and a GPU subgroup is a vector unit of 32 or 64
 //! lanes. This crate emits the SPIR-V that makes those the same thing.

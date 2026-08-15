@@ -172,6 +172,17 @@ votes and the scans all accept a narrow element and were validated at 32 bits an
 while narrow is where SPIR-V is fussiest, since the group opcodes differ between the signed and
 unsigned forms of one width and `shaderSubgroupExtendedTypes` is a permission no module can declare.
 
+> **Correction, 2026-08-15.** An earlier version of this paragraph said narrow types "reach exactly
+> three operations on a device". That is true of `kernels::narrow` and **false of the tree**. The
+> differential fuzzer has `Byte`, `UnsignedByte`, `Short` and `UnsignedShort` among its domains and
+> dispatches them through `Gpu::run_bytes` and `run_halves` — so its whole vocabulary, nineteen
+> operations across all three mappings, runs at 8 and 16 bits for 256 seeds a domain on every
+> device. Narrow *execution* was never the gap; narrow **validation** was, and that is what the 65
+> modules closed.
+>
+> The claim was about `kernels::narrow` and got stated about the tree. Which is this document's own
+> subject, arriving in this document.
+
 `the_lane_surface_is_valid_for_every_narrow_integer` fills that grid — **65 modules**: five types
 across five widths and all three mappings, because a width is not a parameter to these instructions,
 it *chooses the instruction sequence*. The same `butterfly` call is one shuffle whole-subgroup, a
