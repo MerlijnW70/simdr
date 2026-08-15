@@ -11,6 +11,7 @@ mod coverage;
 use self::vocabulary::{CLUSTERED, Kind, STRIPPED, WHOLE, fill};
 use super::domain::Domain;
 use super::program::{Finish, Program};
+use simdr::lanes::{LaneError, Mapping};
 
 /// A small deterministic generator.
 ///
@@ -61,14 +62,25 @@ pub fn generate(rng: &mut Rng, domain: Domain, subgroup: u32, workgroup: u32) ->
     // **Three pools rather than two**, since the rotate arrived: the mapping is a three-way choice
     // and it used to be asked as a yes-or-no. `lanes == subgroup` was the case that had no name.
     //
-    // And it is asked **once**. The pool became a three-way choice and the finish stayed a
-    // yes-or-no beside it, so the same relationship was written twice — which the mutation gate
-    // found by flipping the second one: see [`shape_of`].
-    let shape = shape_of(lanes, subgroup);
-    let pool = match shape {
-        Shape::Clustered => CLUSTERED,
-        Shape::Whole => WHOLE,
-        Shape::Stripped => STRIPPED,
+    // And it is asked **once, of the emitter**. This decided the same relationship twice — the pool
+    // three ways and the finish as a yes-or-no beside it — and the mutation gate found the second
+    // copy. Merging them left one comparison here, which was still a *third* spelling of a rule
+    // `simdr::lanes::Mapping` already owned, and not the same rule: `lanes < subgroup` calls a
+    // three-lane vector on a 32-wide subgroup clustered, where divisibility refuses it.
+    //
+    // So the generator asks the crate under test what the mapping is. A refusal means the draw has
+    // no mapping at all, and the pool for that is empty — `build` would refuse it too, so the
+    // generator would only be making a round that proves nothing.
+    let mapping = Mapping::of(lanes, subgroup);
+    let pool = match mapping {
+        Ok(Mapping::Clusters { .. }) => CLUSTERED,
+        Ok(Mapping::WholeSubgroup) => WHOLE,
+        // A vector too wide to hold inline is a strip-mined one that `build` then refuses **by
+        // name**, which the sweeps count and print rather than hide — 32 of 256 rounds at a
+        // four-wide subgroup, all of them `TooManyStrips`. Both widths here are powers of two, so
+        // that is the only refusal `Mapping::of` can return, and dropping the round instead would
+        // quietly narrow the sweep at exactly the width that needs it most.
+        Ok(Mapping::Strips { .. }) | Err(_) => STRIPPED,
     };
     let mut steps = Vec::with_capacity(steps_wanted);
 
@@ -91,40 +103,7 @@ pub fn generate(rng: &mut Rng, domain: Domain, subgroup: u32, workgroup: u32) ->
         groups: 1 + rng.below(2) as u32,
         lanes,
         steps,
-        finish: finish(rng, domain, shape),
-    }
-}
-
-/// Which of the three mappings a vector of `lanes` has on a `subgroup`-wide device.
-///
-/// Named rather than described by a pair of comparisons, because two places need it and they were
-/// asking separately: the pool as a three-way choice and the finish as a yes-or-no beside it.
-///
-/// **The mutation gate found the second.** Flipping its `lanes < subgroup` to `<=` tells a
-/// *whole-subgroup* program that it is clustered, which withholds [`Finish::SumOrMax`] from it — the
-/// only finish that carries a value out of a branch through an `OpPhi`, and the failure mode this
-/// module's header says no other layer here catches. Every test passed: the programs still built,
-/// still ran and still agreed, with the phi coverage of the commonest mapping silently gone.
-///
-/// One comparison cannot disagree with itself, and the test below pins all three of its edges.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Shape {
-    /// Narrower than the subgroup: several vectors share it.
-    Clustered,
-    /// Exactly the subgroup's width.
-    Whole,
-    /// Wider, so each lane holds several elements.
-    Stripped,
-}
-
-/// [`Shape`] for a vector of `lanes` on a `subgroup`-wide device.
-const fn shape_of(lanes: u32, subgroup: u32) -> Shape {
-    if lanes < subgroup {
-        Shape::Clustered
-    } else if lanes == subgroup {
-        Shape::Whole
-    } else {
-        Shape::Stripped
+        finish: finish(rng, domain, mapping),
     }
 }
 
@@ -139,8 +118,8 @@ const fn shape_of(lanes: u32, subgroup: u32) -> Shape {
 /// reduction instead — and the ladder is the most intricate thing in the tree with the least
 /// differential coverage. It has all three mappings now: an instruction at the width, a carry
 /// between strips above it, and the ladder below.
-fn finish(rng: &mut Rng, domain: Domain, shape: Shape) -> Finish {
-    match rng.below(if matches!(shape, Shape::Clustered) {
+fn finish(rng: &mut Rng, domain: Domain, mapping: Result<Mapping, LaneError>) -> Finish {
+    match rng.below(if matches!(mapping, Ok(Mapping::Clusters { .. })) {
         5
     } else {
         6
@@ -163,19 +142,52 @@ mod tests {
     use crate::fuzz::Op;
 
     #[test]
-    fn the_mapping_boundaries_are_where_they_are_written() {
-        // The two edges, and the case between them that used to have no name. `lanes == subgroup`
-        // is **whole**, not clustered — telling it otherwise costs it a finish and fails nothing,
-        // which is how the yes-or-no spelling of this survived the gate.
-        assert_eq!(shape_of(4, 8), Shape::Clustered);
-        assert_eq!(shape_of(7, 8), Shape::Clustered);
+    fn the_generator_takes_its_mapping_from_the_crate_under_test() {
+        // **The two rules were not the same rule.** This file decided the mapping with
+        // `lanes < subgroup`, and `Mapping::of` decides it by divisibility — so a seven-lane vector
+        // on an eight-wide subgroup was "clustered" here and is *refused* there, and only the
+        // generator drawing powers of two kept them agreeing.
+        //
+        // Asserted rather than assumed, because a fuzzer whose idea of the mapping differs from the
+        // emitter's is a fuzzer generating rounds the emitter will refuse, and counting them.
+        assert_eq!(Mapping::of(4, 8), Ok(Mapping::Clusters { size: 4 }));
         assert_eq!(
-            shape_of(8, 8),
-            Shape::Whole,
+            Mapping::of(8, 8),
+            Ok(Mapping::WholeSubgroup),
             "equal widths are a whole subgroup, not a cluster of the same size"
         );
-        assert_eq!(shape_of(9, 8), Shape::Stripped);
-        assert_eq!(shape_of(16, 8), Shape::Stripped);
+        assert_eq!(Mapping::of(16, 8), Ok(Mapping::Strips { count: 2 }));
+        assert!(
+            Mapping::of(7, 8).is_err(),
+            "a width that neither divides nor multiplies is refused, where a comparison called it \
+             clustered"
+        );
+    }
+
+    #[test]
+    fn every_width_the_generator_draws_reaches_a_pool_the_emitter_agrees_with() {
+        // The pools are chosen from the mapping, so a draw whose mapping this crate refuses would
+        // be generated from the strip pool and then refused by `build`. That is deliberate — the
+        // sweeps count and print those — but it must be the *only* refusal reachable, and it is
+        // reachable only above `MAX_STRIPS`.
+        for subgroup in [4_u32, 8, 16, 32, 64] {
+            for lanes in [2_u32, 4, 8, 16, 32, 64] {
+                match Mapping::of(lanes, subgroup) {
+                    Ok(_) => {}
+                    Err(LaneError::TooManyStrips { .. }) => {
+                        assert!(
+                            lanes > subgroup,
+                            "only a wide vector can have too many strips"
+                        );
+                    }
+                    Err(other) => assert!(
+                        matches!(other, LaneError::TooManyStrips { .. }),
+                        "{lanes} lanes on {subgroup} is refused as {other}, which the pools have \
+                         no arm for"
+                    ),
+                }
+            }
+        }
     }
 
     #[test]

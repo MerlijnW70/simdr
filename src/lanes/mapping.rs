@@ -28,6 +28,61 @@ pub enum Mapping {
     },
 }
 
+impl Mapping {
+    /// How a vector of `lanes` sits on a `subgroup`-wide device.
+    ///
+    /// **The rule, at run time, so that it is written once.** [`Lanes::mapping`] takes the width as
+    /// a const generic — which is what `decisions/DR-0002` is about — and that is right for the
+    /// emitter and unusable for anything holding a width it learned at run time. So the callers
+    /// that could not reach it wrote the rule again: `runner`'s fuzzer decided it with
+    /// `lanes < subgroup`, and `kernels::reduce` with `LANES > subgroup`, and **neither was the
+    /// same rule as this one** — a three-lane vector on a 32-wide subgroup is "clustered" to a
+    /// comparison and refused by divisibility.
+    ///
+    /// The mutation gate found both copies within a week of each other, one of them able to delete
+    /// a whole finish's coverage without failing anything. Copies of a decision do not diverge
+    /// loudly; they diverge in the cases nobody draws.
+    ///
+    /// # Errors
+    ///
+    /// [`LaneError::NoMapping`] when `lanes` neither divides nor is a multiple of the width,
+    /// [`LaneError::TooManyStrips`] when it is a multiple too large to hold inline.
+    pub const fn of(lanes: u32, subgroup: u32) -> Result<Self, LaneError> {
+        let no_mapping = Err(LaneError::NoMapping {
+            lanes,
+            width: subgroup,
+        });
+
+        // Zero has to go first and is load-bearing: every integer is a multiple of nothing, so
+        // without this the strip arm below would happily compute `0 / width` strips.
+        if lanes == 0 || subgroup == 0 {
+            return no_mapping;
+        }
+        if lanes == subgroup {
+            return Ok(Self::WholeSubgroup);
+        }
+
+        // No `lanes < subgroup` here, though that is what this arm means. The equal case is
+        // already gone, so a comparison would be indistinguishable from `<=` — divisibility says
+        // the same thing and says it once.
+        if subgroup.is_multiple_of(lanes) {
+            return Ok(Self::Clusters { size: lanes });
+        }
+        if !lanes.is_multiple_of(subgroup) {
+            return no_mapping;
+        }
+
+        let count = lanes / subgroup;
+        if count as usize > MAX_STRIPS {
+            return Err(LaneError::TooManyStrips {
+                strips: count as usize,
+                limit: MAX_STRIPS,
+            });
+        }
+        Ok(Self::Strips { count })
+    }
+}
+
 impl Lanes<'_> {
     /// How many elements each lane holds for a vector of `LANES`.
     ///
@@ -43,46 +98,16 @@ impl Lanes<'_> {
 
     /// Check that `LANES` can map onto this subgroup, and say how.
     ///
-    /// The single place the mapping is decided, so there is one answer rather than one per
-    /// operation.
+    /// The const-generic face of [`Mapping::of`], which is where the rule lives. Kept as its own
+    /// name because every operation in this crate asks it that way — `decisions/DR-0002` is why the
+    /// width is a const generic here — and because a caller reading `self.mapping::<32>()` should
+    /// not have to know which width it is being compared against.
     ///
     /// # Errors
     ///
-    /// [`LaneError::NoMapping`] when `LANES` neither divides nor is a multiple of the width,
-    /// [`LaneError::TooManyStrips`] when it is a multiple too large to hold inline.
+    /// As [`Mapping::of`].
     pub const fn mapping<const LANES: u32>(&self) -> Result<Mapping, LaneError> {
-        let no_mapping = Err(LaneError::NoMapping {
-            lanes: LANES,
-            width: self.width(),
-        });
-
-        // Zero has to go first and is load-bearing: every integer is a multiple of nothing, so
-        // without this the strip arm below would happily compute `0 / width` strips.
-        if LANES == 0 {
-            return no_mapping;
-        }
-        if LANES == self.width() {
-            return Ok(Mapping::WholeSubgroup);
-        }
-
-        // No `LANES < self.width()` here, though that is what this arm means. The equal case is
-        // already gone, so a comparison would be indistinguishable from `<=` — divisibility says
-        // the same thing and says it once.
-        if self.width().is_multiple_of(LANES) {
-            return Ok(Mapping::Clusters { size: LANES });
-        }
-        if !LANES.is_multiple_of(self.width()) {
-            return no_mapping;
-        }
-
-        let count = LANES / self.width();
-        if count as usize > MAX_STRIPS {
-            return Err(LaneError::TooManyStrips {
-                strips: count as usize,
-                limit: MAX_STRIPS,
-            });
-        }
-        Ok(Mapping::Strips { count })
+        Mapping::of(LANES, self.width())
     }
 }
 

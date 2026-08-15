@@ -6,7 +6,7 @@
 
 use super::{shape, whole_subgroup, whole_subgroup_of};
 use simdr::kernel::Kernel;
-use simdr::lanes::{Element, LaneError};
+use simdr::lanes::{Element, LaneError, Mapping};
 
 /// `out[i] = Simd::<T, LANES>::reduce_sum(in[…])`.
 ///
@@ -312,7 +312,14 @@ pub fn butterfly_cluster_sum(subgroup: u32, cluster: u32) -> Result<Vec<u32>, La
 fn butterfly_cluster_sum_at<const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
     use simdr::lanes::F32;
 
-    if LANES > subgroup {
+    // **Asked of `Mapping` rather than compared here.** A butterfly tree folds inside one subgroup,
+    // so a vector wider than it has no tree to fold — and writing that as `LANES > subgroup` made a
+    // third spelling of a rule the emitter owns. The mutation gate found this one twice over, and
+    // `simdr::lanes::Mapping::of` is where the relationship lives now.
+    if !matches!(
+        Mapping::of(LANES, subgroup),
+        Ok(Mapping::WholeSubgroup | Mapping::Clusters { .. })
+    ) {
         return Err(LaneError::NoMapping {
             lanes: LANES,
             width: subgroup,
