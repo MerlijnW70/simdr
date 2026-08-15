@@ -47,6 +47,8 @@ fn the_generator_reaches_every_operation_it_knows() {
                 Op::SelectEqual { .. } => "equal",
                 Op::RotateUp(_) => "rotate",
                 Op::ShiftUp => "shift",
+                Op::ShiftDown => "shift-down",
+                Op::BroadcastLane(_) => "broadcast",
             };
             if !seen.contains(&name) {
                 seen.push(name);
@@ -61,6 +63,7 @@ fn the_generator_reaches_every_operation_it_knows() {
             "add",
             "agree",
             "branch",
+            "broadcast",
             "butterfly",
             "clamp",
             "clamp-both",
@@ -73,6 +76,7 @@ fn the_generator_reaches_every_operation_it_knows() {
             "rolled",
             "rotate",
             "shift",
+            "shift-down",
         ],
         "the generator never produced some of its own vocabulary in 512 seeds"
     );

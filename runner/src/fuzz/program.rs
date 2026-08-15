@@ -33,6 +33,30 @@ pub enum Op {
     /// keeping: the instruction is emitted, declares its capability, and is proved harmless.
     /// [`Op::RotateUp`] is the shuffle that moves elements and can be checked, because it wraps.
     ShiftUp,
+    /// The same, downwards — `Lanes::shift_down`, which no generated program could reach.
+    ///
+    /// **An asymmetry rather than a decision.** The shift up was here from the beginning and its
+    /// twin was not, so of the two directions the fuzzer proved one instruction emitted, declared
+    /// and harmless and said nothing at all about the other. That is the shape this project keeps
+    /// finding: `reduce_min` folded its strips with a *maximum* and agreed with every hand-written
+    /// test but the strip-mined one.
+    ///
+    /// Zero for the same reason as [`Op::ShiftUp`], and it buys the same thing — no more, and no
+    /// less than the direction beside it had.
+    ShiftDown,
+    /// Replace every element of a vector by the one at position `source` of that vector.
+    ///
+    /// The cross-lane operation nothing generated could reach, and the one whose answer is *fully
+    /// determined*: unlike a shift, every lane reads a lane that exists, so the reference predicts
+    /// it exactly rather than steering around an undefined edge.
+    ///
+    /// It is also the operation whose mapping does the most work. A whole-subgroup vector reads
+    /// lane `source` of the subgroup; a **clustered** one reads position `source` of its own
+    /// cluster, which is a different lane for every cluster and needs the invocation's own index —
+    /// `decisions/DR-0007`; and a strip-mined one does it per strip. A reference that read
+    /// `source` as a subgroup lane would agree with all three for the first cluster of every
+    /// subgroup, which is exactly how a wrong mapping survives hand-written tests.
+    BroadcastLane(u32),
     /// Keep the element where it exceeds a constant, otherwise substitute that constant.
     ///
     /// The *core* spelling of a lower bound: a comparison and a select. [`Op::MaxConstant`] is the

@@ -29,7 +29,9 @@ pub(super) fn apply<T: Element, const LANES: u32>(
             lanes.add(value, neighbour)
         }
         Op::ShiftUp => lanes.shift_up(value, 0),
+        Op::ShiftDown => lanes.shift_down(value, 0),
         Op::RotateUp(delta) => lanes.rotate_up(value, delta),
+        Op::BroadcastLane(source) => lanes.broadcast(value, source),
         Op::ClampBelow(floor) => {
             let limit = lanes.splat_bits::<T, LANES>(domain.encode(floor))?;
             let above = lanes.greater_than(value, limit)?;

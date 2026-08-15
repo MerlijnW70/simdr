@@ -34,6 +34,8 @@ pub(super) enum Kind {
     SelectEqual,
     RotateUp,
     ShiftUp,
+    ShiftDown,
+    BroadcastLane,
 }
 
 /// What a vector **narrower** than the subgroup may do.
@@ -53,6 +55,7 @@ pub(super) const CLUSTERED: &[Kind] = &[
     Kind::RolledCounterAdd,
     Kind::SelectEqual,
     Kind::RotateUp,
+    Kind::BroadcastLane,
 ];
 
 /// What a vector **exactly the subgroup's width** may do: all of it.
@@ -76,6 +79,8 @@ pub(super) const WHOLE: &[Kind] = &[
     Kind::AddIfAnyAbove,
     Kind::AddIfAllEqual,
     Kind::ShiftUp,
+    Kind::ShiftDown,
+    Kind::BroadcastLane,
 ];
 
 /// What a **strip-mined** vector may do: everything but the rotate.
@@ -99,6 +104,8 @@ pub(super) const STRIPPED: &[Kind] = &[
     Kind::AddIfAnyAbove,
     Kind::AddIfAllEqual,
     Kind::ShiftUp,
+    Kind::ShiftDown,
+    Kind::BroadcastLane,
 ];
 
 /// Draw the operands for `kind`.
@@ -106,7 +113,14 @@ pub(super) const STRIPPED: &[Kind] = &[
 /// Loop trip counts and constants stay small: a rolled loop of four is the same shape as one of
 /// four hundred — four blocks and two phis — and the short one leaves every sum well inside the
 /// float domain's exactly-representable range, which is what lets the comparison be exact at all.
-pub(super) fn fill(rng: &mut Rng, domain: Domain, subgroup: u32, kind: Kind) -> Op {
+///
+/// **`lanes` as well as `subgroup`, because they are different bounds.** A butterfly's mask has to
+/// stay inside the *subgroup* — a lane XOR'd past its last one is undefined. A broadcast's position
+/// has to stay inside the *vector*, which for a clustered one is narrower, and `Lanes::broadcast`
+/// refuses a position outside it by name. Drawing both from the subgroup would make a third of the
+/// clustered rounds refusals, and "a run made mostly of refusals tests very little" is the argument
+/// the pools below are built on.
+pub(super) fn fill(rng: &mut Rng, domain: Domain, subgroup: u32, lanes: u32, kind: Kind) -> Op {
     match kind {
         Kind::AddConstant => Op::AddConstant(rng.below(16) as u32),
         Kind::MulConstant => Op::MulConstant(1 + rng.below(3) as u32),
@@ -173,6 +187,14 @@ pub(super) fn fill(rng: &mut Rng, domain: Domain, subgroup: u32, kind: Kind) -> 
         // and SPIR-V leaves those undefined, so the operation carries no distance at all — it is
         // the identity, and it exists to prove the instruction is emitted and harmless.
         Kind::ShiftUp => Op::ShiftUp,
+        Kind::ShiftDown => Op::ShiftDown,
+        // Inside the vector rather than the subgroup: a clustered vector is narrower than the
+        // subgroup and `Lanes::broadcast` refuses a position past its own width by name. Every
+        // position is drawn, zero included — a broadcast of position zero is not the identity and
+        // a reference that returned the values unchanged would be caught by it.
+        Kind::BroadcastLane => {
+            Op::BroadcastLane(rng.below(u64::from(lanes.min(subgroup).max(1))) as u32)
+        }
     }
 }
 
@@ -203,7 +225,7 @@ mod tests {
     /// list to keep true. What keeps *this* one honest is the test below — a `Kind` missing from it
     /// is a `Kind` in no pool, and a `Kind` in no pool is an operation the generator can never
     /// draw.
-    const EVERY_KIND: [Kind; 15] = [
+    const EVERY_KIND: [Kind; 17] = [
         Kind::AddConstant,
         Kind::MulConstant,
         Kind::ClampBelow,
@@ -219,6 +241,8 @@ mod tests {
         Kind::AddIfAnyAbove,
         Kind::AddIfAllEqual,
         Kind::ShiftUp,
+        Kind::ShiftDown,
+        Kind::BroadcastLane,
     ];
 
     #[test]
@@ -245,12 +269,22 @@ mod tests {
             assert!(
                 !matches!(
                     kind,
-                    Kind::ButterflyAdd | Kind::ShiftUp | Kind::AddIfAnyAbove | Kind::AddIfAllEqual
+                    Kind::ButterflyAdd
+                        | Kind::ShiftUp
+                        | Kind::ShiftDown
+                        | Kind::AddIfAnyAbove
+                        | Kind::AddIfAllEqual
                 ),
                 "{kind:?} answers for every vector sharing the subgroup"
             );
         }
         assert!(CLUSTERED.contains(&Kind::RotateUp));
+        // **The broadcast is the second operation a cluster may cross lanes for**, and the reason
+        // is the rotate's: it reads position `source` of its *own* cluster, so every lane it touches
+        // belongs to the vector asking. The shifts stay out for the reason they always have — the
+        // lanes below a cluster's first are another vector's, and the hardware hands them over
+        // without a word.
+        assert!(CLUSTERED.contains(&Kind::BroadcastLane));
 
         // A strip-mined vector may shuffle and vote, and may not rotate: that would move elements
         // between strips.

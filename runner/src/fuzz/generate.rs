@@ -79,7 +79,7 @@ pub fn generate(rng: &mut Rng, domain: Domain, subgroup: u32, workgroup: u32) ->
             .copied()
             .unwrap_or(Kind::AddConstant);
 
-        steps.push(fill(rng, domain, subgroup, kind));
+        steps.push(fill(rng, domain, subgroup, lanes, kind));
     }
 
     Program {

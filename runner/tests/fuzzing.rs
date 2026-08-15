@@ -209,7 +209,12 @@ fn sweep(gpu: &runner::Gpu, domain: Domain, subgroup: u32, rounds: u64, defect: 
                 checked += 1;
                 scans += u64::from(is_scan);
             }
-            Outcome::Refused(_) => refused += 1,
+            Outcome::Refused(why) => {
+                if refused == 0 {
+                    eprintln!("fuzz {domain:?}: first refusal at seed {seed} — {why}");
+                }
+                refused += 1;
+            }
             Outcome::Unrepresentable => unrepresentable += 1,
             Outcome::Disagreed {
                 program,
@@ -598,11 +603,31 @@ fn the_fuzzer_notices_when_a_scan_is_wrong() {
     for finish in [fuzz::Finish::Scan, fuzz::Finish::ScanExclusive] {
         for lanes in widths {
             for domain in ALL_DOMAINS {
-                let mut rng = fuzz::Rng::new(7);
-                let mut program =
-                    fuzz::generate(&mut rng, domain, limits.subgroup_size, WORKGROUP_SIZE);
-                program.finish = finish;
-                program.lanes = lanes;
+                // **`lanes` is rewritten under operands drawn for a different one**, which is fine
+                // until an operand is bounded by the *vector* rather than the subgroup. A
+                // broadcast's position is: drawn below 16 for a subgroup-wide vector and refused
+                // once the vector is forced to 8. A butterfly's mask has the same shape and had
+                // simply never collided at seed 7.
+                //
+                // So take the first seed whose program builds under the forced mapping, and insist
+                // one exists. Skipping the combination quietly is the failure this whole file is
+                // about — it would leave a scan unchecked and print nothing.
+                let Some((program, spirv)) = (7_u64..64).find_map(|seed| {
+                    let mut program = fuzz::generate(
+                        &mut fuzz::Rng::new(seed),
+                        domain,
+                        limits.subgroup_size,
+                        WORKGROUP_SIZE,
+                    );
+                    program.finish = finish;
+                    program.lanes = lanes;
+                    program.build().ok().map(|spirv| (program, spirv))
+                }) else {
+                    panic!(
+                        "no seed in 7..64 gave a {finish:?} over {lanes} lanes in {domain:?} that \
+                         builds, so this mapping is not being checked at all"
+                    );
+                };
 
                 let input = corpus(domain, program.input_len());
                 let mut wrong = input.clone();
@@ -610,7 +635,6 @@ fn the_fuzzer_notices_when_a_scan_is_wrong() {
                     *first = domain.encode(200);
                 }
 
-                let spirv = program.build().expect("built");
                 let actual = gpu
                     .run_u32(&spirv, &input, program.workgroups())
                     .expect("ran");

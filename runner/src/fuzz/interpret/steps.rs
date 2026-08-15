@@ -49,7 +49,34 @@ pub(super) fn apply(program: &Program, held: &[Vec<u32>], step: Op) -> Vec<Vec<u
         // operand it used to take was always zero and this arm ignored it either way. See
         // `Op::ShiftUp`: SPIR-V leaves the out-of-range lanes undefined, so there is no reference
         // for a real one to be compared against.
-        Op::ShiftUp => held.to_vec(),
+        Op::ShiftUp | Op::ShiftDown => held.to_vec(),
+        Op::BroadcastLane(source) => {
+            // Inside the *vector*, exactly as the rotate below: `min(lanes, width)` invocations, so
+            // a clustered vector reads position `source` of its own cluster and a subgroup-wide one
+            // reads lane `source` of the subgroup. Reading `source` as a subgroup lane instead
+            // would agree with this for the first cluster of every subgroup and differ for the
+            // rest, which is the wrong answer this models against.
+            let size = (program.lanes.min(program.subgroup) as usize).max(1);
+            let source = source as usize % size;
+            held.iter()
+                .enumerate()
+                .map(|(invocation, elements)| {
+                    let from = invocation / size * size + source;
+                    elements
+                        .iter()
+                        .enumerate()
+                        // Per strip: a strip-mined vector broadcasts within each strip rather than
+                        // collapsing them, which is what the emitted shuffle does per load.
+                        .map(|(strip, value)| {
+                            held.get(from)
+                                .and_then(|held| held.get(strip))
+                                .copied()
+                                .unwrap_or(*value)
+                        })
+                        .collect()
+                })
+                .collect()
+        }
         // Both loops add the same constant `times` times over. Written as a loop rather than as
         // one multiplication on purpose: in the wrapping domains the two are equal, and in the
         // float domain they are equal only because the values are small integers. Folding it to a
