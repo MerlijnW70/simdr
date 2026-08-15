@@ -102,3 +102,28 @@ that only counted agreements would have merged:
 
 With the `reinterpret` in place all four configurations agree: 192 runs each at subgroup 4, 16, 32
 and 64, across all three mappings.
+
+## The second tool: the conversions
+
+`Lanes::convert_u32::<T>` is one method and **five instructions** — `T::FROM_U32` names
+`OpCopyObject`, `OpBitcast`, `OpSConvert`, `OpUConvert` or `OpConvertUToF` depending on the target.
+`src/lanes/narrow.rs` says why two of those are worth separating: *"`OpUConvert` requires a result
+type whose signedness is 0 and `OpSConvert` does not… That is the kind of asymmetry that assembles
+cleanly when it is wrong."* None of the three conversions is in the fuzzer's vocabulary.
+
+The probes are **boundaries rather than samples**, because every distinction here lives at one and
+nowhere else: `OpSConvert` and `OpUConvert` agree below 128, a bitcast and a numeric conversion agree
+below `i32::MAX`, and sign extension only shows where the truncated top bit is set. Twelve values
+into six integer targets, 72 conversions, on four devices — all agreeing with a reference written
+from the **opcode table** rather than from the method's documentation.
+
+That distinction is the point, and it found something. The method is documented as *"a `u32` value's
+number, as a value of `T`"*, and for `i32` the opcode is `OpBitcast` — so `0xFFFF_FFFF` converts to
+−1 rather than to 4 294 967 295. The two readings are identical for every value below `i32::MAX`,
+which is every loop counter, which is what the method exists for. A reference written from the
+sentence would have agreed with the implementation about everything except the answer.
+
+Not a bug: there is no `i32` holding that number, so a bitcast is a defensible choice. It is a
+sentence that was true of the inputs anybody draws, which is the shape `notes/FINDINGS.md` catalogues
+under *a relationship decided twice* — here between prose and an opcode table. `src/lanes/mod.rs`
+carries the table now, and a qualifier on the first sentence.

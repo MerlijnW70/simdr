@@ -24,7 +24,9 @@
 // two copies would be two things to keep in step, and this is the layer whose absence is the whole
 // lesson below.
 #[path = "../../tests/common/spirv_val.rs"]
-mod spirv_val;
+pub(crate) mod spirv_val;
+
+pub mod conversions;
 
 use runner::kernels::WORKGROUP_SIZE;
 use runner::{Error, Gpu};

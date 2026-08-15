@@ -196,15 +196,33 @@ impl<'module> Lanes<'module> {
         self.from_strips(&ids)
     }
 
-    /// A `u32` value's *number*, as a value of `T`.
+    /// A `u32` value's *number*, as a value of `T` — for every `T` a caller of this actually has.
     ///
     /// What a loop counter needs. `Lanes::repeat_rolled` hands its body an iteration number, and
     /// that number is a `u32` whatever the vector's element type is — so a body wanting to add it,
     /// scale by it, or index with it has to convert first. Reinterpreting the bits instead would
     /// turn 7 into a denormal, silently.
     ///
-    /// Costs nothing when `T` is already `u32`: the instruction is `OpCopyObject`, which the driver
-    /// folds away, and keeping the shape uniform is worth more than the special case.
+    /// # It is one method and five instructions
+    ///
+    /// `T::FROM_U32` is not one opcode, and the differences only show at the edges:
+    ///
+    /// | target | opcode | what it does |
+    /// | --- | --- | --- |
+    /// | `u32` | `OpCopyObject` | nothing, and the driver folds it away |
+    /// | `i32` | `OpBitcast` | **the bits**, so `0xFFFF_FFFF` is −1 rather than 4 294 967 295 |
+    /// | `i8`, `i16` | `OpSConvert` | truncate, and the top bit of what is left is a sign |
+    /// | `u8`, `u16` | `OpUConvert` | truncate, zero-extended |
+    /// | `f32`, `f16` | `OpConvertUToF` | the number, as a float |
+    ///
+    /// **The `i32` row is why the first sentence has a qualifier on it.** A bitcast and a numeric
+    /// conversion agree on every value below `i32::MAX`, and a loop counter is one — so the two
+    /// readings are indistinguishable for the caller this exists for, and part company above it,
+    /// where there is no `i32` with that number to convert to anyway.
+    ///
+    /// Measured rather than reasoned: `proeftuin/src/conversions.rs` runs all twelve boundary values
+    /// into all six integer targets on four devices, against a reference written from the opcode
+    /// table above rather than from this sentence.
     ///
     /// # Errors
     ///
