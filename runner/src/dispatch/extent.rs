@@ -643,6 +643,104 @@ mod tests {
     }
 
     #[test]
+    fn a_grid_more_than_one_row_deep_finds_its_row_among_the_other_sums() {
+        // **The path the mutation gate found untested, and it is the path that was already wrong
+        // once.** A workgroup one row deep computes its row as `group.y` alone and never builds the
+        // sum — so every grid test in this crate and every unit test above it took the short branch,
+        // and `row = group.y × rows + local.y` was decoded by nothing at all.
+        //
+        // That matters here more than a missing case usually would, because the sum is the thing
+        // this file mistook for something else: `start = (group.y × pitch) + run` has the same shape
+        // and is the address the row is *used* to compute.
+        //
+        // Narrow rather than whole rows, on purpose. Where a dispatch covers a row the pitch reading
+        // and the invocation reading agree exactly, so a decoder that found no pitch at all would
+        // still answer correctly — which is what the first version of this did.
+        let width = 32;
+        let pitch = width * 4;
+        let bounds = Bounds::of(&kernels::row_scale(width, pitch, 2, 3).expect("built"));
+        let grid = Grid::new(1, 4);
+
+        // Four workgroups of two rows each, one workgroup of columns across a row four times wider.
+        let reached = 7 * pitch as usize + width as usize;
+        assert!(bounds.fits(grid, reached));
+        assert!(!bounds.fits(grid, reached - 1));
+        assert!(
+            !bounds.fits(grid, (width * 4 * 2) as usize),
+            "the invocation reading is 256 of 928, and a row this deep must not fall back to it"
+        );
+    }
+
+    #[test]
+    fn the_pitch_is_the_constant_beside_the_row_and_not_the_largest_one_nearby() {
+        // The row's own arithmetic carries three constants — `rows`, `pitch` and the run — and only
+        // one of them is the distance between rows. On every kernel here the pitch is the largest of
+        // the three, so a decoder that took whichever it met would still be right; this is the shape
+        // where it is not.
+        //
+        // 64 rows of 32 elements is more invocations than a device would accept in one workgroup.
+        // That is deliberate and costs nothing: `Bounds` decodes a module rather than dispatching
+        // one, and the question here is which literal it reads.
+        let width = 32;
+        let pitch = width;
+        let bounds = Bounds::of(&kernels::row_scale(width, pitch, 64, 3).expect("built"));
+        let grid = Grid::new(1, 2);
+
+        // 128 rows in all, and the last of them starts 127 pitches in.
+        let reached = 127 * pitch as usize + width as usize;
+        assert!(
+            bounds.fits(grid, reached),
+            "the pitch is 32, and reading the 64 beside it would ask for twice this"
+        );
+        assert!(!bounds.fits(grid, reached - 1));
+    }
+
+    /// `spirv` with its `OpExecutionMode` removed, and everything else left alone.
+    ///
+    /// A module that declares no workgroup size, built out of one that does — so every built-in,
+    /// decoration and access chain the addressing walks is still there to walk. Hand-building one
+    /// from nothing gives a module the walk leaves at the first missing built-in, which is a
+    /// different thing and tests a different branch.
+    fn without_execution_mode(spirv: &[u32]) -> Vec<u32> {
+        let mut words = spirv[..5].to_vec();
+        let mut at = 5;
+        while at < spirv.len() {
+            let count = (spirv[at] >> 16) as usize;
+            if count == 0 || at + count > spirv.len() {
+                break;
+            }
+            if (spirv[at] & 0xffff) as u16 != op::EXECUTION_MODE {
+                words.extend_from_slice(&spirv[at..at + count]);
+            }
+            at += count;
+        }
+        words
+    }
+
+    #[test]
+    fn a_module_that_declares_no_workgroup_size_is_not_divided_by_it() {
+        // The strip count is recovered by *dividing* the run by the workgroup, and a module with no
+        // `LocalSize` gives that divisor as zero. `Shape` refuses a workgroup of zero, so no module
+        // this crate emits can be the one that matters — and this decoder reads modules rather than
+        // emitting them.
+        //
+        // Which is why it is built by subtraction: an emitted kernel minus its `OpExecutionMode`
+        // keeps every built-in and access chain the walk needs to reach the division.
+        let stripped =
+            without_execution_mode(&kernels::reduce::lane_sum::<F32, 128>(32).expect("built"));
+
+        assert_eq!(local_size(&stripped), None, "the mode is the thing removed");
+
+        // The point of the test is that constructing this at all does not divide by zero.
+        let bounds = Bounds::of(&stripped);
+        assert!(
+            bounds.fits(Grid::linear(1 << 20), 1),
+            "nothing can be claimed about a module with no workgroup size"
+        );
+        assert_eq!(bounds.overrun(Grid::linear(1 << 20), &[1, 1]), None);
+    }
+
+    #[test]
     fn an_undecodable_module_is_let_through_rather_than_refused() {
         // "This runner cannot tell" must not be reported as "your module is wrong".
         assert!(Bounds::of(&[]).fits(Grid::linear(1 << 20), 1));
