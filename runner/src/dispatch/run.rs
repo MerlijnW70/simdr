@@ -37,7 +37,7 @@ impl Gpu {
     /// dispatch big enough to need more elements than the buffer holds writes off the end of it.
     /// So `workgroups` is checked against the buffer before anything is allocated — the workgroup
     /// size and the element size are read out of `spirv` rather than taken on trust. See
-    /// [`super::extent`] for what that check is and, more importantly, what it is not.
+    /// `dispatch::extent` for what that check is and, more importantly, what it is not.
     ///
     /// # Errors
     ///

@@ -71,10 +71,19 @@ impl Strips {
     }
 
     /// The first, which is the whole of it when there is only one.
-    pub(crate) fn first(&self) -> Id {
-        // `new` refuses an empty slice, so slot zero is always live. Written without an index so
-        // that staying true is not a promise this file has to keep on its own.
-        self.ids.first().copied().unwrap_or(self.ids[0])
+    pub(crate) const fn first(&self) -> Id {
+        // **The compiler checks this index, not a caller and not a test.** `ids` is an array of
+        // [`MAX_STRIPS`], so slot zero exists whatever the count says — and if `MAX_STRIPS` were
+        // ever lowered to zero this line would not compile: indexing a zero-length array at a
+        // literal is `unconditional_panic`, which is deny-by-default.
+        //
+        // It was written as `self.ids.first().copied().unwrap_or(self.ids[0])`, whose comment
+        // claimed it avoided indexing while its fallback indexed, and whose fallback no input could
+        // reach. A `const _: () = assert!(MAX_STRIPS > 0)` stood here briefly for the same job and
+        // came back from the mutation gate as a survivor — rightly, because `> 0` and `>= 0` are
+        // the same assertion about a `usize` and neither says anything the line below does not
+        // already enforce. An unfalsifiable guard gets deleted here rather than tested.
+        self.ids[0]
     }
 }
 

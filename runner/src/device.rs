@@ -157,16 +157,6 @@ impl Limits {
 }
 
 impl Gpu {
-    /// Open the first device that can run compute work.
-    ///
-    /// Returns `Ok(None)` when the loader is present but no device is — a machine without a GPU is
-    /// a normal state for a test suite to find, not an error to fail on. A loader that will not
-    /// load at all *is* an error, because it means the environment is broken rather than bare.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Vulkan`] if a call fails, [`Error::NoComputeDevice`] if devices exist but none
-    /// offers a compute queue.
     /// Open a device whose name contains `pattern`, case-insensitively.
     ///
     /// The reason this exists: a machine with two GPUs has two *subgroup widths*, and the whole
@@ -177,10 +167,16 @@ impl Gpu {
     /// `SIMDR_DEVICE` holds, so an entire test run can be pointed at the other device without a
     /// line of it knowing.
     ///
+    /// Returns `Ok(None)` when the loader is present but no matching device is — a machine without
+    /// a GPU, or without the part being asked for, is a normal state for a test suite to find
+    /// rather than an error to fail on. A loader that will not load at all is not an error either,
+    /// for the same reason: the environment is bare, not broken.
+    ///
     /// # Errors
     ///
-    /// As [`Gpu::open`]. A pattern matching nothing gives `Ok(None)`, the same as no device at
-    /// all: a machine that lacks the part being asked for is a normal state for a suite to find.
+    /// [`Error::Vulkan`] if a call fails, [`Error::NoComputeDevice`] if devices exist and none
+    /// offers a compute queue — which is reported only when no `pattern` was given, since a
+    /// pattern that matches nothing is the `Ok(None)` case above.
     pub fn open_matching(pattern: Option<&str>) -> Result<Option<Self>, Error> {
         // SAFETY: `load` only reads the loader library from the usual platform location. It is
         // unsafe because dynamic loading is, not because of anything we pass it.
@@ -207,8 +203,9 @@ impl Gpu {
 
     /// The names of every device that could run compute work here.
     ///
-    /// What `simdr probe --all` lists, and what a caller needs before it can pass one of them to
-    /// [`Gpu::open_matching`].
+    /// What `simdr list` prints, and what a caller needs before it can pass one of them to
+    /// [`Gpu::open_matching`]. (It said `simdr probe --all` for as long as that spelling had not
+    /// existed — the subcommand was `list` from the day it was written.)
     ///
     /// # Errors
     ///
@@ -256,6 +253,14 @@ impl Gpu {
     }
 
     /// Open the first device that can run compute work, or the one `SIMDR_DEVICE` names.
+    ///
+    /// The whole suite goes through here, which is what lets a run be pointed at the other device
+    /// in this machine without a line of it knowing: `SIMDR_DEVICE=radeon` matches a substring,
+    /// case-insensitively, and `simdr list` names what there is to match.
+    ///
+    /// # Errors
+    ///
+    /// As [`Gpu::open_matching`].
     pub fn open() -> Result<Option<Self>, Error> {
         // Vulkan 1.1 is the floor: it is where subgroup operations and
         // `VkPhysicalDeviceSubgroupProperties` became core, and this crate exists to exercise

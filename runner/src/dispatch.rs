@@ -10,10 +10,15 @@
 //! # What is where
 //!
 //! This file is the staging machinery: allocate three buffers, copy in, dispatch, copy out, tear
-//! down. [`run`] is the surface over it — one call per way a caller might spell its data. The rest
-//! are the pieces each of those needs: [`pipeline`] and [`specialization`] to build one, [`grid`]
-//! to say how many workgroups on how many axes, [`step`] to say what a chain hands each pass,
-//! [`submit`] to record and wait, [`session`] and [`chain`] to keep things alive across calls.
+//! down. `run` is the surface over it — one call per way a caller might spell its data. The rest
+//! are the pieces each of those needs: `pipeline` and `specialization` to build one, `grid` to say
+//! how many workgroups on how many axes, `step` to say what a chain hands each pass, `submit` to
+//! record and wait, `session` and `chain` to keep things alive across calls, and `extent` to refuse
+//! a dispatch that would run off the end of a binding.
+//!
+//! **Every one of them goes through `extent`.** It guarded this file's `execute` and nothing else
+//! for four days, which is a sixth of the ways this crate dispatches; `extent`'s own header has
+//! what that cost and what closing it needed.
 
 mod bindings;
 mod chain;
@@ -36,6 +41,7 @@ pub use specialization::Specialization;
 pub use step::Pass;
 
 pub(crate) use chain::Staged;
+pub(crate) use extent::Bounds;
 pub(crate) use pipeline::Pipeline;
 pub(crate) use step::{Ends, answer_in_destination};
 pub(crate) use upload::{deliver, deliver_floats};
@@ -65,15 +71,10 @@ impl Gpu {
         // is undefined behaviour — an access violation on one device here and plausible wrong
         // numbers on another — rather than an error.
         //
-        // `extent::fits` reads the workgroup size out of the module and refuses instead. It is a
+        // `extent::Bounds` reads the workgroup size out of the module and refuses instead. It is a
         // floor rather than a proof: see `dispatch::extent` for what it cannot catch.
-        if !extent::fits(spirv, grid, count) {
-            return Err(Error::TooLarge {
-                words: extent::workgroup_size(spirv)
-                    .map(|size| extent::invocations(grid, size))
-                    .unwrap_or_default() as usize,
-                capacity: count,
-            });
+        if let Some(overrun) = extent::Bounds::of(spirv).overrun_uniform(grid, count) {
+            return Err(overrun.into());
         }
 
         // SAFETY: every object below is created here and destroyed before returning, and each is

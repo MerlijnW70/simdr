@@ -28,7 +28,8 @@ impl Gpu {
     ///
     /// # Errors
     ///
-    /// [`Error::NoPipeline`] if `inputs` is empty or `output_len` is zero, otherwise as
+    /// [`Error::NoPipeline`] if `inputs` is empty or `output_len` is zero, [`Error::Overrun`] if
+    /// the dispatch would touch more of a binding than that binding holds, otherwise as
     /// [`Gpu::run`].
     pub fn run_bound(
         &self,
@@ -39,6 +40,24 @@ impl Gpu {
     ) -> Result<Vec<u32>, Error> {
         if inputs.is_empty() || output_len == 0 {
             return Err(Error::NoPipeline);
+        }
+
+        // **Per binding, because that is what this call is for.** Each buffer here is sized to its
+        // own contents, so the one-length check `Gpu::run` makes has nothing to compare against;
+        // `extent::Bounds` reads which binding each access lands in and holds each to its own size.
+        //
+        // This path had no check at all. `Gpu::run` has had one since the day a kernel with a
+        // hard-coded lane count was found reading eight times its buffer, and the five other ways
+        // this crate dispatches went on not having one.
+        let held: Vec<usize> = inputs
+            .iter()
+            .map(|words| words.len())
+            .chain(std::iter::once(output_len))
+            .collect();
+        if let Some(overrun) =
+            super::extent::Bounds::of(spirv).overrun(super::Grid::linear(workgroups), &held)
+        {
+            return Err(overrun.into());
         }
 
         let sizes: Vec<u64> = inputs

@@ -238,11 +238,14 @@ impl<T: Element> Kernel<T> {
         let workgroup = self.shape().workgroup;
         let (_, group) = self.position();
 
-        // Both factors are invocation counts below `MAX_STRIPS` times a workgroup size, so this
-        // saturates only for a shape no device would accept.
-        let run = self
-            .module()
-            .constant_u32(workgroup.saturating_mul(strips as u32))?;
+        // **Refused rather than saturated.** Both factors are invocation counts below `MAX_STRIPS`
+        // times a workgroup size, so no shape a device would accept comes near the limit — and
+        // `Shape` takes a `u32` from a caller, who is not obliged to have asked a device anything.
+        // Saturating turned a run nobody can address into a shorter one that exists, which is a
+        // different element rather than an error, and the module said nothing about it.
+        let run = checked("workgroup × strips", u64::from(workgroup) * strips as u64)?;
+
+        let run = self.module().constant_u32(run)?;
         Ok(self.module().i_mul(uint, group, run)?)
     }
 
@@ -261,10 +264,15 @@ impl<T: Element> Kernel<T> {
         let (local, _) = self.position();
 
         // The strip's stride and the caller's offset are both constants, so they add at build time
-        // and cost one instruction between them rather than two.
-        let shift = (strip as u32)
-            .saturating_mul(workgroup)
-            .saturating_add(offset);
+        // and cost one instruction between them rather than two — and both are refused rather than
+        // saturated if they leave the range a 32-bit index holds. `offset` comes straight from
+        // [`Kernel::load_offset`], so this one is reachable from an ordinary caller rather than
+        // only from an impossible shape.
+        let shift = checked(
+            "strip × workgroup + offset",
+            strip as u64 * u64::from(workgroup) + u64::from(offset),
+        )?;
+
         let within = if shift == 0 {
             local
         } else {
@@ -274,6 +282,15 @@ impl<T: Element> Kernel<T> {
 
         Ok(self.module().i_add(uint, base, within)?)
     }
+}
+
+/// `needed` as the `u32` an address is computed in, or the refusal naming what could not fit.
+///
+/// The arithmetic above is done in `u64` so that this can see the number that did not fit rather
+/// than the one it wrapped or saturated to. `term` is the expression as this module's own header
+/// spells it, so the message names something a reader can find.
+fn checked(term: &'static str, needed: u64) -> Result<u32, LaneError> {
+    u32::try_from(needed).map_err(|_| LaneError::AddressOverflow { term, needed })
 }
 
 #[cfg(test)]
@@ -290,6 +307,42 @@ mod tests {
         decode::body(words)
             .filter(|instruction| instruction.opcode() == opcode)
             .count()
+    }
+
+    #[test]
+    fn an_address_that_does_not_fit_a_word_is_refused_rather_than_saturated() {
+        // **Both terms used to saturate**, which is the quiet kind of wrong: an element index
+        // nobody can express becomes a different index that exists, the module validates, the
+        // kernel runs, and it reads the wrong place. `offset` is an ordinary argument, so this is
+        // reachable without an impossible shape.
+        //
+        // Four strips, because a single-strip access adds nothing to the offset and `u32::MAX` is
+        // itself a legal index — it is *strip one*, sixty-four elements further along, that names
+        // an element no word holds.
+        let mut kernel = Kernel::<F32>::new(Shape::new(32, 64, 2)).expect("built");
+        assert_eq!(
+            kernel.load_offset::<128>(0, u32::MAX).err(),
+            Some(LaneError::AddressOverflow {
+                term: "strip × workgroup + offset",
+                needed: u64::from(u32::MAX) + 64,
+            }),
+            "strip 1 of a 64-invocation workgroup, plus every bit of offset"
+        );
+
+        // The largest index a word holds still builds: the bound is that index, not one below it.
+        let mut kernel = Kernel::<F32>::new(Shape::new(32, 64, 2)).expect("built");
+        assert!(kernel.load_offset::<32>(0, u32::MAX).is_ok());
+
+        // The other term, from a workgroup no device would accept and `Shape` takes anyway.
+        let mut wide = Kernel::<F32>::new(Shape::new(32, 1 << 30, 2)).expect("built");
+        assert_eq!(
+            wide.load::<128>(0).err(),
+            Some(LaneError::AddressOverflow {
+                term: "workgroup × strips",
+                needed: 1 << 32,
+            }),
+            "four strips of a workgroup of 2³⁰"
+        );
     }
 
     #[test]

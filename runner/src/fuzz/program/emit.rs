@@ -28,7 +28,7 @@ pub(super) fn apply<T: Element, const LANES: u32>(
             let neighbour = lanes.butterfly(value, mask)?;
             lanes.add(value, neighbour)
         }
-        Op::ShiftUp(delta) => lanes.shift_up(value, delta),
+        Op::ShiftUp => lanes.shift_up(value, 0),
         Op::RotateUp(delta) => lanes.rotate_up(value, delta),
         Op::ClampBelow(floor) => {
             let limit = lanes.splat_bits::<T, LANES>(domain.encode(floor))?;

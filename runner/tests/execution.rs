@@ -179,10 +179,15 @@ fn a_dispatch_wider_than_its_buffer_is_refused_rather_than_run() {
     assert!(gpu.run(&spirv, &input, 1).is_ok());
 
     for workgroups in [2_u32, 3, 64] {
+        // `Error::Overrun` and not `Error::TooLarge`: the two used to be one variant, and they are
+        // different failures. A `TooLarge` is a host copy that would not fit — nothing has run. An
+        // `Overrun` is a *kernel* that would write past the end of a binding, which is undefined
+        // behaviour, and the numbers in it say which binding and by how much.
         assert!(
             matches!(
                 gpu.run(&spirv, &input, workgroups),
-                Err(runner::Error::TooLarge { .. })
+                Err(runner::Error::Overrun { needed, held, .. })
+                    if needed > held && held == input.len()
             ),
             "{workgroups} workgroups over one workgroup's worth of buffer was accepted"
         );

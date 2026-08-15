@@ -51,7 +51,7 @@
 //!
 //! A scan cannot hide that. Its answer at position `j` depends on exactly which elements the
 //! hardware considers to come before `j`, so the reference has to model the **lane order** and not
-//! only the arithmetic — see [`interpret`]. Until this, every test of the scan was hand-written,
+//! only the arithmetic — see the `interpret` module. Until this, every test of the scan was hand-written,
 //! which is the state the reduction was in when the fuzzer found that bug.
 //!
 //! **All three mappings, since later the same day.** The clustered scans were excluded here while
@@ -73,7 +73,7 @@ mod program;
 
 pub use domain::{ALL_DOMAINS, Domain};
 pub use generate::{Rng, generate};
-pub use interpret::reference;
+pub use interpret::{Reference, reference};
 pub use program::{Finish, Op, Program};
 
 use crate::{Error, Gpu};

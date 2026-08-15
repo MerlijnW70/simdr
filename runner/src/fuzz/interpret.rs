@@ -476,7 +476,7 @@ mod tests {
             &input,
         );
         let shifted = values_of(
-            &program(Domain::Unsigned, 32, vec![Op::ShiftUp(0)], Finish::Sum),
+            &program(Domain::Unsigned, 32, vec![Op::ShiftUp], Finish::Sum),
             &input,
         );
 

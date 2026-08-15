@@ -45,9 +45,11 @@ pub(super) fn apply(program: &Program, held: &[Vec<u32>], step: Op) -> Vec<Vec<u
             // generator draws `high` from `low`, so this is the definition rather than a guess.
             elementwise(held, |value| domain.min(domain.max(value, low), high))
         }
-        // A shift of zero is the identity, and the generator emits no other. See `Op::ShiftUp` for
-        // why: SPIR-V leaves the out-of-range lanes undefined.
-        Op::ShiftUp(_) => held.to_vec(),
+        // A shift by zero is the identity, and the operation carries no other distance — the
+        // operand it used to take was always zero and this arm ignored it either way. See
+        // `Op::ShiftUp`: SPIR-V leaves the out-of-range lanes undefined, so there is no reference
+        // for a real one to be compared against.
+        Op::ShiftUp => held.to_vec(),
         // Both loops add the same constant `times` times over. Written as a loop rather than as
         // one multiplication on purpose: in the wrapping domains the two are equal, and in the
         // float domain they are equal only because the values are small integers. Folding it to a

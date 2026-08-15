@@ -41,7 +41,7 @@ The arrow points one way. Nothing in the emitter can reach the runner.
 ```
 spec/      Khronos' numbers — opcodes, capabilities, enumerants, GLSL.std.450
 module/    A SPIR-V module being assembled: types, constants, blocks, phis, subgroup ops, atomics
-lanes/     Simd<T, N> semantics: mappings, reductions, shuffles, votes, loops, branches,
+lanes/     Simd<T, N> semantics: mappings, reductions, scans, shuffles, votes, loops, branches,
            min/max/clamp, shifts, and the packed integer dot product
 kernel/    The buffer interface, one axis or two, workgroup shared memory, the barrier,
            and atomic scatter
@@ -102,6 +102,20 @@ buys.
 The shifts stay refused there, and that is a decision rather than a hole: an edge can be called
 undefined, which promises less than the hardware does, or masked to something, which invents a
 semantics SPIR-V does not have. The operation a caller wants at an edge is the one that has none.
+
+**And the operand has to name a lane the vector has, which was checked in one row of that table and
+none of the others.** A clustered butterfly refused a mask at or above the vector's width from the
+day it was allowed. A *whole-subgroup* one refused nothing: `butterfly(value, 4096)` on a 32-wide
+subgroup pairs every lane with one that does not exist, SPIR-V leaves the result undefined, and the
+module it builds is one `spirv-val` accepts and every device runs. Nothing below the API can see it
+— the validator does not know the subgroup width, and a device answers with whatever was in the
+register.
+
+So the bound is one rule now rather than one row's rule: the operand may not reach outside the lanes
+this vector occupies, which are the subgroup's or the vector's own where it is narrower. It costs
+nothing at runtime — every one of these takes its operand as a build-time `u32` — and it is a
+refusal by name rather than a clamp, because a caller asking to pair with lane 4096 has a different
+vector in mind than the one they are holding.
 
 **All three scan, and the clustered one is the expensive row.** SPIR-V has a `ClusteredReduce` and
 no clustered scan, so `Lanes::prefix_sum` builds a Hillis-Steele ladder instead: `log2(N)` steps of
@@ -216,17 +230,42 @@ did not.
 
 | Layer | What it is | What it caught |
 | --- | --- | --- |
-| **Unit tests** | 348 in the emitter, decoding what was emitted; 740 across the workspace | Everything cheap |
+| **Unit tests** | 443 in the emitter, decoding what was emitted; 789 across the workspace — `cargo test --workspace` prints both, and these were 348 and 740 until somebody counted again | Everything cheap |
 | **`spirv-val`** | Khronos' validator, at `--target-env vulkan1.1` | `OpLoopMerge` in the wrong position — a unit test asserted "merge before branch" and passed while the comparison sat between them. And, the first time it was pointed at `Lanes::dot_unsigned`, that `OpUDot` had been emitted with a **signed** result type: invalid SPIR-V in a shipped public method that had no caller, no unit test and no validator coverage. It is also the only layer that can see an entry point whose interface omits a built-in the body loads: drop that one line and 19 of 20 modules are rejected while all three devices go on returning the right answers |
 | **Execution** | Real dispatches on a real GPU, against CPU references | A missing staging write: every computing kernel returned garbage and the empty-kernel test still passed |
 | **Other widths** | The same suite at **4, 8, 16, 32 and 64** lanes, across three devices | Ten tests that had conflated "32 lanes" with "the subgroup", four of which could not build at all because a vote has no clustered form. Then, at 8: a fuzzer generating shuffles that leave the subgroup, and three tests assuming uninitialised device memory is zero. Then, at 4: `kernels::scale` — *the control kernel* — reading and writing eight times its buffer, which had been undefined behaviour returning zeros at width 8 for a day before it became an access violation at 4. And that was not the last of them: eleven more of the same shape were still there four days later, found by the row below rather than by running at 4 again |
 | **Differential fuzzing** | Generated programs across **all eight** element types, ending in a reduction *or a scan*, at all three mappings, each interpreted on the CPU and compared exactly | `reduce_min` folding strips with a *maximum* — right for every mapping but the strip-mined one, so hand tests never saw it. Then, the day the clustered scans stopped being refused and started being generated: an integrated AMD driver that **faults inside `vkCreateComputePipelines`** on a module `spirv-val` accepts and two other implementations run correctly |
 | **Mutation coverage** | `noha prober` over the emitter and the runner's pure half | Eight real gaps in one night, five of them in the *fuzzer* — including a generated program that dispatched nothing and therefore agreed with everything. Later, fifteen more in the half-float rounding path, which an *exhaustive* round-trip test could not reach because it only ever fed `from_f32` values that came from a half — and those never round |
-| **Dispatch bounds** | `dispatch::extent` reads the workgroup size, the element stride and the strip count out of the module and refuses a dispatch that cannot fit | **Eleven tests reading past their input**, across five files. Each paired a kernel built for 32 lanes with a buffer of one workgroup — correct on the two GPUs here, and an eighth of what the kernel reads at four lanes. Every one of them had been passing on lavapipe by getting the first sixty-four elements right and going off the end for the rest |
+| **Dispatch bounds** | `dispatch::extent` reads the workgroup size, the element stride and the address arithmetic out of the module and refuses — at **every** entry point that dispatches — a dispatch that would touch more of a binding than the binding holds | **Eleven tests reading past their input**, across five files. Each paired a kernel built for 32 lanes with a buffer of one workgroup — correct on the two GPUs here, and an eighth of what the kernel reads at four lanes. Every one of them had been passing on lavapipe by getting the first sixty-four elements right and going off the end for the rest |
 
 Each row was added because the ones above it were green while something was wrong. What that does
 *not* mean is that the list is finished — the last three rows were added within four days of each
 other and every one found something on the day it arrived. The newest found eleven.
+
+### A layer that covers one caller
+
+The bottom row said what it says now for four days while guarding **one of the six ways this crate
+dispatches**. `Gpu::run` was checked; `Gpu::run_bound`, `Session::dispatch`, `Gpu::run_chain`,
+`Gpu::reducer` and `Gpu::scanner` were not — and each of those is a way to write past the end of a
+binding from safe code, which is undefined behaviour rather than a wrong number.
+
+Nothing looked wrong, because a layer that covers one caller reads exactly like a layer that covers
+all of them. It took an audit that asked *where is this called from* rather than *does this work*.
+
+Extending it needed the check to become a different question. One length for every buffer is what
+`Gpu::run` allocates, and it is the wrong shape for the others: a reduction reads four strips from
+binding 0 and writes one scalar per invocation to binding 1, so a single number has to take the
+larger of the two and would refuse an output buffer that is exactly the right size. So the strip
+count is now recovered **per binding** — the access chain names the variable, the variable carries
+its `Binding` decoration, and the address arithmetic between them says how many elements each
+invocation touches. `dispatch::extent::addressing` is that walk, and `runner/tests/bounds.rs` asks
+the same question of each of the six doors.
+
+Two things it deliberately does not do. A binding whose address does not depend on the invocation —
+`Kernel::store_at` writing one total per *workgroup* — is left out rather than guessed at, because
+over-counting one would refuse a dispatch that is correct. And a module whose addressing it cannot
+read at all is let through, because "this runner cannot tell" must never be reported as "your module
+is wrong".
 
 ### `--target-env` is not optional
 
@@ -237,10 +276,13 @@ agrees with you.
 
 ### `--workspace` is not optional either
 
-This is a root package with a member, so plain `cargo test` runs six suites of nineteen. The
-mutation gate's kill command was missing the flag, so the whole execution and fuzzing layer sat
-outside it and the score was measured over the tests that happened to be in scope. Every command
-in `noha.yaml` names `--workspace` now.
+This is a root package with two members, so plain `cargo test` runs **ten** test binaries of
+**thirty-four**. The mutation gate's kill command was missing the flag, so the whole execution and
+fuzzing layer sat outside it and the score was measured over the tests that happened to be in
+scope. Every command in `noha.yaml` names `--workspace` now.
+
+(It said "six suites of nineteen", which was the count on the day it was written. Both halves grew;
+`cargo test --workspace --no-run` prints the current ones.)
 
 ### What guards the guard
 
@@ -313,6 +355,27 @@ Nothing found it. Not clippy, not the mutation tester, not 353 tests, not the fu
 by re-reading a `SAFETY` comment while checking something else. **A safety argument that names the
 current set of callers has an expiry date and does not say when.**
 
+The audit that produced the section above went looking for the same shape elsewhere and found four
+more, none of which any layer could see:
+
+- **`dispatch::extent` guarded one of six entry points.** The row above has the story.
+- **A shuffle's operand was bounded for one mapping and unbounded for the other two**, so a module
+  that reads lanes which do not exist validated and ran. The section on the three mappings has it.
+- **`Shape` carried four numbers and `Kernel::new` checked three.** A shape whose subgroup width was
+  zero — or 24, or anything that is not a power of two — built a kernel, stored to a buffer and
+  finished a module `spirv-val` accepts. The width is the number `decisions/DR-0002` makes the whole
+  module specific to; it was checked in `Lanes::new`, which a kernel with no lane operation never
+  reaches. Nothing else about the shape gets that treatment: a workgroup of no invocations was
+  refused from the first day.
+- **The address arithmetic saturated.** `strip × workgroup + offset` used `saturating_add`, so an
+  offset near `u32::MAX` produced a *different* element index rather than a refusal — the same trade
+  this project refuses everywhere else, sitting in the one place a caller passes a raw number
+  straight into an address.
+
+Each is now a `Result` naming what it refused and why. The pattern across all four is worth stating,
+because it is not "these were unchecked": each had a check that was **correct where it was written**
+and had stopped covering everything it was about.
+
 ### The paperwork is checked too
 
 `tests/integrity.rs` reads `noha.yaml`, **which is deliberately not in this repository** — a global
@@ -352,7 +415,7 @@ cargo test --workspace                       # everything; GPU tests skip loudly
 cargo clippy --workspace --all-targets -- -D warnings
 
 $env:RUSTDOCFLAGS = "-D warnings"            # a broken doc link is a build failure
-cargo doc --workspace --no-deps
+cargo doc --workspace --no-deps              # and CI runs it now, which it did not while this said so
 
 $env:SPIRV_VAL = "path\to\spirv-val.exe"     # or install where tests/common looks
 $env:SIMDR_FUZZ_ROUNDS = "6000"              # search harder
@@ -367,17 +430,22 @@ for no reason.
 ### What CI runs, and what it cannot
 
 Formatting, clippy at `-D warnings`, the emitter's suite against `spirv-val`, the integrity checks,
-and the **whole runner suite on lavapipe at widths 4, 8 and 16** — Mesa's CPU implementation needs
-no GPU, so most of the layers above travel to a shared runner.
+**the documentation build**, and the **whole runner suite on lavapipe at widths 4, 8 and 16** —
+Mesa's CPU implementation needs no GPU, so most of the layers above travel to a shared runner.
+
+The documentation build is there because it was in the list above and in nothing that ran. Rustdoc
+treats a broken intra-doc link as a *warning*, so `cargo doc` exited zero over twelve dead ones —
+including `fuzz::reference`, a public function whose return type was never re-exported and therefore
+could not be named by any caller. `RUSTDOCFLAGS: -D warnings` is what turns that into an answer.
 
 Three things do not, and the workflow lists them rather than leaving them to be assumed: **widths 32
 and 64**, which need the two devices in this machine; the **mutation gate**, whose configuration is
 deliberately not in this repository; and every **measurement** in `notes/FINDINGS.md`, none of which
 means anything on a shared runner. A green run there is the part that travels, not the whole suite.
 
-**`--workspace` on all of them.** This is a root package with a member, so leaving it off runs six
-suites of nineteen — which is how the mutation gate came to be measuring a fraction of the suite
-for weeks.
+**`--workspace` on all of them.** This is a root package with two members, so leaving it off runs
+ten test binaries of thirty-four — which is how the mutation gate came to be measuring a fraction
+of the suite for weeks.
 
 A machine with no Vulkan device is a normal state for the suite to find. Those tests print
 `SKIPPED` with a reason rather than passing quietly — a skipped correctness test that looks green
@@ -399,7 +467,13 @@ cargo run --release --example reducer   -p runner  # a reduction that keeps its 
 cargo run --release --example dot       -p runner  # OpSDot against the eleven instructions it replaces
 cargo run --release --example plane     -p runner  # what a second dispatch axis costs, against what it was confounded with
 cargo run --release --example occupancy -p runner  # how many subgroups a workgroup should hold, swept
+cargo run --release --example scanner   -p runner  # a long scan, and what fusing a map into it saves
+cargo run --release --example bindings  -p runner  # what a second and third binding cost
+cargo run --release --example show      -p runner  # what each kernel returns, for eyeballing
 ```
+
+The last three were on disk and not in this list, which is the same drift as everything else on this
+page: a list beside a directory, and only the directory kept growing.
 
 To run any of it against a different device:
 
@@ -670,8 +744,9 @@ hand-done addressing is exactly what ten tests got wrong the first time a second
 
 ## Reading the tree
 
-- `decisions/` — the six decisions that shape everything, and why. `DR-0002` carries a correction
-  where a later experiment showed its reasoning was too strong.
+- `decisions/` — the seven decisions that shape everything, and why. `DR-0002` carries a correction
+  where a later experiment showed its reasoning was too strong. (It said six for as long as there
+  were seven files in the directory, which is the kind of thing this section exists to point at.)
 - `notes/FINDINGS.md` — what has been learnt, including the retractions, in place and struck
   through rather than deleted.
 - `notes/NEXT.md` — what is worth doing next and why, with the measurements that say so.

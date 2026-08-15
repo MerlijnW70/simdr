@@ -26,10 +26,20 @@
 //! `OpSConvert` against `OpUConvert`, `SMax` against `UMax`, and a buffer whose stride is one byte
 //! rather than four.
 //!
-//! **`f16` is deliberately absent.** A half represents integers exactly only up to 2048, and a sum
-//! over sixty-four lanes leaves that range at once — so the argument the float domain rests on
-//! does not hold, and a tolerance would be checking something else. `runner/tests/narrow.rs` tests
-//! `f16` against expectations reasoned from the format instead.
+//! # `f16`, and the paragraph that said it was absent
+//!
+//! A half represents integers exactly only up to **2048**, and a sum over sixty-four lanes leaves
+//! that range at once — so the argument the wider float domain rests on does not hold for it. This
+//! file said the domain was therefore "deliberately absent" for as long as [`Domain::Half`] sat
+//! twenty lines below, which is the drift this project keeps finding: a reason that outlived its
+//! conclusion.
+//!
+//! The reasoning was right and the conclusion was too strong. What it argues for is not skipping
+//! the domain but **noticing** when a round leaves the range: [`Domain::exact_limit`] says where
+//! that is, and the reference refuses such a round rather than comparing two roundings. Every
+//! `Half` round that is compared at all is compared exactly, and the refused ones are counted.
+//! `runner/tests/narrow.rs` covers the rounding itself, against expectations reasoned from the
+//! format.
 
 /// The element type a program computes in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,7 +93,7 @@ impl Domain {
     /// How many bits an element occupies.
     ///
     /// The number every operation below is written in terms of, rather than one match arm per
-    /// domain per operation. Seven domains and eight operations would be fifty-six arms; this is
+    /// domain per operation. Eight domains and eight operations would be sixty-four arms; this is
     /// eight functions and one table.
     #[must_use]
     pub const fn bits(self) -> u32 {

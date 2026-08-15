@@ -21,11 +21,18 @@ pub enum Op {
     MulConstant(u32),
     /// Add the value held `mask` lanes away, exclusive-or.
     ButterflyAdd(u32),
-    /// Replace each element by the one `delta` lanes below, where that lane exists.
+    /// Replace each element by the one **zero** lanes below — the identity, and the instruction.
     ///
-    /// Only ever generated with a delta of zero: SPIR-V leaves the out-of-range lanes undefined
-    /// and a reference cannot predict undefined.
-    ShiftUp(u32),
+    /// **It carried a distance and the distance was always zero.** SPIR-V leaves a shift's
+    /// out-of-range lanes undefined, so a non-zero one has no reference to compare against: the
+    /// generator drew none, the interpreter ignored the operand and returned the values unchanged,
+    /// and anything that *did* build one — this type is public — would have been compared against
+    /// an answer for a different program.
+    ///
+    /// So the invariant is in the type rather than in a comment beside it. What is left is worth
+    /// keeping: the instruction is emitted, declares its capability, and is proved harmless.
+    /// [`Op::RotateUp`] is the shuffle that moves elements and can be checked, because it wraps.
+    ShiftUp,
     /// Keep the element where it exceeds a constant, otherwise substitute that constant.
     ///
     /// The *core* spelling of a lower bound: a comparison and a select. [`Op::MaxConstant`] is the

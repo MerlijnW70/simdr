@@ -44,6 +44,12 @@ width from the device.** The runner already reports it: `gpu.limits().subgroup_s
 therefore specialised to a device family rather than universal, and that is stated rather than
 implied — `Lanes::new` takes the number, so no caller can forget it exists.
 
+**And so does `Shape`, which is where a kernel says it.** `Lanes::new` refused a width that is not
+a power of two from the first day; `Kernel::new` did not, and a kernel with no lane operation in it
+never reaches `Lanes::new` at all — so `Shape::new(0, 64, 2)` built a kernel, stored to a buffer,
+and finished a module `spirv-val` accepts. A width of nothing is not a smaller width. It is checked
+where the shape is now, beside the workgroup and the buffer count, which were refused all along.
+
 This is not a workaround. It is what the hardware is: a `Simd<f32, 8>` means something different on
 a 32-lane machine than on a 64-lane one, and pretending otherwise is how a portable-looking
 abstraction becomes an unportable one.

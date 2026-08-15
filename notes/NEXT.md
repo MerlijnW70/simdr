@@ -1111,3 +1111,81 @@ caught it: not clippy, not the mutation tester, not 353 tests, not the fuzzer.
 
 There is no tooling suggestion here, which is the uncomfortable part. What there is: when you add a
 caller to an `unsafe fn`, read what the old one promised on your behalf.
+
+---
+
+## The list, rewritten 2026-08-15, after asking a different question
+
+The three lists above all asked *what is missing*. This one asked, of every check already in the
+tree, **where is it called from** — and four of them turned out to guard less than they are about.
+That is a different failure from a gap, and it is invisible in exactly the way a gap is not: a check
+that covers one caller passes its own tests, reports green, and reads in a table like a check that
+covers all of them.
+
+`notes/FINDINGS.md` has the four in full. What follows is what they leave.
+
+### Tier 1 — done, and each was a check that had stopped covering its subject
+
+**1. `dispatch::extent` guarded one of six dispatch entry points — done.** `Gpu::run` was checked;
+`run_bound`, `Session::dispatch`, `run_chain`, `Gpu::reducer` and `Gpu::scanner` were not. It is
+per **binding** now rather than per module, which is what the differently-sized buffers of
+`run_bound` and `Session` need, and `runner/tests/bounds.rs` asks each of the six doors the same
+question.
+
+**2. A shuffle's operand was bounded for the clustered mapping and for neither of the others —
+done.** `butterfly(value, 4096)` on a 32-wide subgroup built a module `spirv-val` accepts in which
+every lane reads a lane that does not exist. One bound for every mapping now, and 32 000 fuzzing
+rounds refuse none of the programs the generator makes.
+
+**3. `Kernel::new` checked three of `Shape`'s four numbers — done.** A subgroup width of zero, or
+24, built a kernel and finished a valid module. The width is what `decisions/DR-0002` makes the
+whole module specific to.
+
+**4. The address arithmetic saturated — done.** `strip × workgroup + offset` turned an index nobody
+can express into one that exists. Refused by name, in `u64`, with the number that did not fit.
+
+**5. The documentation build had never passed — done.** `README.md` listed it among the checks;
+nothing ran it; twelve intra-doc links were dead, one of them a public function whose return type
+could not be named. It is a CI step now.
+
+**6. The scan's pass wiring was excused from the mutation gate for being near `unsafe` — done.**
+`runner/src/scan/passes.rs`, and four properties of the wiring that no device test could state.
+
+### Tier 2 — what the same question leaves open
+
+**7. Nothing asks the "where is it called from" question automatically.** Four checks were found by
+reading; there is no reason to think reading found all of them. The shape to look for: a validation
+that lives at one entry point of a family. `Gpu`'s dispatch family had six members and one check;
+`Lanes`'s shuffle family had four members and one bound.
+
+A crude version is mechanical — *for each `pub fn` that submits work or emits a module, does it
+reach the validation its siblings reach* — and it is the kind of question `tests/integrity.rs`
+already answers for two other lists. Worth doing when a third instance of this turns up, and not
+before: two data points is a coincidence and the check would be shaped around them.
+
+**8. `Kernel::load_offset`'s offset is still outside the dispatch bound.** `dispatch::extent`
+under-counts a kernel that reads `in[i + half]`, which is the safe direction and is stated in the
+file. Making it exact means reading the constant folded into the address, which is one more step of
+the same walk `addressing.rs` already does. Nothing needs it yet: the fold kernels size their
+dispatch deliberately narrower than their buffer, so the under-count costs nothing.
+
+**9. A grid kernel's `row × pitch` is outside it too**, for the same reason and with the same
+consequence. The walk stops at the multiply by the workgroup index; a grid's row term is a multiply
+by something else. `Kernel::load_row` callers size their own buffers today.
+
+### Tier 3 — carried over, unchanged
+
+**10. A buffer the caller already owns.** Still no caller in this repository wants it.
+
+**11. A third vendor.** Still needs hardware that is not in this machine.
+
+## What a check is for, restated
+
+Three of the four in Tier 1 were **refusals**, and the fourth was a saturation standing in for one.
+The project already had the rule — *refused by name rather than clamped* — and applied it every time
+somebody wrote a new operation. What it had not had was a way to notice when an old refusal stopped
+reaching a new caller.
+
+The habit that found them, which costs nothing and is not automatable yet:
+
+**Ask where a check is called from, not whether it works.**

@@ -1,25 +1,22 @@
 //! The scan that owns its pipelines and its buffers, and runs them in one submission.
 //!
-//! Excused from the mutation gate as FFI, so the arithmetic it runs on lives in [`super::plan`]
-//! where the gate can reach it. What is left here is allocation, descriptor sets, and the order
-//! the dispatches go in.
+//! Excused from the mutation gate as FFI, so everything it decides lives next door where the gate
+//! can reach it: [`super::plan`] has how many levels a length needs, and [`super::passes`] has
+//! which module each dispatch runs over which buffers. What is left here is allocation, descriptor
+//! sets, and the submission — the parts that are genuinely Vulkan.
 //!
-//! # The order
-//!
-//! ```text
-//!   up      scan each block of the input, keeping every block's total          1 dispatch
-//!           scan each block of those totals, keeping their totals              per level below the top
-//!   top     one workgroup scans what is left, exclusively                      1 dispatch
-//!   down    add each block of a level the offset its level above computed      per level
-//! ```
+//! `passes` moved out on the day this file was audited at 651 lines: the wiring is the most
+//! intricate addressing in the crate, it had no test that did not need a device, and none of it was
+//! `unsafe`. **A file is excused for containing `unsafe`, not for being near it.**
 //!
 //! Every pass reads what an earlier one wrote, and `Gpu::replay` puts a barrier between them, so
 //! the whole thing is one command buffer and one fence however deep it goes.
 
+use super::passes::{self, Ends, Modules, Slots};
 use super::plan::{self, Level};
 use crate::buffer::Buffer;
 use crate::dispatch::{Pipeline, Staged, deliver_floats};
-use crate::kernels::{self, WORKGROUP_SIZE};
+use crate::kernels;
 use crate::{Error, Gpu};
 use simdr::lanes::F32;
 use std::time::Duration;
@@ -46,21 +43,10 @@ pub struct Scanner<'gpu> {
     workgroups: Vec<u32>,
 }
 
-/// Where each of a level's buffers sits in [`Scanner::buffers`].
-struct Slots {
-    /// The block totals this level holds.
-    totals: usize,
-    /// This level scanned within its own blocks, and `None` at the top, where the scan of the
-    /// level *is* the offsets and no second buffer is needed.
-    scanned: Option<usize>,
-    /// What each block of the level below owes the blocks before it.
-    offsets: usize,
-}
-
 impl Gpu {
     /// Build every pipeline a scan over `elements` needs, and hold them.
     ///
-    /// `elements` must be a whole number of [`WORKGROUP_SIZE`] and at least one of them.
+    /// `elements` must be a whole number of [`crate::kernels::WORKGROUP_SIZE`] and at least one of them.
     ///
     /// # Errors
     ///
@@ -81,7 +67,7 @@ impl Gpu {
     /// [`Gpu::reducer_of`] makes, which `runner/examples/reducer.rs` measures at 3.7× for a
     /// reduction over 2²⁰.
     ///
-    /// `map` must be a two-binding kernel built for [`WORKGROUP_SIZE`] invocations, reading
+    /// `map` must be a two-binding kernel built for [`crate::kernels::WORKGROUP_SIZE`] invocations, reading
     /// binding 0 and writing binding 1, and it must write **every** element the first scan reads.
     /// `elements / WORKGROUP_SIZE` workgroups of it are dispatched, worked out here rather than
     /// taken as an argument so the count cannot disagree with the length the levels were built
@@ -197,32 +183,6 @@ impl Gpu {
     }
 }
 
-/// The modules a scan runs, so the recording below takes one argument rather than five.
-struct Modules<'a> {
-    blocks: &'a [u32],
-    blocks_exclusive: &'a [u32],
-    top: &'a [u32],
-    add: &'a [u32],
-    /// One elementwise pass over the input first, and `None` when there is none.
-    map: Option<&'a [u32]>,
-}
-
-/// The buffers at the ends of the chain — the input's own, rather than a level's.
-///
-/// Grouped for the same reason `Modules` is: `record` was growing an argument per buffer, and a
-/// caller passing `scanned` where `output` belongs would build a scanner that scans its own answer.
-#[derive(Clone, Copy)]
-struct Ends {
-    /// What the host writes.
-    input: usize,
-    /// What the map writes and the first scan reads, when there is a map.
-    mapped: Option<usize>,
-    /// The input's blocks, scanned from their own starts.
-    scanned: usize,
-    /// Where the answer lands.
-    output: usize,
-}
-
 /// A `Scanner` under construction, with the release path for a failure part way through.
 struct Held<'gpu> {
     gpu: &'gpu Gpu,
@@ -318,6 +278,11 @@ impl<'gpu> Held<'gpu> {
 
     /// Build a pipeline over `bound` and remember how many workgroups it runs.
     ///
+    /// **Every pass of a scan goes through here**, which is why the dispatch bound is checked here
+    /// rather than seven times in [`Held::record`]. A scan is where a dispatch running off the end
+    /// is hardest to see: each pass reads what the one before it wrote, so a pass that overruns
+    /// corrupts the input of the next one and the wrong number arrives levels away from its cause.
+    ///
     /// # Safety
     ///
     /// Every index must name a buffer this holds.
@@ -333,6 +298,18 @@ impl<'gpu> Held<'gpu> {
                 return Err(Error::NoPipeline);
             };
             buffers.push((buffer, bytes));
+        }
+
+        // The sizes the descriptors are about to name, in the order they are bound — which is the
+        // order the module's `Binding` decorations number them in.
+        let held: Vec<usize> = buffers
+            .iter()
+            .map(|&(_, bytes)| (bytes / size_of::<u32>() as u64) as usize)
+            .collect();
+        if let Some(overrun) = crate::dispatch::Bounds::of(spirv)
+            .overrun(crate::dispatch::Grid::linear(workgroups), &held)
+        {
+            return Err(overrun.into());
         }
 
         // SAFETY: every buffer named is one this builder allocated and still owns, and none is in
@@ -377,6 +354,12 @@ impl<'gpu> Held<'gpu> {
 impl Held<'_> {
     /// Record every dispatch, in order.
     ///
+    /// **The order itself lives in [`super::passes`]**, which has no `unsafe` in it and is
+    /// therefore inside the mutation gate. What is left here is the part that is genuinely FFI:
+    /// turning a list of `(slot, bytes)` into descriptor sets. Deciding that the third pass reads
+    /// the second level's totals is not FFI, and it is the most intricate addressing in this crate
+    /// — which is exactly the shape that had no test until it moved.
+    ///
     /// # Safety
     ///
     /// As [`Held::pass`].
@@ -387,136 +370,17 @@ impl Held<'_> {
         ends: Ends,
         modules: &Modules<'_>,
     ) -> Result<(), Error> {
-        let Ends {
-            input,
-            mapped,
-            scanned,
-            output,
-        } = ends;
+        // The input's own capacity, so the count the passes are built for is the count that was
+        // allocated rather than the one that was asked for.
+        let elements = self.buffers.get(ends.input).map_or(0, Buffer::capacity);
 
-        let words = size_of::<f32>() as u64;
-        let elements = self.buffers.get(input).map_or(0, Buffer::capacity) as u64 * words;
-        let workgroups =
-            (self.buffers.get(input).map_or(0, Buffer::capacity) / WORKGROUP_SIZE as usize) as u32;
-
-        // The map, when there is one: elementwise over the whole input, writing where the first
-        // block scan will read. Its output never crosses the bus, which is the whole point.
-        let first_read = match (modules.map, mapped) {
-            (Some(map), Some(mapped)) => {
-                // SAFETY: as the passes below — both indices name buffers this builder allocated.
-                unsafe {
-                    self.pass(map, &[(input, elements), (mapped, elements)], workgroups)?;
-                }
-                mapped
-            }
-            // A map with nowhere to write, or a buffer with no map, is a construction bug rather
-            // than a caller's mistake — the two are decided together in `build_scanner`.
-            (Some(_), None) | (None, Some(_)) => return Err(Error::NoPipeline),
-            (None, None) => input,
-        };
-
-        let (Some(first), Some(first_slots)) = (levels.first(), slots.first()) else {
-            return Err(Error::NoPipeline);
-        };
-        let level_bytes = |level: &Level| (level.capacity as u64) * words;
-
-        // Up, from the input: every block scanned inclusively, every block's total kept.
-        //
-        // SAFETY: every index names a buffer this builder allocated above and still owns, which
-        // is what `pass` asks. Nothing has been submitted, so none of them is in use.
-        unsafe {
-            self.pass(
-                modules.blocks,
-                &[
-                    (first_read, elements),
-                    (scanned, elements),
-                    (first_slots.totals, level_bytes(first)),
-                ],
-                workgroups,
-            )?;
-        }
-
-        // Up, through the levels below the top: the same, but **exclusively**, because what a
-        // block owes is the total of the blocks before it and not including it.
-        for depth in 0..levels.len().saturating_sub(1) {
-            let (Some(level), Some(here), Some(above)) =
-                (levels.get(depth), slots.get(depth), slots.get(depth + 1))
-            else {
-                return Err(Error::NoPipeline);
-            };
-            let (Some(upper), Some(scanned_here)) = (levels.get(depth + 1), here.scanned) else {
-                return Err(Error::NoPipeline);
-            };
-
-            // SAFETY: as the first pass — the indices come from `slots`, which holds only
-            // buffers allocated by this builder.
+        for pass in passes::passes(levels, slots, ends, modules, elements)? {
+            // SAFETY: every slot in a pass came from `ends` or `slots`, both of which hold only
+            // indices this builder allocated above and still owns. Nothing has been submitted, so
+            // none of them is in use.
             unsafe {
-                self.pass(
-                    modules.blocks_exclusive,
-                    &[
-                        (here.totals, level_bytes(level)),
-                        (scanned_here, level_bytes(level)),
-                        (above.totals, level_bytes(upper)),
-                    ],
-                    level.workgroups,
-                )?;
+                self.pass(pass.module, &pass.bound, pass.workgroups)?;
             }
-        }
-
-        // The top: one workgroup, scanning what is left straight into the offsets it produces.
-        let (Some(last), Some(last_slots)) = (levels.last(), slots.last()) else {
-            return Err(Error::NoPipeline);
-        };
-        // SAFETY: as above.
-        unsafe {
-            self.pass(
-                modules.top,
-                &[
-                    (last_slots.totals, level_bytes(last)),
-                    (last_slots.offsets, level_bytes(last)),
-                ],
-                1,
-            )?;
-        }
-
-        // Down: each level takes the offsets from the level above and pays its own blocks.
-        for depth in (0..levels.len().saturating_sub(1)).rev() {
-            let (Some(level), Some(here), Some(above)) =
-                (levels.get(depth), slots.get(depth), slots.get(depth + 1))
-            else {
-                return Err(Error::NoPipeline);
-            };
-            let (Some(upper), Some(scanned_here)) = (levels.get(depth + 1), here.scanned) else {
-                return Err(Error::NoPipeline);
-            };
-
-            // SAFETY: as above.
-            unsafe {
-                self.pass(
-                    modules.add,
-                    &[
-                        (scanned_here, level_bytes(level)),
-                        (above.offsets, level_bytes(upper)),
-                        (here.offsets, level_bytes(level)),
-                    ],
-                    level.workgroups,
-                )?;
-            }
-        }
-
-        // And the input's own blocks, which is the answer.
-        //
-        // SAFETY: as above.
-        unsafe {
-            self.pass(
-                modules.add,
-                &[
-                    (scanned, elements),
-                    (first_slots.offsets, level_bytes(first)),
-                    (output, elements),
-                ],
-                workgroups,
-            )?;
         }
 
         Ok(())

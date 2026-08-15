@@ -38,6 +38,20 @@ pub(super) fn build<T: Element>(shape: Shape) -> Result<Parts, LaneError> {
     if shape.rows == Some(0) {
         return Err(LaneError::BadRows { rows: 0 });
     }
+    // **The same bound `Lanes::new` applies, applied where the shape is.** A `Shape` carries the
+    // subgroup width because `decisions/DR-0002` says a module is built for one, and this checked
+    // every other field of it and not that one: `Shape::new(0, 64, 2)` built a kernel, stored to a
+    // buffer and finished a module `spirv-val` accepts — the failure arriving only if something
+    // later asked for a lane operation, and never at all for a kernel that has none.
+    //
+    // A width is not a detail of the lane API. It is what the addresses, the strip counts and the
+    // mapping are all decided from, so a shape that names an impossible one describes nothing, the
+    // way a workgroup of zero invocations does.
+    if shape.subgroup == 0 || !shape.subgroup.is_power_of_two() {
+        return Err(LaneError::BadWidth {
+            width: shape.subgroup,
+        });
+    }
 
     let mut module = Module::new(Version::V1_3);
 

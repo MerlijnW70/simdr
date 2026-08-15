@@ -11,7 +11,7 @@
 //! ```
 //!
 //! Split from [`super`] because the two are different jobs at different scales, and the file held
-//! both at 639 lines. What they share is [`super::scanned_at`], which is the scan itself and is
+//! both at 639 lines. What they share is `super::scanned_at`, which is the scan itself and is
 //! written once.
 //!
 //! `crate::scan::Scanner` composes these; `runner/tests/scan.rs` also composes them by hand, which
@@ -24,7 +24,7 @@ use simdr::lanes::{Element, LaneError};
 
 /// `out[i] = in[0] + … + in[i]` within each block, **and** each block's total to binding 2.
 ///
-/// The same scan as [`scan_workgroup`] with one instruction more: the last thing every invocation
+/// The same scan as [`super::scan_workgroup`] with one instruction more: the last thing every invocation
 /// holds is its subgroup's running total plus the offset of the subgroups before it, so the *last*
 /// subgroup's lanes are holding the block's whole total. That value goes to
 /// [`simdr::kernel::Kernel::workgroup_index`] of binding 2.
@@ -43,7 +43,7 @@ use simdr::lanes::{Element, LaneError};
 ///
 /// # Errors
 ///
-/// As [`scan_workgroup`].
+/// As [`super::scan_workgroup`].
 pub fn scan_blocks<T: Element>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
     whole_subgroup_of!(T, subgroup, scan_blocks_at)
 }
@@ -57,11 +57,11 @@ pub fn scan_blocks<T: Element>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
 /// zero, or a subtraction that in floating point does not give back the number it took away.
 ///
 /// The block totals are the same either way: a total is a total whichever scan reported the
-/// running sums, and it comes from a reduce rather than from the scan — see [`scanned_at`].
+/// running sums, and it comes from a reduce rather than from the scan — see `scanned_at`.
 ///
 /// # Errors
 ///
-/// As [`scan_workgroup`].
+/// As [`super::scan_workgroup`].
 pub fn scan_blocks_exclusive<T: Element>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
     whole_subgroup_of!(T, subgroup, scan_blocks_exclusive_at)
 }
@@ -84,7 +84,7 @@ fn scan_blocks_exclusive_at<T: Element, const LANES: u32>(
 ///
 /// # Errors
 ///
-/// As [`scan_workgroup`].
+/// As [`super::scan_workgroup`].
 pub fn add_offsets<T: Element>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
     whole_subgroup_of!(T, subgroup, add_offsets_at)
 }
@@ -119,20 +119,11 @@ fn blocks_at<T: Element, const LANES: u32>(
     subgroup: u32,
     kind: Scan,
 ) -> Result<Vec<u32>, LaneError> {
-    // Three buffers rather than two: the block totals need one of their own.
+    // Three buffers rather than two: the block totals need one of their own, and naming it here is
+    // what tells `scanned_at` to compute one at all.
     let mut kernel = Kernel::<T>::new(Shape::new(subgroup, WORKGROUP_SIZE, 3))?;
-    let (scanned, total) = scanned_at::<T, LANES>(&mut kernel, subgroup, kind, true)?;
+    let scanned = scanned_at::<T, LANES>(&mut kernel, kind, Some(2))?;
 
     kernel.store_scalar(1, scanned)?;
-
-    let Some(total) = total else {
-        return Err(LaneError::BadShape {
-            workgroup: WORKGROUP_SIZE,
-            buffers: subgroup,
-        });
-    };
-    let block = kernel.workgroup_index();
-    kernel.store_at(2, block, total)?;
-
     kernel.finish()
 }

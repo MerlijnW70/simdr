@@ -3,7 +3,7 @@
 //! [`crate::kernels::scan`] has the kernels; this composes them. A scan longer than
 //! [`crate::kernels::WORKGROUP_SIZE`] elements is three steps — scan each block, scan the block
 //! totals, add each block what it owes — and the middle step is itself a scan, so past 64 blocks
-//! it is the same three steps again one level up. [`plan`] decides how many levels that is.
+//! it is the same three steps again one level up. `scan::plan` decides how many levels that is.
 //!
 //! # Why it is an object rather than a function
 //!
@@ -12,6 +12,7 @@
 //! the buffers are made once, sized for a length, and held.
 
 mod held;
+mod passes;
 mod plan;
 
 pub use held::Scanner;

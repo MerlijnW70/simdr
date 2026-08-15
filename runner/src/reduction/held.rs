@@ -154,12 +154,31 @@ impl Gpu {
                 }
             };
 
-            let mut pipelines = Vec::with_capacity(stages.len());
+            let mut pipelines: Vec<Pipeline> = Vec::with_capacity(stages.len());
             for (index, stage) in stages.iter().enumerate() {
                 // The pair alternates: pass 0 reads the source and writes the destination, pass 1
                 // the other way round. It is the descriptor set that decides, so the modules are
                 // untouched — `fold_halves` has no idea which buffer it is reading.
                 let (read, written) = Ends::of(index).order(&source, &destination);
+
+                // **Every stage, before it becomes a pipeline.** Both buffers are `elements` words
+                // wide for the whole chain, so this is the single-length question `Gpu::run` asks —
+                // asked here because a held reducer never goes near `Gpu::run`, and had no bound
+                // check of any kind until this line. A fold that overruns writes into the buffer
+                // the *next* fold is about to read, so the wrong total arrives a pass away from its
+                // cause.
+                if let Some(overrun) = crate::dispatch::Bounds::of(&stage.words)
+                    .overrun_uniform(crate::Grid::linear(stage.workgroups), elements)
+                {
+                    for pipeline in pipelines {
+                        pipeline.destroy(self);
+                    }
+                    destination.destroy(self);
+                    source.destroy(self);
+                    staging.destroy(self);
+                    return Err(overrun.into());
+                }
+
                 match Pipeline::new(
                     self,
                     &stage.words,

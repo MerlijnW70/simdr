@@ -30,6 +30,13 @@ use std::time::Duration;
 /// says nothing about it.
 pub struct Session<'gpu> {
     gpu: &'gpu Gpu,
+    /// What the module needs of each binding, read once when the session was built.
+    ///
+    /// Kept rather than recomputed because the two halves of the question arrive apart: the module
+    /// is known here and the workgroup count only at [`Session::dispatch`]. Decoding it per
+    /// dispatch would also make the check cost something on the path whose entire purpose is that
+    /// nothing costs anything after setup.
+    bounds: super::extent::Bounds,
     /// The host's way in and out. One, reused, sized to the largest binding.
     ///
     /// `Option` because [`Buffer::destroy`] consumes the buffer and `Drop` has only `&mut self`.
@@ -102,6 +109,7 @@ impl Gpu {
             match Pipeline::new(self, spirv, &bound, &super::Specialization::none()) {
                 Ok(pipeline) => Ok(Session {
                     gpu: self,
+                    bounds: super::extent::Bounds::of(spirv),
                     staging: Some(staging),
                     buffers,
                     pipeline: Some(pipeline),
@@ -131,7 +139,7 @@ impl Session<'_> {
     /// caller believe. That is the reason for the receiver, and it holds either way; what varies
     /// underneath is only the route. Where the binding is host-writable the words go into it
     /// directly and no submission happens at all; otherwise they go through the shared staging
-    /// buffer and one copy. [`crate::buffer::Buffer::shared`] says which devices offer which, and
+    /// buffer and one copy. `Buffer::shared` says which devices offer which, and
     /// `runner/examples/reducer.rs` measures the difference at about 30% of a 4 MB reduction.
     ///
     /// # Errors
@@ -207,6 +215,15 @@ impl Session<'_> {
     ///
     /// As [`Session::dispatch`].
     pub fn dispatch_grid(&mut self, grid: super::Grid, iterations: u32) -> Result<Duration, Error> {
+        // **Checked per dispatch, because that is when the count arrives.** A session's buffers are
+        // fixed at construction and its workgroup count is not, so this is the one path where the
+        // caller can ask for a dispatch too large for buffers that were the right size a moment
+        // ago. It had no check of any kind until this was written.
+        let held: Vec<usize> = self.buffers.iter().map(Buffer::capacity).collect();
+        if let Some(overrun) = self.bounds.overrun(grid, &held) {
+            return Err(overrun.into());
+        }
+
         let Some(pipeline) = self.pipeline.as_ref() else {
             return Err(Error::NoPipeline);
         };

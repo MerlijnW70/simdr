@@ -14,3 +14,11 @@ runner = { path = "../runner" }
 [[bin]]
 name = "simdr"
 path = "src/main.rs"
+# The binary is `simdr` and so is the library, so `cargo doc --workspace` wrote both to
+# `target/doc/simdr/index.html` and warned about the collision — one of them silently overwriting
+# the other's front page. The library's is the one anybody reads; this crate's documentation is for
+# whoever is editing it, and `src/main.rs` still carries it.
+#
+# The alternative was renaming the binary, and the binary's name is the command in every example in
+# `README.md`. A doc page loses less.
+doc = false

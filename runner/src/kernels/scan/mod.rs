@@ -96,8 +96,9 @@ pub(super) enum Scan {
 ///
 /// # Errors
 ///
-/// [`LaneError::BadWidth`] if `subgroup` is not a width this can build for, [`LaneError::BadShape`]
-/// if the workgroup is not a whole number of subgroups, otherwise if the module cannot be built.
+/// [`LaneError::BadWidth`] if `subgroup` is not a width this can build for,
+/// [`LaneError::NoSuchForm`] if the workgroup is not a whole number of subgroups, otherwise if the
+/// module cannot be built.
 pub fn scan_workgroup<T: Element>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
     whole_subgroup_of!(T, subgroup, scan_workgroup_at)
 }
@@ -144,7 +145,7 @@ fn scan_workgroup_exclusive_at<T: Element, const LANES: u32>(
     subgroup: u32,
 ) -> Result<Vec<u32>, LaneError> {
     let mut kernel = Kernel::<T>::new(shape(subgroup))?;
-    let (scanned, _) = scanned_at::<T, LANES>(&mut kernel, subgroup, Scan::Exclusive, false)?;
+    let scanned = scanned_at::<T, LANES>(&mut kernel, Scan::Exclusive, None)?;
 
     kernel.store_scalar(1, scanned)?;
     kernel.finish()
@@ -162,33 +163,57 @@ fn scan_workgroup_exclusive_at<T: Element, const LANES: u32>(
 /// the invocation's own lane, which it declares for itself.
 fn scan_workgroup_at<T: Element, const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
     let mut kernel = Kernel::<T>::new(shape(subgroup))?;
-    let (scanned, _) = scanned_at::<T, LANES>(&mut kernel, subgroup, Scan::Inclusive, false)?;
+    let scanned = scanned_at::<T, LANES>(&mut kernel, Scan::Inclusive, None)?;
 
     kernel.store_scalar(1, scanned)?;
     kernel.finish()
 }
 
-/// The scan itself: this invocation's running total, and the block's whole total if asked for.
+/// The scan itself: this invocation's running total, with the block's total written out if a
+/// binding was named for it.
 ///
 /// **One copy of the arithmetic, used by both kernels.** Writing it twice would be two things to
 /// keep in step, and the one that got less attention would be the one nobody had run at width 4 —
 /// where the cross-subgroup combine is fifteen steps rather than none.
 ///
-/// `want_total` rather than always computing it, because the block total costs one addition per
+/// `total_to` rather than always computing the block total, because it costs one addition per
 /// subgroup and [`scan_workgroup`] has nowhere to put it. Emitting instructions whose result is
 /// discarded would make the module say something the kernel does not do; a driver would remove
 /// them, and the module is what this project checks.
+///
+/// **It names the binding rather than handing the total back**, and that is the difference between
+/// this and the `want_total: bool` returning an `Option<Id>` it replaced. Those were two values
+/// saying one thing, and the caller that asked for a total had to answer for the case where it got
+/// none — an arm no input could reach, which returned `LaneError::BadShape { buffers: subgroup }`:
+/// a subgroup width in a field named for a buffer count, in an error nobody could provoke. One
+/// `Option` decides both now, so there is nothing left to disagree.
+///
+/// **The width comes from the kernel rather than from an argument.** It took one, beside a
+/// `&mut Kernel` that had been built from the same number — two copies, and nothing stopping a
+/// caller handing over a kernel built for 32 and a width of 4. `Shape` already carries it, so this
+/// reads it: the same rule `dispatch::extent` follows for the workgroup size, applied one layer up.
 pub(super) fn scanned_at<T: Element, const LANES: u32>(
     kernel: &mut Kernel<T>,
-    subgroup: u32,
     kind: Scan,
-    want_total: bool,
-) -> Result<(Id, Option<Id>), LaneError> {
+    total_to: Option<u32>,
+) -> Result<Id, LaneError> {
     let workgroup = super::WORKGROUP_SIZE;
-    if subgroup == 0 || !workgroup.is_multiple_of(subgroup) {
-        return Err(LaneError::BadShape {
-            workgroup,
-            buffers: subgroup,
+    let subgroup = kernel.shape().subgroup;
+
+    // A width of zero cannot arrive here: `Kernel::new` refuses a `Shape` whose subgroup is not a
+    // power of two, so a kernel exists only for a width this can divide by. What is left is the
+    // condition that is genuinely about *this* algorithm — the cross-subgroup combine is one step
+    // per subgroup in the workgroup, and a workgroup that is not a whole number of them has no
+    // such step count.
+    //
+    // It used to be `LaneError::BadShape { workgroup, buffers: subgroup }`, which put a subgroup
+    // width in a field named for a buffer count and printed "a kernel of 64 invocations over 24
+    // buffers describes nothing". A message that names the wrong thing is worse than a vague one.
+    if !workgroup.is_multiple_of(subgroup) {
+        return Err(LaneError::NoSuchForm {
+            operation: "scan_workgroup",
+            because: "the cross-subgroup combine is one step per subgroup, and a workgroup that \
+                      is not a whole number of subgroups has no such count",
         });
     }
     let subgroups = workgroup / subgroup;
@@ -218,12 +243,14 @@ pub(super) fn scanned_at<T: Element, const LANES: u32>(
     // has nothing before it, and the right start for a sum.
     let zero = kernel.module().constant_scalar(element, 0)?;
     let mut offset = zero;
-    let mut block = want_total.then_some(zero);
+    // The binding and the running sum together, so that "there is a block total" and "there is
+    // somewhere to put it" cannot be answered differently.
+    let mut block: Option<(u32, Id)> = total_to.map(|binding| (binding, zero));
 
     // **The last subgroup is read only if the block total wants it.** It is nobody's predecessor,
     // so it contributes no offset to anyone; loading it regardless left `scan_workgroup` with one
     // shared read whose result went nowhere, which the tests below caught by counting the slots.
-    let steps = if want_total {
+    let steps = if block.is_some() {
         subgroups
     } else {
         subgroups.saturating_sub(1)
@@ -239,8 +266,9 @@ pub(super) fn scanned_at<T: Element, const LANES: u32>(
         // **The block total takes every subgroup, the offset only the earlier ones.** That is the
         // whole difference between the two numbers, and it is why the block total is not simply
         // the last lane's `offset`: no lane's offset includes its own subgroup.
-        if let Some(sum) = block {
-            block = Some(kernel.module().binary(T::ADD, element, sum, theirs)?);
+        if let Some((binding, sum)) = block {
+            let raised = kernel.module().binary(T::ADD, element, sum, theirs)?;
+            block = Some((binding, raised));
         }
 
         if earlier + 1 == subgroups {
@@ -263,10 +291,17 @@ pub(super) fn scanned_at<T: Element, const LANES: u32>(
         offset = kernel.module().select(element, after, with, offset)?;
     }
 
-    let scanned = kernel
+    // One value per workgroup, at the workgroup's own index — the one address in this interface
+    // that is not derived from the invocation. See `Kernel::store_at`: every invocation of the
+    // block writes the same total to the same slot, which is why a plain store will do.
+    if let Some((binding, total)) = block {
+        let at = kernel.workgroup_index();
+        kernel.store_at(binding, at, total)?;
+    }
+
+    Ok(kernel
         .module()
-        .binary(T::ADD, element, running.id(), offset)?;
-    Ok((scanned, block))
+        .binary(T::ADD, element, running.id(), offset)?)
 }
 
 #[cfg(test)]
@@ -402,16 +437,21 @@ mod tests {
     }
 
     #[test]
-    fn a_subgroup_the_workgroup_does_not_divide_by_is_refused() {
+    fn a_width_that_is_not_a_power_of_two_never_reaches_the_scan() {
         // Asked of the builder directly. The public wrapper refuses any width it has no lane count
         // for *first* — the lane count is a const generic, so only the widths `whole_subgroup_of!`
         // lists can be instantiated at all — and going through it would test the dispatcher while
         // leaving this guard unreached, which is how it came to survive a mutation run.
-        for width in [24_u32, 48, 63] {
+        //
+        // These used to arrive at the scan's own `workgroup.is_multiple_of(subgroup)` guard and be
+        // refused as `BadShape`. They no longer get that far: `Kernel::new` refuses a `Shape` whose
+        // subgroup is not a power of two, which is where the check belongs — every kernel is built
+        // for a width, not only the ones that go on to use a lane operation.
+        for width in [0_u32, 24, 48, 63] {
             assert!(
                 matches!(
                     scan_workgroup_at::<F32, 32>(width),
-                    Err(LaneError::BadShape { .. })
+                    Err(LaneError::BadWidth { width: refused }) if refused == width
                 ),
                 "a subgroup of {width} was accepted"
             );
@@ -419,13 +459,27 @@ mod tests {
     }
 
     #[test]
-    fn a_subgroup_of_zero_is_refused_before_it_divides() {
-        // The other half of the same condition, and the one that would divide by zero if the two
-        // were reordered — which is why they are an `||` in that order rather than either alone.
-        assert!(matches!(
-            scan_workgroup_at::<F32, 32>(0),
-            Err(LaneError::BadShape { .. })
-        ));
+    fn a_workgroup_that_is_not_a_whole_number_of_subgroups_is_refused() {
+        // What is left of that guard once the width itself is checked upstream: a power-of-two
+        // width the workgroup is not a multiple of, which on a 64-invocation workgroup means one
+        // *wider* than the workgroup. The cross-subgroup combine is one step per subgroup, and
+        // there is no whole number of them here.
+        //
+        // Reached only from the builder: `whole_subgroup_of!` lists no width above 64, so the
+        // public entry point cannot ask for this and the guard would otherwise be unreachable.
+        for width in [128_u32, 256] {
+            assert!(
+                matches!(
+                    scan_workgroup_at::<F32, 32>(width),
+                    Err(LaneError::NoSuchForm {
+                        operation: "scan_workgroup",
+                        ..
+                    })
+                ),
+                "a subgroup of {width} against a workgroup of {} was accepted",
+                super::super::WORKGROUP_SIZE
+            );
+        }
     }
 
     #[test]

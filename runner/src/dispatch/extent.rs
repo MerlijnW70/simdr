@@ -2,16 +2,17 @@
 //!
 //! A dispatch is a workgroup count; a kernel is a workgroup *size*. Multiply them and you have the
 //! number of invocations that will run, and every kernel this project emits writes at least one
-//! *element* per invocation. So a dispatch whose invocations need more of the buffer than it holds
-//! is writing past the end of it — undefined behaviour, which on the devices here has shown up as
-//! an access violation on one and plausible wrong numbers on another.
+//! *element* per invocation. So a dispatch whose invocations need more of a buffer than it holds is
+//! writing past the end of it — undefined behaviour, which on the devices here has shown up as an
+//! access violation on one and plausible wrong numbers on another.
 //!
 //! # Why the module is decoded instead of the caller being asked
 //!
-//! Both numbers this needs are already in the SPIR-V: the workgroup size as the `LocalSize`
-//! execution mode, and the size of an element as the buffer's `ArrayStride`. Asking the caller for
-//! either would let the two disagree, and the caller's copy is the one that would be wrong — it is
-//! a number they typed, while the module's is the number the kernel was built with.
+//! Every number this needs is already in the SPIR-V: the workgroup size as the `LocalSize`
+//! execution mode, the size of an element as the buffer's `ArrayStride`, and how many elements each
+//! invocation touches as the address arithmetic itself. Asking the caller for any of them would let
+//! the two disagree, and the caller's copy is the one that would be wrong — it is a number they
+//! typed, while the module's is the number the kernel was built with.
 //!
 //! This is the same rule `decisions/DR-0001` states for opcodes, applied to a shape: read it from
 //! the artefact, never from memory. It also happens to be the only version of this check that
@@ -20,27 +21,183 @@
 //! invocations against words instead — which this did for one run — refused two fuzzer suites that
 //! were doing nothing wrong.
 //!
+//! # It is a check on every dispatch, and it was a check on one
+//!
+//! [`Bounds`] is decoded once from a module and asked once per dispatch, which is what lets the
+//! held paths carry it: a [`crate::Session`] or a [`crate::Reducer`] builds its pipelines long
+//! before it knows how many workgroups anyone will ask for.
+//!
+//! That shape is the fix for the hole this file had. `Gpu::run` was checked and **nothing else
+//! was** — not `run_bound`, not `Session::dispatch`, not `run_chain`, not the held reducer or
+//! scanner. The layer that caught eleven tests reading past their inputs covered one of the six
+//! ways this crate dispatches, while `README.md` listed it as a layer of the stack.
+//!
 //! # What the check is and is not
 //!
-//! **Necessary, not sufficient**, and less far from sufficient than it was. Three numbers go into
-//! it and all three are read from the module: how many invocations the dispatch launches, how many
-//! *elements* each one touches, and how many bytes an element takes.
+//! **Necessary, not sufficient.** Three numbers go into it and all three are read from the module:
+//! how many invocations the dispatch launches, how many *elements* each one touches of a given
+//! binding, and how many bytes an element takes.
 //!
-//! The middle one used to be assumed to be 1, and that assumption was the reason this file's own
-//! documentation said it could not catch a lane mapping reading eight times its buffer. It can:
-//! the count is recovered from the address arithmetic — see [`elements_per_invocation`] — and
-//! `kernels::lane_affine::<32>` at width 4 is now refused rather than run.
-//!
-//! What is still outside it is a **constant offset past the run**: `Kernel::load_offset` reads
+//! What is outside it is a **constant offset past the run**: `Kernel::load_offset` reads
 //! `in[i + half]`, and a fold whose dispatch is deliberately narrower than its buffer looks, to
 //! this, like a dispatch with room to spare. That direction is safe — it under-counts, so it
-//! refuses less than it might and never more.
+//! refuses less than it might and never more. The same is true of a grid kernel's `row × pitch`,
+//! which this does not read at all.
+
+mod addressing;
 
 use super::Grid;
 use simdr::decode;
 use simdr::module::op;
-use simdr::spec::{BuiltIn, Decoration, ExecutionMode};
+use simdr::spec::{Decoration, ExecutionMode};
 use std::collections::BTreeMap;
+
+/// What a module needs of the buffers it is dispatched over, decoded once.
+///
+/// Held rather than recomputed because the two halves of the question arrive at different times: a
+/// module is known when a pipeline is built and a workgroup count when it is dispatched, and a
+/// [`crate::Session`] can be a long way between the two.
+#[derive(Debug, Clone)]
+pub(crate) struct Bounds {
+    /// Invocations per workgroup, from `LocalSize`. `None` when the module declares none, which is
+    /// not a shape this can reason about.
+    workgroup: Option<u64>,
+    /// Bytes per element, from the buffer's `ArrayStride`.
+    stride: Option<u64>,
+    /// How many elements each invocation touches, per binding. A binding whose address does not
+    /// vary per invocation is absent — see [`addressing`].
+    per_invocation: BTreeMap<u32, u64>,
+}
+
+/// A buffer a dispatch would touch past the end of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Overrun {
+    /// Which binding, when the module's addressing named one.
+    ///
+    /// `None` when it could not be read and the floor below was used instead — there is no binding
+    /// to name there, and naming one anyway would be a guess dressed as a fact.
+    pub(crate) binding: Option<u32>,
+    /// How many words the dispatch would touch of it.
+    pub(crate) needed: usize,
+    /// How many it holds.
+    pub(crate) held: usize,
+}
+
+impl From<Overrun> for crate::Error {
+    fn from(overrun: Overrun) -> Self {
+        Self::Overrun {
+            binding: overrun.binding,
+            needed: overrun.needed,
+            held: overrun.held,
+        }
+    }
+}
+
+impl Bounds {
+    /// Read what `spirv` needs.
+    pub(crate) fn of(spirv: &[u32]) -> Self {
+        let workgroup = workgroup_size(spirv);
+        Self {
+            workgroup,
+            stride: element_bytes(spirv),
+            per_invocation: addressing::per_invocation(spirv, workgroup.unwrap_or(0)),
+        }
+    }
+
+    /// The binding a dispatch of `grid` would overrun, given each binding's size in words.
+    ///
+    /// `words` is one entry per binding, in binding order. A binding with no entry, or one whose
+    /// addressing this could not read, is **not checked**: with a size per binding the buffers are
+    /// deliberately different sizes — `Gpu::run_bound`'s whole reason for existing is a weight
+    /// table beside a one-word answer — so a binding this cannot read is one it must not guess
+    /// about. [`Bounds::fits`] takes the other view, and says why.
+    pub(crate) fn overrun(&self, grid: Grid, words: &[usize]) -> Option<Overrun> {
+        let (Some(workgroup), Some(stride)) = (self.workgroup, self.stride) else {
+            return None;
+        };
+        let invocations = invocations(grid, workgroup);
+
+        self.per_invocation
+            .iter()
+            .filter_map(|(&binding, &elements)| {
+                let held = *words.get(binding as usize)?;
+                let needed = self.words_for(invocations, elements, stride);
+                (needed > held).then_some(Overrun {
+                    binding: Some(binding),
+                    needed,
+                    held,
+                })
+            })
+            .next()
+    }
+
+    /// The same, for buffers that are **all** `words` long.
+    ///
+    /// The shape [`crate::Gpu::run`] and [`crate::Gpu::run_chain`] have: one length, every buffer
+    /// allocated to it. That is what makes the floor below safe here and not in [`Bounds::overrun`]
+    /// — with one size for every buffer, "at least one element per invocation" cannot ask more of a
+    /// small binding than the caller already gave every binding.
+    ///
+    /// `None` when the module declares no workgroup size or no stride: there is nothing to check
+    /// against, and refusing on an unknown would turn "this runner cannot tell" into "your module
+    /// is wrong".
+    pub(crate) fn overrun_uniform(&self, grid: Grid, words: usize) -> Option<Overrun> {
+        let (Some(workgroup), Some(stride)) = (self.workgroup, self.stride) else {
+            return None;
+        };
+        let invocations = invocations(grid, workgroup);
+
+        // The widest binding, or the floor for a module whose addressing this could not read at
+        // all. Such a module touches an element per invocation as far as anyone here knows, and
+        // treating it as touching *none* would make every dispatch fit every buffer.
+        let (binding, elements) = self
+            .per_invocation
+            .iter()
+            .max_by_key(|&(_, &elements)| elements)
+            .map_or((None, 1), |(&binding, &elements)| (Some(binding), elements));
+
+        let needed = self.words_for(invocations, elements, stride);
+        (needed > words).then_some(Overrun {
+            binding,
+            needed,
+            held: words,
+        })
+    }
+
+    /// Whether a dispatch of `grid` fits buffers that are all `words` long.
+    ///
+    /// The reading of [`Bounds::overrun_uniform`] the tests below want. Every caller reports which
+    /// binding and by how much, so this is the tests' spelling rather than a second question.
+    #[cfg(test)]
+    fn fits(&self, grid: Grid, words: usize) -> bool {
+        self.overrun_uniform(grid, words).is_none()
+    }
+
+    /// How many words `invocations × elements` of `stride` bytes occupy, rounded up.
+    ///
+    /// **Rounded up, and that is not pedantry**: four `i8` share a word, so 129 byte-writing
+    /// invocations need 33 words rather than 32, and the last one has nowhere to write if this
+    /// divides instead.
+    fn words_for(&self, invocations: u64, elements: u64, stride: u64) -> usize {
+        let bytes = invocations
+            .saturating_mul(elements)
+            .saturating_mul(stride)
+            .saturating_add(size_of::<u32>() as u64 - 1);
+
+        usize::try_from(bytes / size_of::<u32>() as u64).unwrap_or(usize::MAX)
+    }
+
+    /// How many elements the widest binding gives each invocation, or one for a module this could
+    /// not read.
+    ///
+    /// What the tests below assert against, and what [`Bounds::fits`] compares with. Kept as its
+    /// own name because "the strip count the emitter used" is the thing being recovered, and a
+    /// reader looking for it should not have to know it lives in a map.
+    #[cfg(test)]
+    pub(crate) fn elements_per_invocation(&self) -> u64 {
+        self.per_invocation.values().copied().max().unwrap_or(1)
+    }
+}
 
 /// The workgroup size declared by `spirv`, as `x * y * z`.
 ///
@@ -90,130 +247,22 @@ pub(crate) fn element_bytes(spirv: &[u32]) -> Option<u64> {
         })
 }
 
-/// How many elements one invocation touches, read out of the module's own address arithmetic.
-///
-/// **This is the half the first version of this check could not see.** A strip-mined kernel reads
-/// and writes `strips` elements per invocation rather than one, and comparing invocations against
-/// the buffer would let a kernel reading eight times its input through — which is not hypothetical:
-/// `kernels::scale` did exactly that at width 4, and it was an access violation on one device and
-/// undefined behaviour quietly returning zeros on another.
-///
-/// The count is not declared anywhere, and it does not need to be. Every access starts from
-/// `Kernel::run_start`, which emits `group × (workgroup × strips)` — one `OpIMul` whose operands
-/// are the workgroup index and a constant. The workgroup size is already known from `LocalSize`, so
-/// dividing the constant by it gives back the strip count the emitter used.
-///
-/// Read from the artefact rather than declared beside it, for the reason `decisions/DR-0001` gives
-/// about opcodes: a second copy of a number is a second thing to keep true.
-///
-/// `1` when the module has no such multiply — a kernel that touches one element per invocation, or
-/// one this cannot read. Under-counting is the safe direction: the check stays a floor.
-pub(crate) fn elements_per_invocation(spirv: &[u32], workgroup: u64) -> u64 {
-    if workgroup == 0 {
-        return 1;
-    }
-
-    let Some(group) = workgroup_component(spirv) else {
-        return 1;
-    };
-
-    let constants: BTreeMap<u32, u32> = decode::body(spirv)
-        .filter(|instruction| instruction.opcode() == op::CONSTANT)
-        .filter_map(|instruction| match instruction.operands() {
-            [_type, id, literal] => Some((*id, *literal)),
-            _ => None,
-        })
-        .collect();
-
-    // Every multiply the workgroup index takes part in. A kernel with two differently shaped
-    // buffers has one per shape — `Simd<f32,128>` in and a scalar out is four strips and one — and
-    // the widest is the one the buffer has to survive.
-    // The workgroup index is the **left** operand: `Kernel::run_start` emits
-    // `i_mul(uint, group, run)` and that order is this project's, not the driver's. A module that
-    // multiplied the other way round reads as one element per invocation — the safe direction, and
-    // a case the strip tests below would fail loudly on if the emitter ever swapped them.
-    let widest = decode::body(spirv)
-        .filter(|instruction| instruction.opcode() == op::I_MUL)
-        .filter_map(|instruction| match instruction.operands() {
-            [_type, _id, left, right] if *left == group => constants.get(right).copied(),
-            _ => None,
-        })
-        .map(|run| u64::from(run) / workgroup)
-        .max()
-        .unwrap_or(0);
-
-    // Never fewer than one. A module whose arithmetic this could not read touches an element per
-    // invocation as far as anyone here knows, and treating it as touching *none* would make every
-    // dispatch fit every buffer.
-    widest.max(1)
-}
-
-/// The scalar workgroup index — the x component of the `WorkgroupId` built-in.
-///
-/// Traced rather than guessed: the built-in is a three-element vector, loaded once and then
-/// extracted from, and it is the *extracted* id that the address arithmetic multiplies.
-fn workgroup_component(spirv: &[u32]) -> Option<u32> {
-    let variable = decode::body(spirv)
-        .filter(|instruction| instruction.opcode() == op::DECORATE)
-        .find_map(|instruction| match instruction.operands() {
-            [target, decoration, built_in]
-                if *decoration == Decoration::BuiltIn.word()
-                    && *built_in == BuiltIn::WorkgroupId.word() =>
-            {
-                Some(*target)
-            }
-            _ => None,
-        })?;
-
-    let loaded = decode::body(spirv)
-        .filter(|instruction| instruction.opcode() == op::LOAD)
-        .find_map(|instruction| match instruction.operands() {
-            [_type, id, pointer] if *pointer == variable => Some(*id),
-            _ => None,
-        })?;
-
-    decode::body(spirv)
-        .filter(|instruction| instruction.opcode() == op::COMPOSITE_EXTRACT)
-        .find_map(|instruction| match instruction.operands() {
-            [_type, id, composite, ..] if *composite == loaded => Some(*id),
-            _ => None,
-        })
-}
-
-/// Whether a buffer of `words` can hold every element the dispatch touches.
-///
-/// `true` when the module declares no workgroup size or no stride: there is nothing to check
-/// against, and refusing on an unknown would turn "this runner cannot tell" into "your module is
-/// wrong".
-pub(crate) fn fits(spirv: &[u32], grid: Grid, words: usize) -> bool {
-    let (Some(workgroup), Some(stride)) = (workgroup_size(spirv), element_bytes(spirv)) else {
-        return true;
-    };
-    let strips = elements_per_invocation(spirv, workgroup);
-
-    // A stride of zero needs no guard of its own, and the guard that was here could never fire.
-    // Elements of no size take no room: the product below is zero, zero fits every buffer, and
-    // that is the same answer an explicit `if stride == 0 { return true }` gave. The mutation gate
-    // found it by flipping the condition to `false` and killing nothing — the second unfalsifiable
-    // branch this project has written and the second to be deleted rather than tested.
-    let bytes = (words as u64).saturating_mul(size_of::<u32>() as u64);
-    invocations(grid, workgroup)
-        .saturating_mul(strips)
-        .saturating_mul(stride)
-        <= bytes
-}
-
 #[cfg(test)]
 mod tests {
     // A test may panic — that is how it reports.
     #![allow(clippy::expect_used)]
 
-    use super::{element_bytes, elements_per_invocation, fits, invocations, workgroup_size};
+    use super::{Bounds, Overrun, element_bytes, invocations, workgroup_size};
     use crate::dispatch::Grid;
     use crate::kernels;
     use simdr::lanes::{F32, I8};
     use simdr::module::op;
     use simdr::spec::ExecutionMode;
+
+    /// How many elements each invocation touches, as the tests below ask it.
+    fn per_invocation(spirv: &[u32]) -> u64 {
+        Bounds::of(spirv).elements_per_invocation()
+    }
 
     #[test]
     fn the_workgroup_size_is_read_out_of_the_module_the_emitter_built() {
@@ -294,16 +343,16 @@ mod tests {
 
     #[test]
     fn a_dispatch_that_matches_its_buffer_fits_and_one_word_more_does_not() {
-        let spirv = kernels::empty(32).expect("built");
+        let bounds = Bounds::of(&kernels::empty(32).expect("built"));
         let workgroup = kernels::WORKGROUP_SIZE as usize;
 
-        assert!(fits(&spirv, Grid::linear(1), workgroup));
-        assert!(fits(&spirv, Grid::linear(1), workgroup + 1));
+        assert!(bounds.fits(Grid::linear(1), workgroup));
+        assert!(bounds.fits(Grid::linear(1), workgroup + 1));
         assert!(
-            !fits(&spirv, Grid::linear(1), workgroup - 1),
+            !bounds.fits(Grid::linear(1), workgroup - 1),
             "one word short of a workgroup is one invocation with nowhere to write"
         );
-        assert!(!fits(&spirv, Grid::linear(2), workgroup));
+        assert!(!bounds.fits(Grid::linear(2), workgroup));
     }
 
     #[test]
@@ -312,8 +361,6 @@ mod tests {
         // the address arithmetic, so these assertions are against what the *mapping* decides:
         // 32 lanes on a 32-wide subgroup is one element per invocation, 128 is four, and on a
         // 64-wide subgroup the same 128 is two.
-        let workgroup = u64::from(kernels::WORKGROUP_SIZE);
-
         for (width, lanes, strips) in [(32_u32, 32_u32, 1_u64), (32, 128, 4), (64, 128, 2)] {
             let spirv = match lanes {
                 32 => kernels::reduce::lane_sum::<F32, 32>(width),
@@ -322,7 +369,7 @@ mod tests {
             .expect("built");
 
             assert_eq!(
-                elements_per_invocation(&spirv, workgroup),
+                per_invocation(&spirv),
                 strips,
                 "{lanes} lanes on a {width}-wide subgroup"
             );
@@ -331,33 +378,15 @@ mod tests {
 
     #[test]
     fn a_kernel_that_touches_one_element_per_invocation_reports_one() {
-        let workgroup = u64::from(kernels::WORKGROUP_SIZE);
-
-        assert_eq!(
-            elements_per_invocation(&kernels::empty(32).expect("built"), workgroup),
-            1
-        );
-        assert_eq!(
-            elements_per_invocation(&kernels::scale(32, 2.0).expect("built"), workgroup),
-            1
-        );
+        assert_eq!(per_invocation(&kernels::empty(32).expect("built")), 1);
+        assert_eq!(per_invocation(&kernels::scale(32, 2.0).expect("built")), 1);
     }
 
     #[test]
     fn a_module_with_no_workgroup_arithmetic_reports_one_rather_than_nothing() {
         // Under-counting is the safe direction: a floor that cannot read a module still refuses
         // the dispatches it can prove wrong, and lets the rest through.
-        assert_eq!(elements_per_invocation(&[], 64), 1);
-
-        // A workgroup of nothing, against a module that *does* have the arithmetic — `empty` has
-        // none, so it returns one without the guard ever being reached and proves nothing. This
-        // divides by zero if the guard goes.
-        let strip_mined = kernels::reduce::lane_sum::<F32, 128>(32).expect("built");
-        assert_eq!(
-            elements_per_invocation(&strip_mined, 0),
-            1,
-            "a workgroup of nothing would divide by zero"
-        );
+        assert_eq!(per_invocation(&[]), 1);
     }
 
     #[test]
@@ -365,27 +394,27 @@ mod tests {
         // **The check the first version could not make.** Four strips at 32 lanes: one workgroup
         // of 64 invocations touches 256 elements, so 64 words is not enough however many
         // invocations there are.
-        let spirv = kernels::reduce::lane_sum::<F32, 128>(32).expect("built");
+        let bounds = Bounds::of(&kernels::reduce::lane_sum::<F32, 128>(32).expect("built"));
         let workgroup = kernels::WORKGROUP_SIZE as usize;
 
-        assert!(fits(&spirv, Grid::linear(1), workgroup * 4));
+        assert!(bounds.fits(Grid::linear(1), workgroup * 4));
         assert!(
-            !fits(&spirv, Grid::linear(1), workgroup),
+            !bounds.fits(Grid::linear(1), workgroup),
             "one element per invocation is what this kernel does not do"
         );
-        assert!(!fits(&spirv, Grid::linear(1), workgroup * 4 - 1));
+        assert!(!bounds.fits(Grid::linear(1), workgroup * 4 - 1));
     }
 
     #[test]
     fn the_strip_count_multiplies_the_requirement_and_does_not_replace_it() {
         // Both factors, together. A version that used the strip count *instead of* the invocation
         // count would accept a dispatch of any width.
-        let spirv = kernels::reduce::lane_sum::<F32, 128>(32).expect("built");
+        let bounds = Bounds::of(&kernels::reduce::lane_sum::<F32, 128>(32).expect("built"));
         let workgroup = kernels::WORKGROUP_SIZE as usize;
 
-        assert!(fits(&spirv, Grid::linear(2), workgroup * 8));
+        assert!(bounds.fits(Grid::linear(2), workgroup * 8));
         assert!(
-            !fits(&spirv, Grid::linear(2), workgroup * 4),
+            !bounds.fits(Grid::linear(2), workgroup * 4),
             "twice the workgroups needs twice the buffer"
         );
     }
@@ -397,27 +426,30 @@ mod tests {
         // one. `kernels::scale` was written that way, and on lavapipe at four lanes it read and
         // wrote eight times the buffer every caller handed it: undefined behaviour returning zeros
         // at width 8 for a day before it became an access violation at 4.
-        //
-        // `notes/NEXT.md` said this check could not catch that class. It can now.
         let spirv = kernels::lane_affine::<32>(4).expect("built");
+        let bounds = Bounds::of(&spirv);
         let workgroup = kernels::WORKGROUP_SIZE as usize;
 
         assert_eq!(
-            elements_per_invocation(&spirv, u64::from(kernels::WORKGROUP_SIZE)),
+            per_invocation(&spirv),
             8,
             "32 lanes on a four-wide subgroup is eight elements each"
         );
         assert!(
-            !fits(&spirv, Grid::linear(1), workgroup),
+            !bounds.fits(Grid::linear(1), workgroup),
             "a buffer of one element per invocation is an eighth of what this reads"
         );
-        assert!(fits(&spirv, Grid::linear(1), workgroup * 8));
+        assert!(bounds.fits(Grid::linear(1), workgroup * 8));
     }
 
     #[test]
     fn an_undecodable_module_is_let_through_rather_than_refused() {
         // "This runner cannot tell" must not be reported as "your module is wrong".
-        assert!(fits(&[], Grid::linear(1 << 20), 1));
+        assert!(Bounds::of(&[]).fits(Grid::linear(1 << 20), 1));
+        assert_eq!(
+            Bounds::of(&[]).overrun(Grid::linear(1 << 20), &[1, 1]),
+            None
+        );
     }
 
     #[test]
@@ -433,15 +465,15 @@ mod tests {
     fn a_byte_kernel_fills_a_word_with_four_invocations_rather_than_one() {
         // The false alarm this check had for one run. 128 invocations of a byte kernel need 128
         // bytes, which is 32 words — not 128 of them.
-        let spirv = kernels::narrow::narrow_add::<I8, 32>(32, 1).expect("built");
+        let bounds = Bounds::of(&kernels::narrow::narrow_add::<I8, 32>(32, 1).expect("built"));
         let workgroup = kernels::WORKGROUP_SIZE as usize;
 
         assert!(
-            fits(&spirv, Grid::linear(2), workgroup / 2),
+            bounds.fits(Grid::linear(2), workgroup / 2),
             "128 byte-writing invocations fit in 32 words"
         );
         assert!(
-            !fits(&spirv, Grid::linear(2), workgroup / 2 - 1),
+            !bounds.fits(Grid::linear(2), workgroup / 2 - 1),
             "and do not fit in 31"
         );
     }
@@ -450,11 +482,96 @@ mod tests {
     fn a_word_kernel_and_a_byte_kernel_disagree_by_exactly_four() {
         // The same dispatch against the same buffer, differing only in element size. If these
         // ever agree, the stride is not reaching the comparison.
-        let words = kernels::empty(32).expect("built");
-        let bytes = kernels::narrow::narrow_add::<I8, 32>(32, 1).expect("built");
+        let words = Bounds::of(&kernels::empty(32).expect("built"));
+        let bytes = Bounds::of(&kernels::narrow::narrow_add::<I8, 32>(32, 1).expect("built"));
         let workgroup = kernels::WORKGROUP_SIZE as usize;
 
-        assert!(!fits(&words, Grid::linear(4), workgroup));
-        assert!(fits(&bytes, Grid::linear(4), workgroup));
+        assert!(!words.fits(Grid::linear(4), workgroup));
+        assert!(bytes.fits(Grid::linear(4), workgroup));
+    }
+
+    #[test]
+    fn a_partly_filled_word_still_needs_the_whole_word() {
+        // Rounding up rather than down. 129 byte-writing invocations need 33 words; a version that
+        // divided would accept 32 and leave the last invocation writing past the end.
+        let bounds = Bounds::of(&kernels::narrow::narrow_add::<I8, 32>(32, 1).expect("built"));
+        let three = Grid::linear(3);
+        let invocations = 3 * kernels::WORKGROUP_SIZE as usize;
+
+        assert_eq!(invocations, 192, "three workgroups of 64");
+        assert!(bounds.fits(three, 48), "192 bytes is exactly 48 words");
+        assert!(!bounds.fits(three, 47));
+    }
+
+    #[test]
+    fn each_binding_is_measured_against_its_own_size() {
+        // **What the module-wide answer could not say.** A reduction reads four strips from binding
+        // 0 and writes one scalar per invocation to binding 1, so the two need 256 elements and 64.
+        // Taking the largest and applying it to both — which is what a single number has to do —
+        // would refuse an output buffer that is exactly the right size.
+        let bounds = Bounds::of(&kernels::reduce::lane_sum::<F32, 128>(32).expect("built"));
+        let workgroup = kernels::WORKGROUP_SIZE as usize;
+
+        assert_eq!(
+            bounds.overrun(Grid::linear(1), &[workgroup * 4, workgroup]),
+            None
+        );
+        assert_eq!(
+            bounds.overrun(Grid::linear(1), &[workgroup, workgroup]),
+            Some(Overrun {
+                binding: Some(0),
+                needed: workgroup * 4,
+                held: workgroup,
+            }),
+            "the input is four strips and only the input is"
+        );
+        assert_eq!(
+            bounds.overrun(Grid::linear(1), &[workgroup * 4, workgroup - 1]),
+            Some(Overrun {
+                binding: Some(1),
+                needed: workgroup,
+                held: workgroup - 1,
+            }),
+            "and the output is still checked, against its own size"
+        );
+    }
+
+    #[test]
+    fn a_binding_addressed_by_workgroup_rather_than_by_invocation_is_left_alone() {
+        // `scan_blocks` writes one total per *workgroup* to binding 2, at `workgroup_index`. There
+        // is no invocation count to multiply there, and a check that multiplied anyway would demand
+        // 64 words for a buffer that legitimately holds one per block.
+        let spirv = kernels::scan::scan_blocks::<F32>(32).expect("built");
+        let bounds = Bounds::of(&spirv);
+        let workgroup = kernels::WORKGROUP_SIZE as usize;
+
+        assert_eq!(
+            bounds.overrun(Grid::linear(4), &[workgroup * 4, workgroup * 4, 4]),
+            None,
+            "four blocks, four totals"
+        );
+        assert_eq!(
+            bounds.overrun(Grid::linear(4), &[workgroup, workgroup * 4, 4]),
+            Some(Overrun {
+                binding: Some(0),
+                needed: workgroup * 4,
+                held: workgroup,
+            }),
+            "and the per-invocation bindings are checked as before"
+        );
+    }
+
+    #[test]
+    fn a_binding_with_no_size_given_is_not_checked() {
+        // `overrun` takes what the caller has. A short list is a caller who bound fewer buffers
+        // than the module names, which is a pipeline failure with a better message than this one.
+        let bounds = Bounds::of(&kernels::reduce::lane_sum::<F32, 128>(32).expect("built"));
+
+        assert_eq!(bounds.overrun(Grid::linear(1), &[]), None);
+        assert_eq!(
+            bounds.overrun(Grid::linear(1), &[kernels::WORKGROUP_SIZE as usize * 4]),
+            None,
+            "binding 1 has no entry, so it is not judged"
+        );
     }
 }

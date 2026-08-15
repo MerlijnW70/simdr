@@ -169,10 +169,10 @@ pub(super) fn fill(rng: &mut Rng, domain: Domain, subgroup: u32, kind: Kind) -> 
             when_any_above: rng.below(u64::from(domain.ceiling())) as u32,
             add: 1 + rng.below(8) as u32,
         },
-        // Zero, always: a non-zero shift reads lanes that do not exist for some invocations, and
-        // SPIR-V leaves those undefined. A reference cannot predict undefined, so this stays the
-        // identity and exists to prove the instruction is emitted and harmless.
-        Kind::ShiftUp => Op::ShiftUp(0),
+        // No operand to draw. A non-zero shift reads lanes that do not exist for some invocations
+        // and SPIR-V leaves those undefined, so the operation carries no distance at all — it is
+        // the identity, and it exists to prove the instruction is emitted and harmless.
+        Kind::ShiftUp => Op::ShiftUp,
     }
 }
 

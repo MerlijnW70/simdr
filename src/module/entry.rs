@@ -84,13 +84,7 @@ impl Module {
         let mut words = Vec::new();
         encode::instruction(&mut words, op::ENTRY_POINT, &operands)?;
 
-        // `Section` has exactly as many variants as there are sections, so this cannot miss; the
-        // `ok_or` keeps that structural rather than resting on it being kept true.
-        let section = self
-            .sections
-            .get_mut(Section::EntryPoint as usize)
-            .ok_or(BuildError::IdSpaceExhausted)?;
-        *section = words;
+        *self.section_mut(Section::EntryPoint) = words;
         Ok(())
     }
 }

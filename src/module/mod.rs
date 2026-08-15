@@ -165,15 +165,47 @@ impl Module {
         opcode: u16,
         operands: &[Word],
     ) -> Result<(), BuildError> {
-        let index = section as usize;
-        // `Section` has exactly SECTION_COUNT variants, so this cannot miss — but `get_mut` keeps
-        // the promise structural instead of resting on that being kept true.
-        let buffer = self
-            .sections
-            .get_mut(index)
-            .ok_or(BuildError::IdSpaceExhausted)?;
-        encode::instruction(buffer, opcode, operands)?;
+        encode::instruction(self.section_mut(section), opcode, operands)?;
         Ok(())
+    }
+
+    /// The buffer `section`'s instructions go into.
+    ///
+    /// **Total, and checked by the compiler in both directions.** The array is taken apart by
+    /// pattern rather than indexed, so a section added to the enum makes the match non-exhaustive
+    /// and a slot added to the array makes the pattern the wrong length — either one is a build
+    /// failure at this line rather than a surprise somewhere else.
+    ///
+    /// It was `self.sections.get_mut(section as usize).ok_or(BuildError::IdSpaceExhausted)`, whose
+    /// own comment said the lookup could not miss. It could not, and it answered with an error
+    /// about running out of result ids if it ever did — a message naming something that had not
+    /// happened, on a path nothing could reach.
+    fn section_mut(&mut self, section: Section) -> &mut Vec<Word> {
+        let [
+            capability,
+            extension,
+            ext_inst_import,
+            memory_model,
+            entry_point,
+            execution_mode,
+            debug,
+            annotation,
+            type_constant_variable,
+            function,
+        ] = &mut self.sections;
+
+        match section {
+            Section::Capability => capability,
+            Section::Extension => extension,
+            Section::ExtInstImport => ext_inst_import,
+            Section::MemoryModel => memory_model,
+            Section::EntryPoint => entry_point,
+            Section::ExecutionMode => execution_mode,
+            Section::Debug => debug,
+            Section::Annotation => annotation,
+            Section::TypeConstantVariable => type_constant_variable,
+            Section::Function => function,
+        }
     }
 
     /// Give `id` a debug name (`OpName`).

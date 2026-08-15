@@ -30,6 +30,20 @@
 //!
 //! Strip-mined vectors are fine: every strip is a full subgroup's worth, and shuffling each one
 //! separately is exactly right.
+//!
+//! # The operand has to name a lane the vector has
+//!
+//! Every one of these takes a lane, a distance or a mask as a build-time `u32`, and SPIR-V leaves
+//! the result **undefined** where that reaches outside the group. `Lanes::within_group` is the
+//! one bound all of them are held to, and the group it names is the subgroup — or the vector's own
+//! width where that is narrower, which is the same rule the clustered rows above state.
+//!
+//! **It is a bound rather than a clamp, and it is here rather than nowhere because nothing below
+//! can see it.** A butterfly with a mask of 4096 on a 32-wide subgroup builds a module `spirv-val`
+//! accepts, that every device runs, and that answers with whatever was in the register. The
+//! clustered cases were refused by name from the day they were allowed; the whole-subgroup and
+//! strip-mined ones were not, and an operand outside the vector is the same mistake whichever
+//! mapping the vector has.
 
 use super::{Element, LaneError, Lanes, Mapping, U32, Vector};
 use crate::module::op;
@@ -42,15 +56,18 @@ impl Lanes<'_> {
     /// wrapping, which is why this is `rotate` only in the loose sense and why a caller that
     /// needs the wrap has to mask it themselves.
     ///
+    /// A `delta` of the subgroup's width or more leaves *every* lane undefined — an operation with
+    /// no answer at all rather than one with an undefined edge — and is refused by name.
+    ///
     /// # Errors
     ///
-    /// [`LaneError::NoSuchForm`] for a clustered mapping, otherwise [`LaneError::Build`].
+    /// [`LaneError::NoSuchForm`] for a clustered mapping, [`LaneError::LaneOutOfRange`] if `delta`
+    /// is not below the subgroup's width, otherwise [`LaneError::Build`].
     pub fn shift_down<T: Element, const LANES: u32>(
         &mut self,
         vector: Vector<T, LANES>,
         delta: u32,
     ) -> Result<Vector<T, LANES>, LaneError> {
-        let delta = self.module().constant_u32(delta)?;
         self.exchange::<T, LANES>(
             "shift_down",
             vector,
@@ -70,7 +87,6 @@ impl Lanes<'_> {
         vector: Vector<T, LANES>,
         delta: u32,
     ) -> Result<Vector<T, LANES>, LaneError> {
-        let delta = self.module().constant_u32(delta)?;
         self.exchange::<T, LANES>(
             "shift_up",
             vector,
@@ -92,27 +108,22 @@ impl Lanes<'_> {
     /// nothing to mask off and no lane to leave undefined; the pairing is exactly the one the
     /// caller asked for, in every one of the vectors sharing the subgroup at once.
     ///
-    /// A `mask` at or above `LANES` *would* leave, and is refused by name rather than clamped —
-    /// the caller asking for it has a different vector in mind than the one they are holding.
+    /// A `mask` at or above the vector's own width *would* leave, and is refused by name rather
+    /// than clamped — the caller asking for it has a different vector in mind than the one they
+    /// are holding. That is `Lanes::within_group`, and it is the same bound a whole-subgroup
+    /// vector is held to: a mask of 4096 on a 32-wide subgroup pairs every lane with one that does
+    /// not exist.
     ///
     /// # Errors
     ///
-    /// [`LaneError::NoSuchForm`] if `mask` reaches outside a clustered vector, otherwise as
+    /// [`LaneError::LaneOutOfRange`] if `mask` reaches outside the vector, otherwise as
     /// [`Lanes::shift_down`].
     pub fn butterfly<T: Element, const LANES: u32>(
         &mut self,
         vector: Vector<T, LANES>,
         mask: u32,
     ) -> Result<Vector<T, LANES>, LaneError> {
-        if let Mapping::Clusters { size } = self.mapping::<LANES>()?
-            && mask >= size
-        {
-            return Err(LaneError::NoSuchForm {
-                operation: "butterfly",
-                because: "a mask as wide as the vector pairs it with a lane belonging to the next \
-                          vector along",
-            });
-        }
+        self.within_group::<LANES>("butterfly", mask)?;
 
         let mask = self.module().constant_u32(mask)?;
         self.shuffle::<T, LANES>(
@@ -134,18 +145,19 @@ impl Lanes<'_> {
     ///
     /// # Errors
     ///
-    /// [`LaneError::NoSuchForm`] if `source` is outside a clustered vector, otherwise as
+    /// [`LaneError::LaneOutOfRange`] if `source` is outside the vector, otherwise as
     /// [`Lanes::shift_down`].
     pub fn broadcast<T: Element, const LANES: u32>(
         &mut self,
         vector: Vector<T, LANES>,
         source: u32,
     ) -> Result<Vector<T, LANES>, LaneError> {
+        self.within_group::<LANES>("broadcast", source)?;
+
         if let Mapping::Clusters { size } = self.mapping::<LANES>()? {
             return self.broadcast_within_cluster::<T, LANES>(vector, size, source);
         }
 
-        let source = self.module().constant_u32(source)?;
         self.exchange::<T, LANES>(
             "broadcast",
             vector,
@@ -229,6 +241,11 @@ impl Lanes<'_> {
     /// The lane read is `(lane & !(size - 1)) + source` — this cluster's first lane plus the
     /// position asked for. `size` is a power of two, which is what makes the rounding a mask.
     ///
+    /// `source` is inside the cluster by the time this is reached: [`Lanes::broadcast`] holds every
+    /// mapping to `Lanes::within_group`, whose bound for a clustered vector is `size`. It used to
+    /// be checked here as well, which made one rule two — and only one of the two could ever be the
+    /// load-bearing copy.
+    ///
     /// **A `size` of one is answered without emitting any of that.** The only `source` it accepts
     /// is 0, so every lane would read itself — three instructions computing the value they were
     /// given. The right answer is the vector, and a module that says so is the module that matches
@@ -239,13 +256,6 @@ impl Lanes<'_> {
         size: u32,
         source: u32,
     ) -> Result<Vector<T, LANES>, LaneError> {
-        if source >= size {
-            return Err(LaneError::NoSuchForm {
-                operation: "broadcast",
-                because: "the lane named is past the end of this vector, and holds an element of \
-                          the next one along",
-            });
-        }
         if size == 1 {
             return Ok(vector);
         }
@@ -289,13 +299,20 @@ impl Lanes<'_> {
         )
     }
 
-    /// One shuffle per strip, once the mapping has been checked.
+    /// One shuffle per strip, once the mapping and the operand have both been checked.
+    ///
+    /// The mapping first: a clustered vector has no form of these at all, and saying so is more use
+    /// than telling a caller their distance is too large for a cluster they should not be shuffling
+    /// in the first place.
+    ///
+    /// The constant is emitted **after** both checks, so a refused call leaves the module holding
+    /// nothing it did not already have.
     fn exchange<T: Element, const LANES: u32>(
         &mut self,
         name: &'static str,
         vector: Vector<T, LANES>,
         kind: Exchange,
-        operand: crate::module::Id,
+        operand: u32,
         capability: Capability,
     ) -> Result<Vector<T, LANES>, LaneError> {
         if let Mapping::Clusters { .. } = self.mapping::<LANES>()? {
@@ -305,8 +322,44 @@ impl Lanes<'_> {
                           those lanes with other vectors",
             });
         }
+        self.within_group::<LANES>(name, operand)?;
 
+        let operand = self.module().constant_u32(operand)?;
         self.shuffle::<T, LANES>(vector, kind, operand, capability)
+    }
+
+    /// Refuse an operand naming a lane the vector does not have.
+    ///
+    /// **One bound for every mapping, because it is one rule**: a shuffle's operand may not reach
+    /// outside the lanes this vector occupies. Those are the subgroup's, or the vector's own where
+    /// it is narrower — a cluster is an aligned run of `LANES` lanes and the ones beside it hold
+    /// another vector's elements.
+    ///
+    /// A strip-mined vector is bounded by the subgroup and not by `LANES`: each strip is shuffled
+    /// across the subgroup on its own, so a distance of 40 on a 32-wide device reaches nothing,
+    /// however wide the vector is.
+    ///
+    /// Written once here rather than at each call site. It was written at one call site — the
+    /// clustered butterfly — and the three mappings that were missing it are the reason this
+    /// exists.
+    fn within_group<const LANES: u32>(
+        &self,
+        operation: &'static str,
+        operand: u32,
+    ) -> Result<(), LaneError> {
+        let lanes = match self.mapping::<LANES>()? {
+            Mapping::WholeSubgroup | Mapping::Strips { .. } => self.width(),
+            Mapping::Clusters { size } => size,
+        };
+
+        if operand >= lanes {
+            return Err(LaneError::LaneOutOfRange {
+                operation,
+                operand,
+                lanes,
+            });
+        }
+        Ok(())
     }
 
     /// The instructions themselves, which the mapping does not change: one shuffle per strip.
@@ -576,9 +629,10 @@ mod tests {
         assert!(lanes.broadcast(value, 7).is_ok(), "the last lane is inside");
         assert!(matches!(
             lanes.broadcast(value, 8).err(),
-            Some(LaneError::NoSuchForm {
+            Some(LaneError::LaneOutOfRange {
                 operation: "broadcast",
-                ..
+                operand: 8,
+                lanes: 8,
             })
         ));
     }
@@ -622,14 +676,75 @@ mod tests {
             assert!(
                 matches!(
                     lanes.butterfly(value, mask).err(),
-                    Some(LaneError::NoSuchForm {
+                    Some(LaneError::LaneOutOfRange {
                         operation: "butterfly",
+                        lanes: 8,
                         ..
                     })
                 ),
                 "a mask of {mask} leaves an eight-lane cluster and must be refused"
             );
         }
+    }
+
+    #[test]
+    fn a_shuffle_past_the_subgroup_is_refused_at_every_mapping() {
+        // **The hole this bound was written for.** The clustered rows above refused an operand
+        // outside the vector from the day they were allowed; the whole-subgroup and strip-mined
+        // rows refused nothing at all, and `butterfly(value, 4096)` on a 32-wide subgroup built a
+        // module `spirv-val` accepts and no device computes anything with.
+        //
+        // Both mappings are bounded by the *subgroup*, including the strip-mined one: a strip is
+        // shuffled across the subgroup on its own, so 40 reaches nothing on a 32-wide device
+        // however wide the vector is.
+        let mut module = Module::new(Version::V1_3);
+        let mut lanes = Lanes::new(&mut module, 32).expect("built");
+        let whole = lanes.splat_bits::<F32, 32>(0).expect("splat");
+        let wide = lanes.splat_bits::<F32, 128>(0).expect("splat");
+
+        assert!(
+            lanes.butterfly(whole, 31).is_ok(),
+            "the last lane is inside"
+        );
+        assert!(lanes.broadcast(whole, 31).is_ok());
+        assert!(lanes.shift_up(whole, 31).is_ok());
+        assert!(lanes.shift_down(whole, 31).is_ok());
+
+        for operand in [32, 40, 4096] {
+            for outcome in [
+                lanes.butterfly(whole, operand).err(),
+                lanes.broadcast(whole, operand).err(),
+                lanes.shift_up(whole, operand).err(),
+                lanes.shift_down(whole, operand).err(),
+                lanes.butterfly(wide, operand).err(),
+                lanes.broadcast(wide, operand).err(),
+                lanes.shift_up(wide, operand).err(),
+                lanes.shift_down(wide, operand).err(),
+            ] {
+                assert!(
+                    matches!(outcome, Some(LaneError::LaneOutOfRange { lanes: 32, .. })),
+                    "{operand} reaches outside a 32-wide subgroup and gave {outcome:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_refused_shuffle_leaves_the_module_as_it_was() {
+        // The operand becomes an `OpConstant` before it can become a shuffle, and a refusal that
+        // emitted it first would leave a declaration for an operation that never happened. Cheap
+        // to get wrong: the check moved above the constant, and this is what says it stayed there.
+        let mut module = Module::new(Version::V1_3);
+        let mut lanes = Lanes::new(&mut module, 32).expect("built");
+        let value = lanes.splat_bits::<F32, 32>(0).expect("splat");
+        let before = module.finish().len();
+
+        let mut lanes = Lanes::new(&mut module, 32).expect("built");
+        assert!(lanes.shift_up(value, 99).is_err());
+        assert!(lanes.butterfly(value, 99).is_err());
+        assert!(lanes.broadcast(value, 99).is_err());
+
+        assert_eq!(module.finish().len(), before, "nothing was emitted");
     }
 
     #[test]

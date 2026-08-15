@@ -374,6 +374,40 @@ mod tests {
     }
 
     #[test]
+    fn a_shape_whose_subgroup_is_not_a_power_of_two_is_refused_at_the_kernel() {
+        // **The field that was not checked.** `Shape` carries four numbers and this validated
+        // three of them, so `Shape::new(0, 64, 2)` built a kernel, stored to a buffer and finished
+        // a module `spirv-val` accepts — the width never questioned, because the only thing that
+        // questioned it was `Lanes::new`, which a kernel with no lane operation never reaches.
+        //
+        // A width is not a detail of the lane API. `decisions/DR-0002` makes it the number the
+        // whole module is specialised to, and a shape naming an impossible one describes nothing
+        // in the same way a workgroup of no invocations does.
+        for width in [0_u32, 3, 24, 63, u32::MAX] {
+            assert_eq!(
+                Kernel::<F32>::new(Shape::new(width, 64, 2)).err(),
+                Some(LaneError::BadWidth { width }),
+                "a subgroup width of {width} was accepted"
+            );
+        }
+
+        // And the same for a grid, which goes through the same builder.
+        assert_eq!(
+            Kernel::<F32>::new(Shape::grid(24, 64, 4, 2)).err(),
+            Some(LaneError::BadWidth { width: 24 })
+        );
+
+        // Every power of two a device could report still builds, including the ones no device
+        // does: this refuses what cannot be a width, not what is unlikely to be one.
+        for width in [1_u32, 4, 8, 16, 32, 64, 128] {
+            assert!(
+                Kernel::<F32>::new(Shape::new(width, 64, 2)).is_ok(),
+                "a subgroup width of {width} was refused"
+            );
+        }
+    }
+
+    #[test]
     fn the_workgroup_index_is_the_workgroup_built_in_and_not_the_invocation_one() {
         // Two accessors returning ids of the same type, one of which is a plausible wrong answer
         // for the other. Swapping them compiles, validates, and puts every block's result in the

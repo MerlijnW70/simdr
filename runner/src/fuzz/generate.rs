@@ -163,7 +163,7 @@ mod tests {
             assert!(
                 !program.steps.iter().any(|step| matches!(
                     step,
-                    Op::ButterflyAdd(_) | Op::ShiftUp(_) | Op::AddIfAnyAbove { .. }
+                    Op::ButterflyAdd(_) | Op::ShiftUp | Op::AddIfAnyAbove { .. }
                 )),
                 "seed {seed} put a subgroup-wide operation in a clustered program"
             );

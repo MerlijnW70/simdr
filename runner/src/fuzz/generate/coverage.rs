@@ -46,7 +46,7 @@ fn the_generator_reaches_every_operation_it_knows() {
                 Op::AddIfAllEqual { .. } => "agree",
                 Op::SelectEqual { .. } => "equal",
                 Op::RotateUp(_) => "rotate",
-                Op::ShiftUp(_) => "shift",
+                Op::ShiftUp => "shift",
             };
             if !seen.contains(&name) {
                 seen.push(name);
@@ -123,7 +123,7 @@ fn a_whole_subgroup_program_does_ask_for_shuffles_and_votes() {
         if program.steps.iter().any(|step| {
             matches!(
                 step,
-                Op::ButterflyAdd(_) | Op::ShiftUp(_) | Op::AddIfAnyAbove { .. }
+                Op::ButterflyAdd(_) | Op::ShiftUp | Op::AddIfAnyAbove { .. }
             )
         }) {
             reached = true;

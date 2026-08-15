@@ -69,6 +69,19 @@ impl Gpu {
             return Err(Error::NoPipeline);
         }
 
+        // Every pass, before anything is allocated. Both buffers are `input.len()` words wide for
+        // the whole chain, so each pass is the single-length question `Gpu::run` asks — and a chain
+        // is where getting it wrong is least visible, because a pass that runs off the end writes
+        // into whatever the *next* pass is about to read.
+        for pass in passes {
+            let grid = super::Grid::linear(pass.workgroups);
+            if let Some(overrun) =
+                super::extent::Bounds::of(pass.spirv).overrun_uniform(grid, input.len())
+            {
+                return Err(overrun.into());
+            }
+        }
+
         let count = head.min(input.len()).max(1);
         let bytes = (input.len().max(1) * size_of::<u32>()) as u64;
 

@@ -2543,3 +2543,145 @@ and had only ever run where the seeds happened not to draw one.
 Adding two operations changed which programs the seeds produce, and the test met a refusal for the
 first time. **The fifth time a width sweep has found something the width did not cause** — it moves
 the dice, and what falls out was already there.
+
+---
+
+## Four checks that were right where they were written — 2026-08-15
+
+An audit that asked, of every check in the tree, *where is this called from* rather than *does this
+work*. Four answers were "from fewer places than it is about", and none of the seven layers could
+have said so: each of these checks passes its own tests, and a check that guards one caller reads
+exactly like a check that guards all of them.
+
+### `dispatch::extent` guarded one of the six ways this crate dispatches
+
+`Gpu::run` was checked. `Gpu::run_bound`, `Session::dispatch`, `Gpu::run_chain`, `Gpu::reducer` and
+`Gpu::scanner` were not — and every one of them can write past the end of a binding from safe code,
+which is undefined behaviour rather than a wrong number. This is the layer that found **eleven tests
+reading past their input** the first time it ran, listed in `README.md` as one of seven, covering a
+sixth of its subject for four days.
+
+Extending it needed a different question. One length for every buffer is what `Gpu::run` allocates
+and it is the wrong shape for the rest: a reduction reads four strips from binding 0 and writes one
+scalar per invocation to binding 1, so a single number has to take the larger and would refuse an
+output buffer that is exactly right. The strip count is recovered **per binding** now — the access
+chain names the variable, the variable carries its `Binding` decoration, and the `OpIAdd`/`OpIMul`
+between them say how many elements each invocation touches. `dispatch::extent::addressing` is that
+walk; `runner/tests/bounds.rs` asks each of the six doors the same question.
+
+Two deliberate omissions, both in the safe direction. A binding whose address does not depend on the
+invocation — `Kernel::store_at` writing one total per *workgroup* — is left out rather than guessed
+at, because over-counting one refuses a dispatch that is correct. And a module whose addressing the
+walk cannot read is let through: **"this runner cannot tell" must never be reported as "your module
+is wrong"**.
+
+### A shuffle's operand was bounded for one mapping and unbounded for the other two
+
+`Lanes::butterfly` refused a mask at or above the vector's width for a **clustered** vector, from
+the day clustered shuffles were allowed. For a whole-subgroup or strip-mined one it refused nothing:
+
+```rust
+lanes.butterfly(value, 4096)   // on a 32-wide subgroup
+```
+
+builds a module `spirv-val` accepts, that every device runs, and in which every lane reads a lane
+that does not exist. SPIR-V leaves the result undefined; a device answers with whatever was in the
+register. `broadcast`, `shift_up` and `shift_down` were the same.
+
+Nothing below the API can see this. The validator does not know the subgroup width — it is a
+property of the device, not of the module — so this is the second thing in this project that only a
+bound in the API can catch, after the one `dispatch::extent` exists for.
+
+The bound is one rule now rather than one row's rule: the operand may not reach outside the lanes
+the vector occupies, which are the subgroup's or the vector's own where it is narrower. It costs
+nothing — every one of these takes a build-time `u32` — and **32 000 fuzzing rounds refused none of
+them**, which is the check that it bounds what it should and not what it should not.
+
+### `Shape` carried four numbers and `Kernel::new` checked three
+
+`Shape::new(0, 64, 2)` built a kernel, stored to a buffer and finished a module the validator
+accepts. So did a width of 24. The width is the number `decisions/DR-0002` makes the whole module
+specific to — and it was checked in `Lanes::new`, which a kernel with no lane operation never
+reaches. The buffers, the workgroup and the rows had all been refused from the first day.
+
+The fix moved the same bound to where the shape is. It also removed a guard next door: the workgroup
+scan checked `subgroup == 0 || !workgroup.is_multiple_of(subgroup)` and reported it as
+`BadShape { workgroup, buffers: subgroup }` — a subgroup width in a field named for a buffer count,
+printing *"a kernel of 64 invocations over 24 buffers describes nothing"*. Half of that condition is
+unreachable now and the other half says what it means.
+
+### The address arithmetic saturated
+
+`Kernel::address` computed `strip × workgroup + offset` with `saturating_mul` and `saturating_add`,
+with a comment explaining that no shape a device accepts comes near the limit. True of the shape —
+and `offset` is an ordinary argument of `Kernel::load_offset`, so an offset near `u32::MAX` produced
+a *different* element index rather than a refusal. Saturating turns an address nobody can express
+into one that exists, and the module says nothing about it.
+
+Both terms are computed in `u64` and refused by name now, which is what this project does everywhere
+else it meets this trade.
+
+### The shape all four share
+
+Not "these were unchecked". Each had a check that was **correct where it was written** and had
+stopped covering everything it was about — a new entry point, a new mapping, a new field, a new
+argument. That is the same failure `Buffer::write`'s safety comment had, and the same one the
+mutation gate keeps finding in the fuzzer: whatever is furthest from the thing under test is
+furthest from anybody looking.
+
+The habit that found them is worth more than the four fixes: **ask where a check is called from, not
+whether it works.**
+
+## The documentation build had never passed — 2026-08-15
+
+`README.md` has listed this among the commands to run since before `.github/workflows/ci.yml`
+existed:
+
+```powershell
+$env:RUSTDOCFLAGS = "-D warnings"
+cargo doc --workspace --no-deps
+```
+
+It fails at `HEAD`, and had been failing for as long as anyone can tell: **twelve broken intra-doc
+links**, plus a filename collision that had `cargo doc --workspace` writing the library's front page
+and the CLI binary's to the same file.
+
+Rustdoc treats `broken_intra_doc_links` and `private_intra_doc_links` as *warnings*, so `cargo doc`
+exits zero over all of it. The `-D warnings` in the README is exactly what turns that into an
+answer — and nothing ran the command, so the setting had never been applied.
+
+One of the twelve was not cosmetic: `runner::fuzz::reference` is a public function returning
+`Reference`, a type that was never re-exported. A caller could call it and could not name what came
+back.
+
+**A check that is written down and not run is worse than one that is neither**, because the writing
+down is what stops anybody from adding it. It is a CI step now.
+
+## The scan's pass wiring moved inside the gate — 2026-08-15
+
+`runner/src/scan/held.rs` was 651 lines with no tests — excused from the mutation gate as FFI, which
+it mostly was. What it also held was `record`: which module each of the seven dispatches runs, over
+which buffers, at how many workgroups. That is index arithmetic, it contains no `unsafe`, and it is
+the most intricate addressing in the crate.
+
+It is `runner/src/scan/passes.rs` now, and what the move bought is stated as tests that need no
+device: every pass reads only what an earlier pass wrote; the last pass writes the answer and
+nothing else does; the top is one workgroup and the only one; a map with nowhere to write is refused
+rather than dropped. None of those could be asked before.
+
+**The fifth time this seam has been worth cutting** — after `dispatch/step.rs`, `reduction/plan.rs`,
+`scan/plan.rs` and `step::upload_bytes`. The rule keeps producing it: *a file is excused for
+containing `unsafe`, not for being near it.*
+
+## An operand that was always zero — 2026-08-15
+
+`fuzz::Op::ShiftUp(u32)` carried a distance, drawn as zero and nothing else, because SPIR-V leaves a
+shift's out-of-range lanes undefined and a reference cannot predict undefined. The interpreter
+ignored the operand; the generator never varied it; a comment on each said so.
+
+`Program` is public. Anything that built a `ShiftUp(2)` would have been compared against the answer
+for a different program — silently, since the reference returns values rather than a verdict.
+
+It is `Op::ShiftUp` now, with no operand at all. The invariant was in two comments and is in the
+type. The opposite case keeps its `u32`: `Op::RotateUp` *can* be checked at any distance, because a
+rotate wraps and every lane reads inside its own vector.

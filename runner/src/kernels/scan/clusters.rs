@@ -8,7 +8,7 @@
 //! `Lanes::prefix_sum` refused a clustered vector, and the refusal was the thing to fix rather than
 //! to work around. What is left in this file is the kernel that *runs* the lane API's third
 //! mapping: a load, a scan and a store, with the cluster width in the type. The ladder itself, and
-//! the argument for why it is a ladder rather than a subtraction, are in `simdr`'s `lanes::reduce`.
+//! the argument for why it is a ladder rather than a subtraction, are in `simdr`'s `lanes::scan`.
 //!
 //! Split from [`super`] because it shares nothing with what is there: the workgroup scan and the
 //! block composition both build on [`super::scanned_at`], and this builds on the mapping.

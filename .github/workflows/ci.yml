@@ -58,6 +58,19 @@ jobs:
       - name: integrity
         run: cargo test --test integrity
 
+      # **A broken doc link is a build failure, and nothing was making it one.** `README.md` has
+      # listed this command among the checks since before this workflow existed, and it had been
+      # failing the whole time: `broken_intra_doc_links` and `private_intra_doc_links` are warnings
+      # by default, so `cargo doc` exited zero over twelve dead links — one of them a public
+      # function whose return type could not be named.
+      #
+      # A check that is written down and not run is worse than one that is neither, because the
+      # writing down is what stops anybody adding it.
+      - name: documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps
+
   device:
     name: lavapipe — widths 4, 8 and 16
     runs-on: ubuntu-latest
