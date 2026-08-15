@@ -699,3 +699,47 @@ fn the_vote_on_a_value_is_compared_on_a_corpus_that_makes_it_pass() {
         }
     }
 }
+
+#[test]
+fn a_corpus_shorter_than_the_program_is_named_rather_than_absorbed() {
+    // **The reference is the one component with no second opinion.** Everything else in this file
+    // is checked by comparing it against `interpret`, so a reference that fills in the elements it
+    // is missing is wrong in the only direction nothing can catch — and it filled in zeros, which
+    // are a plausible element in every domain here.
+    //
+    // A short corpus then produced an expected answer for a program nobody asked about, and the
+    // round failed on the *dispatch's* bound with a message about buffers. `check` refuses it by
+    // name now, before the reference runs at all.
+    let Some(gpu) = device("fuzz-short-corpus") else {
+        return;
+    };
+
+    let width = gpu.limits().subgroup_size;
+    let program = Program {
+        domain: Domain::Unsigned,
+        subgroup: width,
+        workgroup: WORKGROUP_SIZE,
+        groups: 1,
+        lanes: width,
+        steps: vec![Op::AddConstant(1)],
+        finish: Finish::Sum,
+    };
+
+    let needed = program.input_len();
+    let short = vec![0_u32; needed - 1];
+
+    match fuzz::check(&gpu, &program, &short) {
+        Err(fuzz::FuzzError::ShortInput {
+            needed: asked,
+            given,
+        }) => {
+            assert_eq!(asked, needed);
+            assert_eq!(given, needed - 1);
+        }
+        other => panic!("a corpus one element short gave {other:?}"),
+    }
+
+    // And the length it does read is not refused, so this is a bound rather than a bar.
+    let whole = vec![0_u32; needed];
+    assert!(fuzz::check(&gpu, &program, &whole).is_ok());
+}

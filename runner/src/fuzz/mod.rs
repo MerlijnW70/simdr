@@ -119,6 +119,23 @@ pub enum Outcome {
 pub enum FuzzError {
     /// The dispatch failed.
     Run(Error),
+    /// The input holds fewer elements than the program reads.
+    ///
+    /// **A caller error the reference used to absorb.** `interpret` gathers each invocation's
+    /// elements at the addresses the kernel computes and read a short input as *zeros* — so a
+    /// corpus one element short produced an expected answer for a program nobody asked about, and
+    /// the round then failed on the dispatch's own bound with a message about buffers.
+    ///
+    /// The sweeps here size their corpus from [`Program::input_len`] and cannot reach this. That is
+    /// the reason to name it rather than to leave it: a reference that quietly invents the data it
+    /// is missing is the one component whose wrongness cannot be caught by comparing it to
+    /// something.
+    ShortInput {
+        /// Elements the program reads.
+        needed: usize,
+        /// Elements the input holds.
+        given: usize,
+    },
 }
 
 impl From<Error> for FuzzError {
@@ -131,6 +148,12 @@ impl core::fmt::Display for FuzzError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Run(error) => write!(f, "{error}"),
+            Self::ShortInput { needed, given } => {
+                write!(
+                    f,
+                    "this program reads {needed} elements and was given {given}"
+                )
+            }
         }
     }
 }
@@ -142,8 +165,21 @@ impl std::error::Error for FuzzError {}
 /// # Errors
 ///
 /// [`FuzzError::Run`] if the dispatch itself fails, which is a broken environment rather than a
-/// disagreement.
+/// disagreement. [`FuzzError::ShortInput`] if `input` holds less than the program reads, which is a
+/// caller error and is checked here because the reference below would otherwise absorb it.
 pub fn check(gpu: &Gpu, program: &Program, input: &[u32]) -> Result<Outcome, FuzzError> {
+    // Before anything, and before the reference in particular. `interpret` reads at the addresses
+    // the kernel computes and treats a missing element as a zero — so a short corpus produces an
+    // expected answer for a program nobody asked about, and the round then fails on the dispatch's
+    // bound with a message about buffers rather than about the corpus.
+    let needed = program.input_len();
+    if input.len() < needed {
+        return Err(FuzzError::ShortInput {
+            needed,
+            given: input.len(),
+        });
+    }
+
     let spirv = match program.build() {
         Ok(spirv) => spirv,
         Err(refused) => return Ok(Outcome::Refused(refused)),

@@ -32,11 +32,30 @@ pub struct Reference {
 }
 
 /// What the device should return for `program` over `input`.
+///
+/// # Panics
+///
+/// If `input` holds fewer than [`Program::input_len`] elements. **It used to read those as zeros**,
+/// which is the one thing a reference model must never do: every other component here is checked by
+/// comparing it against this one, so a reference that quietly invents the data it is missing is
+/// wrong in the only direction nothing can catch. A short corpus produced an expected answer for a
+/// program nobody asked about, and the round then failed on the *dispatch's* bound with a message
+/// about buffers.
+///
+/// [`super::check`] refuses that input by name before reaching here, so a caller going through it
+/// cannot see this.
 #[must_use]
 pub fn reference(program: &Program, input: &[u32]) -> Reference {
     let invocations = (program.groups * program.workgroup) as usize;
     let strips = strips_of(program);
     let domain = program.domain;
+
+    assert!(
+        input.len() >= program.input_len(),
+        "this program reads {} elements and was given {}",
+        program.input_len(),
+        input.len()
+    );
 
     // Step 1: gather each invocation's elements, using the same address arithmetic the kernel
     // does — workgroup-blocked, strided within the run.
@@ -49,8 +68,10 @@ pub fn reference(program: &Program, input: &[u32]) -> Reference {
         held.push(
             (0..strips)
                 .map(|strip| {
+                    // In range by the assertion above: the largest `at` any invocation computes is
+                    // `groups × workgroup × strips - 1`, which is `input_len` less one.
                     let at = base + local + strip * program.workgroup as usize;
-                    input.get(at).copied().unwrap_or_else(|| domain.zero())
+                    input[at]
                 })
                 .collect(),
         );
@@ -320,6 +341,29 @@ mod tests {
     /// A ramp of small integers, encoded for `domain`.
     fn ramp(domain: Domain, count: u32) -> Vec<u32> {
         (0..count).map(|value| domain.encode(value)).collect()
+    }
+
+    #[test]
+    #[should_panic(expected = "reads 64 elements and was given 63")]
+    fn a_short_input_is_refused_rather_than_read_as_zeros() {
+        // **The direction of wrongness nothing else here can catch.** Every other component is
+        // checked by comparing it against this one, so a reference that fills in what it is missing
+        // is wrong with no second opinion available — and it filled in *zeros*, which are a
+        // perfectly plausible element in every domain this fuzzes.
+        //
+        // One element short of a single workgroup, which is the shape a corpus built from the wrong
+        // program would have.
+        let program = program(Domain::Unsigned, 32, vec![Op::AddConstant(1)], Finish::Sum);
+        let _ = reference(&program, &ramp(Domain::Unsigned, 63));
+    }
+
+    #[test]
+    fn exactly_what_the_program_reads_is_enough() {
+        // The other side of the bound, so the refusal above is a bound rather than a bar. The
+        // largest address any invocation computes is `input_len` less one.
+        let program = program(Domain::Unsigned, 32, vec![Op::AddConstant(1)], Finish::Sum);
+        assert_eq!(program.input_len(), 64);
+        assert!(reference(&program, &ramp(Domain::Unsigned, 64)).exact);
     }
 
     #[test]
