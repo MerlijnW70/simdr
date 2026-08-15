@@ -18,7 +18,7 @@ Stated first because the gap is only visible against it.
 | every emitted module's **legality** | `spirv-val` | the kernel library at 5 widths, plus 232 generated programs |
 | the zero-dependency boundary, the decision records' presence, the fail-closed sites | `noha gate` | 56 + <!--count:decisions-->9 + 1 checks |
 | every public operation has a consumer; **every opcode is emitted by something**; every pipeline builder bounds its dispatch; the mutation config matches the tree | `tests/integrity.rs` | <!--count:integrity-tests-->17 tests |
-| **the numbers these documents state about this repository**; every decision record naming what enforces it | `tests/documented.rs` | <!--count:documented-tests-->7 tests |
+| **the numbers these documents state**; **every file and every member they name**; every decision record naming what enforces it | `tests/documented.rs` | <!--count:documented-tests-->11 tests |
 | formatting, lints, **doc links**, the MSRV, the skip counts per width | CI | <!--count:ci-jobs-->3 jobs, the device one a matrix of three widths |
 | behaviour | two GPUs and lavapipe | widths 4, 8, 16, 32, 64 |
 
@@ -124,6 +124,40 @@ nothing about adding a tenth record would have made the nine here wrong — the 
 this whole document is about, in the document about it. `tests/documented.rs` compares the two now:
 every record in `decisions/` is cited here, and every record carries the `## What enforces this`
 section this table is assembled from.
+
+### And the other two thirds of a document: what it names
+
+The counters cover the *numbers*. A document also names **files** and **members**, and those go
+stale the same way and more quietly, because a wrong path or a wrong method still reads like a
+reference.
+
+Neither needed a marker. This tree already quotes what it means — a file, a type, an instruction —
+and leaves ordinary prose unquoted, so **the backticks were already the markup and nothing read
+them**. `tests/documented.rs` reads them now: a quoted path must name a file that exists (by suffix,
+because the prose says `scan/plan.rs` and means `runner/src/scan/plan.rs`), and a quoted
+`Type::member` must name something the tree declares, where the type is one the tree declares.
+
+Both are floors rather than proofs, in the safe direction — the trade `consumed_outside` makes one
+file over. And both found things on their first run:
+
+* **Four dangling paths**, in prose and in doc comments. `tests/kernels.rs` named a `kernels.rs`
+  that stopped existing the day the module became `runner/src/kernels/mod.rs` — a sentence wrong
+  since the split, in the file whose subject it is.
+* **Thirty of `runner`'s own methods reported as undeclared**, which was the *check* being wrong:
+  it stripped `pub` and not `unsafe`, so every Vulkan method was invisible to it. The half of the
+  tree with a blind spot is the half with `unsafe` in it, which is worth knowing about a scanner.
+* **`Reference::exact` and `Reduction::total`**, likewise — a field is a member a reader writes
+  about the same way, and the first version collected only variants.
+
+**The member check is the one this document was owed.** DR-0002 named `LaneError::TooWide` as the
+error refusing strip mining; strip mining had been built for weeks and that error was never written,
+and `noha gate` printed a tick beside the record. That is the failure `tests/integrity.rs` exists
+because of, and until now the *specific* half of it — a name nothing declares — was still unchecked.
+
+Two exception lists carry what prose legitimately names and the tree does not hold: a document in
+the sibling project, and five members that were deleted or never existed. `LaneError::TooWide` is on
+the second, quoted by three test files as the mistake that motivated them — and an expiry test fails
+if any excused name comes back, which is the only way to quote a mistake without re-making it.
 
 ## 3. Uniqueness and absence — 165 claims, three mechanised
 

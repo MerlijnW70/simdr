@@ -5,7 +5,7 @@
 //! `runner` workspace member is what closes that gap.
 //!
 //! These used to hand-build sixty lines of buffer interface each, duplicating what
-//! `runner/src/kernels.rs` also had. [`Kernel`] owns that now, so what is left is the shape of
+//! `runner/src/kernels/mod.rs` also had. [`Kernel`] owns that now, so what is left is the shape of
 //! each kernel and the question of whether the validator accepts it.
 //!
 //! # What is next door

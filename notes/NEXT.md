@@ -1393,3 +1393,103 @@ argument.
 
 The bit shifts above are the first extension built on it, and they were held to it: six tests, 124
 mutants at 100%, `spirv-val` before any device, and five widths across three vendors after.
+
+## Where the work goes now — 2026-08-15, with the vocabulary at 20
+
+The bit shifts are in, and they were the item this file named three lists running. So the question
+is the next one, asked the same way: **which operations does the emitter offer that no generated
+program can reach, and of those, which have an exact reference?** The second half is the filter that
+does the work — a fuzzer round is only a test if something can disagree with it, and disagreement
+needs an answer that is *right* rather than close.
+
+`src/lanes/` declares <!--count:lane-operations-->64 public functions, of which perhaps forty are
+operations rather than plumbing — an inexact split, so it is stated inexactly rather than given a
+number nothing checks. What follows is the named list instead.
+
+### Tier 1 — ripe, in order of what they cost
+
+**1. `all_uniform` — the third vote, and two of three are generated.** `Op::AddIfAnyAbove` reaches
+`any_uniform` and `Op::AddIfAllEqual` reaches `all_equal_uniform`. The vote that asks whether a
+predicate held *everywhere* has unit tests and no generated program — `runner/src/kernels/unrun.rs`
+names it in the same breath as `shift_down` and `broadcast`, which is the list this file has emptied
+twice by fuzzing what was on it.
+
+**No new axis at all.** It is a `Kind` in `WHOLE` and `STRIPPED` beside the vote already there, one
+arm in `emit`, one in `interpret`, and the reference is the one beside it with `any` changed to
+`all`. Cheapest thing on this list and it closes an asymmetry of exactly the shape `ShiftUp` and
+`ShiftDown` had — *"the shift up was here from the beginning and its twin was not"*.
+
+The one thing to get right: a vote nothing ever passes is an identity, and an identity agrees with
+every reference including a wrong one. `any_uniform`'s threshold is drawn straddling the corpus for
+that reason; an `all` vote passes far less often, so its threshold has to be drawn from the *bottom*
+of the range or the step is a no-op in almost every round.
+
+**2. `abs` — and it is a third gating axis, which is the interesting part.** `Lanes::abs` takes
+`T: Signed`, which is `F32`, `I32`, `I8`, `I16` and `F16` — **five domains**, not the six `Integer`
+gates and not the two a float-only operation would. So it is a second method on `Emit` with a
+different membership, and building it is what turns that trait from a special case into a mechanism.
+
+**And it has a real edge, which the bit shifts just made reachable.** GLSL.std.450's `SAbs` of the
+most negative representable value has no positive answer to give. Before this week a signed domain's
+values were small and that edge was unreachable; a left shift of 31 now puts a value there, so
+`abs` arrives already needing the `ShiftTooFar` treatment — a refusal by name, or a draw that cannot
+produce it. Design, not a table entry, which is the same sentence this file used about the shifts.
+
+**3. `fma`, and the doc comment beside it argues against this.** `Lanes::fma` says: *"never
+bit-identical [to a multiply and an add], so a kernel that must agree with a CPU reference exactly
+has to make the same choice on both sides. That is why the fuzzer's vocabulary has `min`, `max` and
+`clamp` in it and not this."*
+
+That is right in general and **not right for this corpus**, which is the kind of inherited reasoning
+this file keeps catching. Every float value the generator draws is a small integer below the exact
+limit, where a product and a sum are both exact — so a fused operation and an unfused one give the
+same bits, and the fuzzer can hold them to it. It is also the mirror of the bit shifts' axis:
+float-only where those are integer-only, which is the second half of the proof that `Emit` is a
+mechanism.
+
+Worth doing *after* `abs`, and worth rewriting that doc comment when it is done rather than leaving
+a sentence that was true of the general case standing over a case where it is not.
+
+### Tier 2 — the family with no fuzz coverage and a history
+
+**4. The four packed dot products, `reinterpret` and `to_f32`.** `OpUDot` is the instruction that
+shipped **invalid** — correct on two devices for weeks, caught the first time `spirv-val` was
+pointed at it — and none of the four is in the generator's vocabulary.
+
+`proeftuin/` covers them at all three mappings with an exact reference, so this is not a blind spot
+any more; what it is missing is the *generated combination*, a dot product with a rotate and a
+rolled loop around it. The cost is real: the input is four bytes in a word, which is a different
+buffer shape from every other step here, and the accumulator's type changes mid-program. That is the
+first step that would not fit the single-accumulator straight line this generator is built on.
+
+### Tier 3 — deliberately not, and the reason is the filter
+
+**5. `sqrt`, `inverse_sqrt`, `exp`, `log`.** No exact reference exists. GLSL.std.450 specifies these
+in ULPs of tolerance rather than exactly, so a comparison would be checking a device's rounding
+against the host's — two approximations agreeing, which says nothing about the mapping. This is the
+same argument `Domain::exact_limit` makes about a half leaving its range, and the answer there was
+to refuse the round rather than loosen the comparison. There is no round to keep here.
+
+**6. No new domain.** All eight are generated and all eight run at five widths. This axis is closed.
+
+### What the next big feature is, and why its blocker just moved
+
+`decisions/DR-0008` measured the thing that decides everything above it: a round trip costs ~100 µs
+on the discrete device and the device's own share of it is **2.9%**. Raising the answers per round
+trip from 2 to 2 048 is 800×; no kernel change recorded anywhere in this file has been worth more
+than 3×.
+
+So the feature is **an API for "here are N independent problems, answer them all"** — and this file
+has refused to build it three times, each time for the same good reason: *"it needs a caller. The
+last three times this file guessed at an API before one existed the guess was refused by its own
+argument."*
+
+**That objection has an answer now, and it arrived sideways.** `proeftuin/` is a caller. Its
+quantised layer runs 192 independent configurations, its conversion sweep 72, its half sweep all
+65 536 bit patterns — each one a batch of independent questions laid out by hand, which is exactly
+the layout DR-0008 says is the only thing that matters. Three tools, three hand-rolled batchings,
+and the duplication between them is the design pressure an invented API would have been missing.
+
+And it is the right *kind* of first caller: the sandbox is deletable in one command and may not be
+depended on, so an API shaped for it costs nothing if the shape turns out wrong. A guess that can be
+thrown away is not a guess this file has ever refused.

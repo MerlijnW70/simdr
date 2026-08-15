@@ -1,4 +1,9 @@
-//! The numbers this repository's prose states about itself, checked against the repository.
+//! What this repository's prose says about itself, checked against the repository.
+//!
+//! Three claims, and only the first needed a marker invented for it: the **numbers** the documents
+//! state, the **files** they name, and the **members** they name. The last two need nothing new,
+//! because this tree already quotes what it means — a file, a type, an instruction — and leaves
+//! ordinary prose unquoted. **The backticks were already the markup**; nothing read them.
 //!
 //! `notes/CLAIMS.md` opens by counting 378 measured numbers across the documents and observing that
 //! nothing checks any of them. Most of that class genuinely cannot be checked here — a shared
@@ -32,6 +37,30 @@
 //! multiple. Those are a tool's output at a moment, not a property of the tree, and the two that
 //! could be derived from `noha.yaml` would need a second copy of its parser — the duplication this
 //! suite exists to catch.
+//!
+//! # The files and the members, which needed no marker at all
+//!
+//! A path in backticks must name a file that exists, by suffix — the prose says `scan/plan.rs` and
+//! means `runner/src/scan/plan.rs`, which is a habit worth keeping rather than three hundred
+//! sentences to rewrite. A `Type::member` in backticks must name something this tree declares, where
+//! the type is one this tree declares; `f32::MAX` and `Vec::with_capacity` are nobody's business
+//! here and are skipped because `f32` and `Vec` are not declared in it.
+//!
+//! Both are floors rather than proofs, in the safe direction. Two files may share a tail and this
+//! cannot tell them apart; a member is checked against every name the tree declares rather than
+//! against its own type's. That direction reports a reference as good where a reader might land one
+//! file over, which makes the check weaker and never wrong — the trade `consumed_outside` makes in
+//! `tests/integrity.rs`, for the reason it gives there.
+//!
+//! **The member check is the one this repository was owed.** `decisions/DR-0002` said strip mining
+//! "is not built" and named `LaneError::TooWide` as the error that says so. Strip mining had been
+//! built for weeks and that error was never written — and `noha gate` printed a tick beside the
+//! record, because a decision record is prose and prose is not checked. It is now.
+//!
+//! What both checks needed was one honest exception apiece, because prose legitimately names things
+//! that are not here: a file in the sibling project, and four members that were **deleted** — two of
+//! them in the same sentence that records the deletion. [`NOT_IN_THE_TREE`] and [`GONE`] hold those
+//! by name with a reason, and an expiry test fails if an excused name comes back.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -58,8 +87,9 @@ type Counter = (&'static str, fn() -> Option<usize>);
 /// Adding a row is half a change. The other half is a sentence somewhere that states it, without
 /// which [`every_counter_is_stated_by_some_document`] fails — because a counter nothing reads is the
 /// shape the seven dead opcodes had.
-const COUNTERS: [Counter; 8] = [
+const COUNTERS: [Counter; 9] = [
     ("opcodes", || count_lines("src/module/op.rs", "pub const ")),
+    ("lane-operations", || Some(lane_operations())),
     ("test-functions", || Some(test_functions())),
     ("decisions", || Some(decision_records().len())),
     ("integrity-tests", || {
@@ -88,6 +118,28 @@ fn count_lines(path: &str, prefix: &str) -> Option<usize> {
             .filter(|line| line.trim_start().starts_with(prefix))
             .count(),
     )
+}
+
+/// How many public functions the lane API declares.
+///
+/// The surface `notes/NEXT.md` measures the fuzzer's vocabulary against. Counted rather than
+/// written down because that comparison is the one this project keeps returning to, and a stale
+/// denominator makes a growing numerator look like progress.
+fn lane_operations() -> usize {
+    let mut found = 0;
+    walk(&root().join("src").join("lanes"), &mut |path, _| {
+        if let Ok(text) = fs::read_to_string(path) {
+            found += text
+                .lines()
+                .filter(|line| {
+                    let bare = line.trim_start();
+                    line.starts_with("    ")
+                        && (bare.starts_with("pub fn ") || bare.starts_with("pub const fn "))
+                })
+                .count();
+        }
+    });
+    found
 }
 
 /// The decision records, by file name.
@@ -463,5 +515,393 @@ fn the_claims_table_names_every_decision_record() {
          table of what backs each record is hand-written. A tenth record would have been absent \
          from it silently — the same shape as the five files `noha.yaml` was not mutating.",
         uncited.join(", ")
+    );
+}
+
+/// Files this repository's prose names that are deliberately **not** in the repository.
+///
+/// One entry, and it is the verification toolchain: `noha.yaml` and `.noha/` are ignored globally
+/// on this machine and never committed, so a check that asserted their presence would fail in CI on
+/// the one file that decides what the mutation gate covers. Naming it here is the same trade
+/// [`NOT_MUTATED`] makes in `tests/integrity.rs` — an absence somebody wrote down rather than a
+/// silence.
+///
+/// [`NOT_MUTATED`]: https://example.invalid
+const NOT_IN_THE_TREE: [(&str, &str); 4] = [
+    (
+        "noha.yaml",
+        "the mutation config, globally ignored and never committed",
+    ),
+    (".noha/", "the mutation tool's cache, likewise"),
+    (
+        "notes/SPEED.md",
+        "a document in the sibling project this one borrowed a measurement habit from",
+    ),
+    (
+        "runner/src/reduction.rs",
+        "a path `notes/FINDINGS.md` names in the past tense, in the sentence recording that it          moved — prose about a file that stopped existing is the one kind this check cannot read",
+    ),
+];
+
+/// Whether `token` reads like a path into this repository.
+///
+/// Deliberately narrow: a suffix this tree actually holds, and either a directory in it or a name a
+/// reader would only write about because it is here. `f32::MAX` and `OpShiftLeftLogical` are not
+/// paths and a check that thought they were would have to be argued with rather than fixed.
+fn looks_like_a_path(token: &str) -> bool {
+    const SUFFIXES: [&str; 5] = [".rs", ".md", ".toml", ".yml", ".yaml"];
+
+    // A glob is a sentence about a set of files rather than a name of one, and `tests/*.rs` is
+    // how two of them say so.
+    if token.starts_with("..")
+        || token.starts_with('/')
+        || token.contains("://")
+        || token.contains('*')
+    {
+        return false;
+    }
+    SUFFIXES.iter().any(|suffix| token.ends_with(suffix)) && token.contains('/')
+}
+
+/// Every backtick-quoted span of `text`, with the line it sits on.
+///
+/// Backticks rather than every word, and that is the whole of why this check can exist without an
+/// allowlist. This repository quotes what it means — a file, a type, an instruction — and leaves
+/// ordinary prose unquoted, so the quoting *is* the marker. Nothing new had to be written into the
+/// documents to make them checkable.
+fn quoted(text: &str) -> Vec<(usize, String)> {
+    let mut found = Vec::new();
+
+    for (number, line) in text.lines().enumerate() {
+        let mut rest = line;
+        while let Some(open) = rest.find('`') {
+            let after = &rest[open + 1..];
+            let Some(close) = after.find('`') else {
+                break;
+            };
+            let span = after[..close].trim();
+            if !span.is_empty() {
+                found.push((number + 1, span.to_owned()));
+            }
+            rest = &after[close + 1..];
+        }
+    }
+
+    found
+}
+
+/// Every quoted span in every document and every comment, as `(path, line, span)`.
+///
+/// **Comments as well as markdown**, because the drift this catches has landed in both. A doc
+/// comment naming a file that moved is exactly as wrong as a README naming one, and rustdoc checks
+/// only the links — an intra-doc link is verified and a backtick is decoration.
+fn claims() -> Vec<(String, usize, String)> {
+    let mut found = Vec::new();
+
+    walk(&root(), &mut |path, relative| {
+        if !in_the_workspace(relative) {
+            return;
+        }
+        let markdown = path.extension().is_some_and(|extension| extension == "md");
+        let rust = path.extension().is_some_and(|extension| extension == "rs");
+        if !markdown && !rust {
+            return;
+        }
+        let Ok(text) = fs::read_to_string(path) else {
+            return;
+        };
+
+        let scanned = if markdown {
+            text.clone()
+        } else {
+            text.lines()
+                .map(str::trim_start)
+                .filter(|line| line.starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        // Rust files lose their line numbers to that filter, and a wrong line is worse than none:
+        // it sends a reader to an unrelated statement. So a comment's claim is reported by file.
+        for (line, span) in quoted(&scanned) {
+            found.push((relative.to_owned(), if markdown { line } else { 0 }, span));
+        }
+    });
+
+    found
+}
+
+/// Every file in the workspace, by its path from the root.
+fn every_file() -> BTreeSet<String> {
+    let mut found = BTreeSet::new();
+    walk(&root(), &mut |_, relative| {
+        found.insert(relative.to_owned());
+    });
+    found
+}
+
+/// Whether some file in the tree is named by `span`.
+///
+/// **A suffix match, because that is how this repository writes.** The prose says `scan/plan.rs`
+/// and `fuzz/mod.rs` and means `runner/src/scan/plan.rs` and `runner/src/fuzz/mod.rs` — a habit
+/// worth keeping, since a sentence about a file reads better than a sentence about a path. So the
+/// check follows the convention instead of asking three hundred sentences to change.
+///
+/// It is a floor rather than a proof, in the safe direction: two files could share a tail and this
+/// cannot tell them apart. That direction says a path exists where the reader might land on the
+/// wrong one, which makes the check weaker and never wrong — the same trade `consumed_outside`
+/// makes in `tests/integrity.rs`.
+fn some_file_is_called(span: &str, files: &BTreeSet<String>) -> bool {
+    files
+        .iter()
+        .any(|path| path == span || path.ends_with(&format!("/{span}")))
+}
+
+#[test]
+fn every_path_the_prose_names_is_a_path_that_is_there() {
+    let files = every_file();
+    let mut missing = Vec::new();
+
+    for (path, line, span) in claims() {
+        if !looks_like_a_path(&span) {
+            continue;
+        }
+        if NOT_IN_THE_TREE.iter().any(|(name, _)| span == *name) {
+            continue;
+        }
+        if !some_file_is_called(&span, &files) {
+            missing.push(format!("{path}:{line} names `{span}`"));
+        }
+    }
+
+    assert!(
+        missing.is_empty(),
+        "the prose names files that are not there:\n  {}\n\n\
+         A moved file leaves every sentence about it pointing at nothing, and nothing else here \
+         notices: rustdoc checks intra-doc links and a backtick is decoration. `decisions/DR-0002` \
+         spent weeks naming an error that never existed, which is this shape one level up.",
+        missing.join("\n  ")
+    );
+}
+
+#[test]
+fn every_decision_record_the_prose_cites_is_a_record_that_exists() {
+    let numbered: BTreeSet<String> = decision_records()
+        .iter()
+        .map(|name| name[..7].to_owned())
+        .collect();
+
+    let mut dangling = Vec::new();
+    walk(&root(), &mut |path, relative| {
+        if !in_the_workspace(relative)
+            || !path
+                .extension()
+                .is_some_and(|extension| extension == "md" || extension == "rs")
+        {
+            return;
+        }
+        let Ok(text) = fs::read_to_string(path) else {
+            return;
+        };
+
+        for rest in text.split("DR-").skip(1) {
+            let number: String = rest.chars().take_while(char::is_ascii_digit).collect();
+            if number.len() == 4 && !numbered.contains(&format!("DR-{number}")) {
+                dangling.push(format!("{relative} cites DR-{number}"));
+            }
+        }
+    });
+
+    dangling.sort_unstable();
+    dangling.dedup();
+    assert!(
+        dangling.is_empty(),
+        "decisions cited by number that no record answers to:\n  {}\n\n\
+         A record is cited by number in fifty places and renamed in one, and every citation still \
+         reads like a reference.",
+        dangling.join("\n  ")
+    );
+}
+
+/// Members the prose names that this repository does not declare, and should not.
+///
+/// **Two kinds, and both are prose doing its job.** Four were *deleted*, and a note recording a
+/// deletion has to name what was deleted — two of these say so in the same sentence the check
+/// objects to: *"`Module::f_ord_greater_than` … **deleted**"* and *"`Reduction::tail` is gone"*.
+/// The fifth never existed at all.
+///
+/// That fifth is why this whole file exists. `decisions/DR-0002` said strip mining "is not built"
+/// and named `LaneError::TooWide` as the error that says so; strip mining had been built for weeks
+/// and that error was never written. Three test files quote it now as the failure that motivated
+/// them, so the name has to survive here — and the test below makes sure it survives as an
+/// *absence*, which is the only way to quote a mistake without re-making it.
+const GONE: [(&str, &str); 5] = [
+    (
+        "LaneError::TooWide",
+        "never existed; `decisions/DR-0002` named it and `tests/integrity.rs` was written because of it",
+    ),
+    (
+        "Module::f_ord_greater_than",
+        "deleted — a second spelling of what `Lanes::greater_than` emits through `Element::GREATER_THAN`",
+    ),
+    (
+        "Gpu::probe_pipeline",
+        "deleted — it allocated to time an allocation, so it measured itself",
+    ),
+    (
+        "Reduction::tail",
+        "deleted with the reduction chain's tail pass",
+    ),
+    (
+        "Pass::writing",
+        "deleted when the between-pass copy was shortened",
+    ),
+];
+
+/// Every name this repository declares, and which of them are types.
+///
+/// Two sets from one pass: the types a `Type::member` span may be about, and every name any of them
+/// could resolve to. Enum variants are collected by tracking the block, because a variant is the one
+/// kind of name with no keyword in front of it — and `LaneError::TooWide` is precisely the mistake
+/// that needs a variant list to catch.
+fn declared() -> (BTreeSet<String>, BTreeSet<String>) {
+    let mut types = BTreeSet::new();
+    let mut names = BTreeSet::new();
+
+    walk(&root(), &mut |path, relative| {
+        if !path.extension().is_some_and(|extension| extension == "rs")
+            || !in_the_workspace(relative)
+        {
+            return;
+        }
+        let Ok(text) = fs::read_to_string(path) else {
+            return;
+        };
+
+        let mut inside_a_body = false;
+        for line in text.lines() {
+            // Every enum and struct here is declared at the left margin, so its closing brace is
+            // too. That is what makes tracking the block one boolean instead of a brace counter.
+            //
+            // **Fields as well as variants**, because a field is a member a reader writes about the
+            // same way. `Reference::exact` and `Reduction::total` were both reported as undeclared
+            // by a version that collected only variants — two sentences that were right, failed by
+            // a check that was not.
+            if inside_a_body {
+                if line == "}" {
+                    inside_a_body = false;
+                } else if line.trim_start().starts_with(|c: char| c.is_alphabetic()) {
+                    names.insert(word_of(line.trim_start().trim_start_matches("pub ")));
+                }
+                continue;
+            }
+
+            // Every modifier a declaration can wear before its keyword. `unsafe` is on this list
+            // because leaving it off reported thirty of `runner`'s own Vulkan methods as undeclared
+            // — the check finding its own blind spot, in the half of the tree that has one.
+            let mut bare = line.trim_start();
+            for modifier in [
+                "pub(crate) ",
+                "pub(super) ",
+                "pub ",
+                "unsafe ",
+                "async ",
+                "default ",
+            ] {
+                bare = bare.strip_prefix(modifier).unwrap_or(bare);
+            }
+
+            for keyword in ["enum ", "struct ", "trait ", "type "] {
+                if let Some(rest) = bare.strip_prefix(keyword) {
+                    types.insert(word_of(rest));
+                    names.insert(word_of(rest));
+                    // Only a declaration at the left margin opens a body this can track, and only
+                    // one that ends in a brace has a body at all — `pub struct Rng { … }` does and
+                    // `pub struct Id(u32);` does not.
+                    if matches!(keyword, "enum " | "struct ")
+                        && !line.starts_with(char::is_whitespace)
+                        && line.trim_end().ends_with('{')
+                    {
+                        inside_a_body = true;
+                    }
+                }
+            }
+            for keyword in ["fn ", "const fn ", "const ", "static "] {
+                if let Some(rest) = bare.strip_prefix(keyword) {
+                    names.insert(word_of(rest));
+                }
+            }
+        }
+    });
+
+    (types, names)
+}
+
+/// The identifier `text` opens with.
+fn word_of(text: &str) -> String {
+    text.chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect()
+}
+
+#[test]
+fn every_member_the_prose_names_is_a_name_this_repository_declares() {
+    let (types, names) = declared();
+    let mut dangling = Vec::new();
+
+    for (path, line, span) in claims() {
+        // `LaneError::TooManyStrips { .. }` and `Domain::bits()` are both spans about one member.
+        let head: &str = span
+            .split([' ', '(', '<', '{', ','])
+            .next()
+            .unwrap_or_default();
+
+        let parts: Vec<String> = head.split("::").map(word_of).collect();
+        for pair in parts.windows(2) {
+            let (owner, member) = (&pair[0], &pair[1]);
+            let span = format!("{owner}::{member}");
+            if member.is_empty()
+                || !types.contains(owner)
+                || names.contains(member)
+                || GONE.iter().any(|(name, _)| *name == span)
+            {
+                continue;
+            }
+            dangling.push(format!("{path}:{line} names `{span}`"));
+        }
+    }
+
+    dangling.sort_unstable();
+    dangling.dedup();
+    assert!(
+        dangling.is_empty(),
+        "the prose names members that nothing declares:\n  {}\n\n\
+         `decisions/DR-0002` said strip mining \"is not built\" and named `LaneError::TooWide` as \
+         the error that says so. Strip mining had been built for weeks and that error never \
+         existed, and `noha gate` printed a tick beside the record — because a decision record is \
+         prose and prose is not checked. This is that, checked.",
+        dangling.join("\n  ")
+    );
+}
+#[test]
+fn nothing_excused_as_gone_has_come_back() {
+    let (_, names) = declared();
+
+    let returned: Vec<&str> = GONE
+        .iter()
+        .map(|(name, _)| *name)
+        .filter(|name| {
+            name.rsplit("::")
+                .next()
+                .is_some_and(|member| names.contains(member))
+        })
+        .collect();
+
+    assert!(
+        returned.is_empty(),
+        "excused as deleted and declared again: {}
+
+         An excuse that outlives its reason is the drift this file is about, one level up: the          prose would go on describing a deletion that has been undone, and the check that should          have said so is the one holding the excuse.",
+        returned.join(", ")
     );
 }
