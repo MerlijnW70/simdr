@@ -3251,3 +3251,75 @@ five widths and eight domains, all three mappings, six finishes — and every on
 
 Nothing was found, and that is worth stating plainly: the value of a check is the difference between
 "nothing has looked" and "something looked and it was right", and only one of those is a claim.
+
+## The whole tree at full scope, and the three things it said — 2026-08-15
+
+The mutation gate had never run over this tree whole. A single full-scope run needs ~640 mutants,
+which exceeds the configured cap and takes longer than the MCP client will wait — so every run
+before this was **diff-scoped**, covering only the lines a commit changed. That answers "did this
+change arrive covered", never "is this file covered".
+
+`NOHA_ONLY` takes a comma-separated path list, which turns one impossible run into five possible
+ones. Driven from the CLI in a background task rather than through the MCP tool, the client timeout
+stops applying at all.
+
+| shard | targets | mutants | score |
+| --- | --- | --- | --- |
+| `runner/src/fuzz/` | 10 | 172 | 100% *(after a fix)* |
+| `runner/src/dispatch|reduction|scan/` | 11 | 139 | **100%** |
+| `src/lanes/` | 18 | 105 | **100%** |
+| `src/module|spec|kernel/` + `decode`, `encode`, `half`, `lib` | 37 | 162 | **100%** |
+| `runner/src/kernels/`, `timing`, `cli` | 17 | 61 | 100% *(after a fix)* |
+| **whole tree** | **93** | **639** | **100%** |
+
+Two of the five shards were already perfect, and one of those is the claim this file has carried for
+weeks on the strength of an old truncated run: *"none was in the emitter"*. It is measured now
+rather than assumed — 267 mutants across the whole of `src/`, including `module/` and `spec/`, which
+is where `DR-0001` says a number invented from memory produces a module that assembles cleanly and
+means something else. Nothing survived there.
+
+### And a fourth thing, found before the gate ran
+
+Preparing the first pass — widening the fuzzer to the bit shifts — meant reading what they needed.
+`Lanes::shift_left`, `shift_right_logical` and `shift_right_arithmetic` took `T: Element`, and
+**`F32` is an `Element`**. A shift of a vector of floats compiled, built, and produced
+`OpShiftLeftLogical` with a float result type, which SPIR-V forbids. Confirmed with a probe, not
+reasoned: `spirv-val` rejects the module.
+
+Reachable from safe code, spelled plausibly, illegal, with nothing refusing it and nothing
+validating it. `OpUDot`'s shape exactly.
+
+The fix was already in the crate and had not been applied here. `Signed` exists as a second trait
+with its argument written out — *"an `Option<Glsl>` would have made that a runtime error, and an
+`OpCopyObject` would have made it silently fine. Refusing at the type is neither."* `Integer` is the
+third, so the call **cannot be written**. Its check is a `compile_fail` doctest, which is the only
+artefact that can assert what a program cannot be.
+
+A sweep of the rest while it was open: every other `Element`-bounded lane operation is one SPIR-V
+defines for all of them, and the float-only maths take no `T` at all. The three shifts were the only
+instructions SPIR-V restricts that the bound did not.
+
+### The two survivors, and why the same shape keeps coming back
+
+Both are a *second copy of a comparison*, and neither could be seen by the coverage that already
+existed for the first copy.
+
+**`generate.rs:70`** — `let clustered = lanes < subgroup`, four lines under the same relationship
+taken three ways. `clustered` decides only whether `Finish::SumOrMax` can be drawn, and that is the
+one finish carrying a value out of a branch through an `OpPhi` — *"the failure mode no other layer
+here catches"*. Flipping it tells a whole-subgroup program it is clustered and deletes the phi
+coverage of the commonest mapping, silently. Merging the two spellings into one `shape_of` made
+**existing** tests fail on the mutant: the duplication was the survivability.
+
+**`kernels/reduce.rs:315`** — `if LANES > subgroup`, in a file that already carries a note about
+meeting this shape once before. Two mutants at once, invisible for two different reasons: one
+consumer *reports* a build refusal rather than failing on it, and the other skips the equal case by
+name. A cluster exactly the subgroup's width is the shape neither asserts, and it is not a missing
+mapping — it is a whole-subgroup vector. The `cond→false` half is sharper still: without the guard
+the call is refused anyway, by the *butterfly's* bound, as a mask reaching outside its subgroup —
+a true statement about a different thing, printed identically as "not built". What the guard is
+worth is not the refusal but which one.
+
+Three instances of one shape now: `interpret::strips_of`, `Program::input_len`, and these two. The
+habit that finds it is worth naming — **a relationship decided in two places is decided in one place
+and copied**, and the copy is invisible to every test that guards the original.

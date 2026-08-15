@@ -1332,6 +1332,12 @@ buffer, one submission. `Gpu::sum` at 11.2× over 8 192 elements, `Gpu::scanner_
 nothing is dispatched. Every hour spent on `spirv-val` coverage, on the lane API's refusals, and on
 the mutation gate pays regardless of what any device costs.
 
+**And the whole tree has now been through the gate at full scope: 93 targets, 639 mutants, 100%.**
+It had never been — a single run exceeds the mutant cap and outlives the client, so every run before
+this was diff-scoped, which answers "did this change arrive covered" and never "is this file
+covered". `NOHA_ONLY` shards it by path; five runs did it. `notes/FINDINGS.md` has the table and the
+three findings, one of which was a public operation building invalid SPIR-V.
+
 ### Tier 2 — the shape a future caller would need
 
 **4. There is no API for "here are N independent problems, answer them all".** Every entry point
