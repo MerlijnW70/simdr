@@ -14,12 +14,12 @@ Stated first because the gap is only visible against it.
 
 | what | instrument | reach |
 | --- | --- | --- |
-| every **branch** in the source | mutation gate | 93 targets, 639 mutants, **100%** |
+| every **branch** in the source | mutation gate | 94 targets, 651 mutants over 93 of them, **100%** |
 | every emitted module's **legality** | `spirv-val` | the kernel library at 5 widths, plus 232 generated programs |
 | the zero-dependency boundary, the decision records' presence, the fail-closed sites | `noha gate` | 56 + <!--count:decisions-->9 + 1 checks |
 | every public operation has a consumer; **every opcode is emitted by something**; every pipeline builder bounds its dispatch; the mutation config matches the tree | `tests/integrity.rs` | <!--count:integrity-tests-->17 tests |
 | **the numbers these documents state**; **every file and every member they name**; every decision record naming what enforces it | `tests/documented.rs` | <!--count:documented-tests-->11 tests |
-| formatting, lints, **doc links**, the MSRV, the skip counts per width; **a long differential sweep nightly** | CI | <!--count:ci-jobs-->4 jobs across two workflows, two of them a matrix |
+| formatting, lints, **doc links**, the MSRV, the skip counts per width; **a long differential sweep and every example, nightly** | CI | <!--count:ci-jobs-->5 jobs across two workflows, two of them a matrix |
 | behaviour | two GPUs and lavapipe | widths 4, 8, 16, 32, 64 |
 
 **The first row is stronger than it looks, and it retires a whole class of question.** A guard nothing
@@ -279,11 +279,34 @@ has to come back through — and the validator is the only layer downstream of i
    rather than a silence — so the check is now an absolute: each of the **<!--count:opcodes-->95**
    opcodes `op.rs` declares reaches a module. Reading them out of the grammar again costs a minute on the day
    somebody wants one back, and that is the day it becomes checkable.
-1. **Assert the counts.** Trivial, and the one in the README has now been wrong three times. The fix
-   is not to bump the number a fourth time — it is to make the test print it.
-2. **Sweep `src/module/` for type bounds wider than the instruction allows**, the way `src/lanes/`
-   was swept. This is the class that produces invalid modules that run.
-3. **Run the examples in CI for liveness**, not for their numbers. One step, and it catches the
-   runtime drift that `cargo clippy --all-targets` cannot: it compiles them and never runs them.
-4. **Mark the decision records that are enforced**, naming the artefact that enforces each.
+1. **~~Assert the counts.~~ — done.** Ten counters, resolved against the tree by
+   `tests/documented.rs`, and the number has drifted five more times since; each was reported by the
+   check rather than noticed.
+2. **~~Sweep `src/module/` for type bounds wider than the instruction allows~~ — swept, and there
+   is nothing there to sweep.** `grep` for a generic parameter across `src/module/` returns
+   **nothing**: every function in that layer takes `Id`s and a result-type id, and cannot compare
+   them. `Lanes::shift_left`'s bug — `T: Element` where the instruction needs an integer — has no
+   analogue one layer down, because there is no `T`.
+
+   That is not reassuring, it is a relocation. `decisions/DR-0005` already names this layer's
+   enforcement as the **weakest** in the table above — *"an `Id` is an `Id`"* — and what actually
+   guards it is `spirv-val`: a result type that disagrees with its operands is an invalid module,
+   caught by the validator and by nothing before it. The lesson from the lane API stands and applies
+   *upward* rather than downward: a bound belongs wherever there is a type to put it on, and where
+   there is none the validator is not a second opinion but the only one.
+3. **~~Run the examples in CI for liveness~~ — done, nightly.** `cargo clippy --all-targets`
+   compiles all seventeen and runs none, so a `Gpu::open` that started refusing or a kernel that
+   started erroring would be noticed by nothing, while the numbers those programs printed went on
+   being quoted. `.github/workflows/nightly.yml` runs each one to a clean exit and compares the
+   count it found against the count the tree holds.
+
+   **Not on a push, and not for the numbers.** Seventeen programs on a software rasteriser is
+   minutes rather than seconds, and a shared runner's wall clock is not evidence about throughput —
+   which is why `session.rs` skips its own speed ratio under CI, and why this asks only whether each
+   program still runs.
+4. **~~Mark the decision records that are enforced~~ — done**, each with a `## What enforces this`
+   section naming the artefact and its kind, and `tests/documented.rs` fails on a record without one
+   and on a record this document does not cite.
 5. **Mechanise the mapping-relationship uniqueness** — the one that has now cost three findings.
+   Half done: `Mapping::of` is the single runtime rule and the fuzzer asserts it takes its mapping
+   from there rather than deciding again. What is not mechanised is the *absence* of a fourth copy.

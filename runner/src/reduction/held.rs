@@ -167,8 +167,11 @@ impl Gpu {
                 // check of any kind until this line. A fold that overruns writes into the buffer
                 // the *next* fold is about to read, so the wrong total arrives a pass away from its
                 // cause.
-                if let Some(overrun) = crate::dispatch::Bounds::of(&stage.words)
-                    .overrun_uniform(crate::Grid::linear(stage.workgroups), elements)
+                if let Some(overrun) = crate::dispatch::Bounds::of(
+                    &stage.words,
+                    &crate::dispatch::Specialization::none(),
+                )
+                .overrun_uniform(crate::Grid::linear(stage.workgroups), elements)
                 {
                     for pipeline in pipelines {
                         pipeline.destroy(self);

@@ -41,7 +41,7 @@ on. The arrow points `runner -> simdr` and never back.
 | **The opcodes are Khronos', not remembered.** | `decisions/DR-0001`, and `spirv-val` over the kernel library at five widths plus 232 generated modules — a wrong number that makes an invalid module is caught, and `tests/integrity.rs` makes sure every number declared is one something emits |
 | **The modules are legal SPIR-V.** | `spirv-val --target-env vulkan1.1`, in the suite, before any device sees them |
 | **The behaviour is right.** | Two GPUs and a software driver at widths 4, 8, 16, 32 and 64, plus a differential fuzzer: <!--count:fuzz-operations-->23 generated operations across eight element domains, answered by a device and by an independent CPU reference. 256 rounds a domain on every push, 8 000 nightly |
-| **Every branch is reached by some test.** | A mutation gate over the whole tree: 93 targets, 639 mutants, 100% |
+| **Every branch is reached by some test.** | A mutation gate over the whole tree: 651 mutants over 93 targets, 100% |
 | **Every public operation has a consumer.** | `tests/integrity.rs`, which also fails on an opcode nothing emits and a pipeline builder that dispatches without a bound |
 | **The documentation does not drift.** | `tests/documented.rs` — every number these documents state, every file they name and every `Type::member` they name is resolved against the tree |
 
@@ -84,6 +84,30 @@ the one piece of advice worth repeating, because the failure it prevents is invi
 **drivers are lenient about things the validator is not.** An `OpUDot` emitted with a signed result
 type ran correctly on two devices for weeks. A store of an `i32` into a `u32` buffer returned 192
 correct-looking answers on two devices and an opaque `ERROR_UNKNOWN` on a third.
+
+## What the elementwise surface actually is
+
+Worth stating plainly, because the list is shorter than "SIMD semantics" suggests and the gaps are
+decisions rather than oversights. On a `Vector<T, LANES>` you have:
+
+* **arithmetic** — `add`, `mul`, `min`, `max`, `clamp`, `abs`, and the three bit shifts;
+* **comparison and choice** — `greater_than`, `equal`, `select`;
+* **floats only** — `sqrt`, `inverse_sqrt`, `exp`, `log`, `fma`;
+* **across the lanes** — the reductions, the two scans, four shuffles, three votes, the packed
+  integer dot products.
+
+**There is no subtraction and no division** — `op.rs` declares no `OpISub`, no `OpFSub` and no
+divide of any kind. **And no bitwise operation on a vector**: `OpBitwiseAnd` and `OpBitwiseOr` are
+declared and emitted, but for the lane arithmetic inside a rotate and a clustered scan, and no
+`Lanes` method offers them to a caller. That is not an omission waiting to be corrected: a
+difference is `add(a, mul(b, splat(-1)))`, one extra instruction a driver folds, and no kernel
+written here has wanted a name for it. `decisions/DR-0006`'s argument is the general one — *"a term would have no
+caller… and an untested term is worse than a missing one"* — and the seven opcodes deleted in one
+commit for having no emitter are what it looks like when the rule is applied late instead of early.
+
+Ask for one if you need it. What you will get is the opcode, a bound that is exactly what the
+instruction takes, a test at five widths and a place in the differential fuzzer — which is why the
+answer is not simply "yes" the moment somebody asks.
 
 ## What is deliberately absent
 

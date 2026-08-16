@@ -54,8 +54,12 @@ impl Gpu {
             .map(|words| words.len())
             .chain(std::iter::once(output_len))
             .collect();
-        if let Some(overrun) =
-            super::extent::Bounds::of(spirv).overrun(super::Grid::linear(workgroups), &held)
+        // `Specialization::none()`, and the same one the pipeline below is built with: this path
+        // does not specialize, so every constant in the module resolves to its declared default and
+        // the two agree by construction. The bound takes it as an argument rather than assuming it,
+        // because the path that *does* specialize used to assume the opposite.
+        if let Some(overrun) = super::extent::Bounds::of(spirv, &super::Specialization::none())
+            .overrun(super::Grid::linear(workgroups), &held)
         {
             return Err(overrun.into());
         }

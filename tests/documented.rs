@@ -762,7 +762,7 @@ fn every_decision_record_the_prose_cites_is_a_record_that_exists() {
 /// and that error was never written. Three test files quote it now as the failure that motivated
 /// them, so the name has to survive here — and the test below makes sure it survives as an
 /// *absence*, which is the only way to quote a mistake without re-making it.
-const GONE: [(&str, &str); 5] = [
+const GONE: [(&str, &str); 6] = [
     (
         "LaneError::TooWide",
         "never existed; `decisions/DR-0002` named it and `tests/integrity.rs` was written because of it",
@@ -782,6 +782,10 @@ const GONE: [(&str, &str); 5] = [
     (
         "Pass::writing",
         "deleted when the between-pass copy was shortened",
+    ),
+    (
+        "Gpu::time_specialized",
+        "deleted with the widening: a public timing path with no caller anywhere",
     ),
 ];
 

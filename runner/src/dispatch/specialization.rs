@@ -32,6 +32,22 @@ impl Specialization {
         }
     }
 
+    /// What this sets `spec_id` to, if it sets it at all.
+    ///
+    /// **Read by the dispatch bound rather than by the driver**, which is why it exists. A
+    /// specialization constant is a number chosen after the module was built, so an address that
+    /// adds one has no literal for `dispatch::extent` to find — and a bound that cannot see a term
+    /// counts zero for it, which is the direction that *lets an overrun through*. The value the
+    /// pipeline will be built with is here, and now the bound asks.
+    ///
+    /// `None` means the module's own default stands.
+    pub(crate) fn value_of(&self, spec_id: u32) -> Option<u32> {
+        self.entries
+            .iter()
+            .find(|(existing, _)| *existing == spec_id)
+            .map(|(_, value)| *value)
+    }
+
     /// Set the constant carrying `spec_id` to `value`.
     ///
     /// Setting the same id twice keeps the last value rather than sending two entries — Vulkan

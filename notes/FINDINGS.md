@@ -3761,3 +3761,152 @@ emitter doc comment named the directory, and `tests/documented.rs` would have fa
 them the moment the files went. That is the check doing its job, and it is also the finding: a
 deletable directory leaves its *code* cleanly and leaves citations of itself everywhere the rest of
 the tree explained why something is true.
+
+## The one term the dispatch bound counted as zero — 2026-08-16
+
+`runner/src/dispatch/extent` reads a module's workgroup size, element stride and address arithmetic
+and refuses a dispatch that would touch more of a binding than the binding holds. Both of its own
+module headers carried the same sentence, and it had been there since the check was written:
+
+> One thing stays outside: `Kernel::load_offset_by`'s offset is a *specialization* constant, a
+> number chosen after the module was built with no literal in it to find. It under-counts, which is
+> the direction this check must always take when it cannot see.
+
+**The first clause is true and the second is exactly backwards.** Everywhere else in that file a
+term it cannot read makes the check *weaker* — a binding it cannot decode is not judged, a module
+with two candidate rows gives no pitch, a shape it does not recognise falls back to counting
+invocations. Those are all refusals to answer. This one *answered*, with zero, and a bound that
+under-counts a reach is a bound that **lets the overrun through**. It was the one fail-open site in
+a file whose whole subject is failing closed.
+
+### The number was never unknowable — it was known somewhere else
+
+A specialization constant has no literal in the module because it is chosen when the **pipeline** is
+created. And every caller that bounds a dispatch has that value in scope at the moment it asks:
+`Gpu::execute` takes a `&Specialization`, hands it to `Pipeline::new` two lines later, and passed
+the module alone to the bound.
+
+So `Bounds::of` takes the specialization now, `addressing::specialized` resolves each constant's id
+through its `SpecId` decoration to the value the pipeline will carry — the caller's, or the module's
+own declared default where the caller sets nothing, which is what the driver does with the same two
+numbers — and `open_shift_in` adds it like any other term.
+
+**An argument rather than an option, because forgetting it is the failure this had.** Two of the
+three call sites specialize nothing and now say so by passing `Specialization::none()`, which is the
+same value their pipeline is built with; the third passes the real one. A caller cannot omit it.
+
+### And a guard that was written, tested, and removed the same night
+
+`OpSpecConstantOp` derives one constant from another — `offset x 2` — and this walk cannot evaluate
+that. The obvious companion to the fix above was to **drop such a binding from the answer** on the
+reasoning that absent and zero are different claims and only one is honest about not knowing.
+
+**The test written to prove that worthwhile disproved it.** A binding with no entry does not go
+unjudged: `overrun_uniform` falls back to the invocation reading. So dropping the binding replaces
+one under-count with another — and a *worse* one, because an address carrying both a folded constant
+and a derived one would lose the constant this can read as well as the one it cannot.
+
+So the guard is gone and the limit is a sentence: the derived term is not counted, and the answer
+stays a floor, which is what this file gives for everything it cannot read. **Counting what is
+legible and being a floor beats counting nothing and being a cruder floor.** The reasoning that
+produced the guard was the right reasoning about the wrong mechanism, and the only thing that could
+have told them apart is the test that ran.
+
+### What it was worth, measured
+
+The existing device test `an_offset_supplied_at_pipeline_time_reads_the_same_elements_as_a_baked_in_one`
+dispatches that kernel with an offset of a whole workgroup over a buffer of exactly two, and still
+passes — the bound now needs `run + offset` and the buffer is exactly that. Calibration confirmed by
+the one test that was already sized right.
+
+What was not checked before and is now: the same module and the same buffer, **refused or accepted
+according to a number that appears nowhere in it**. That test is in `runner/tests/bounds.rs`, and it
+is also what holds the three call sites honest — a future one that passes `none()` where a real
+specialization exists fails there rather than in a driver.
+
+### And a file that was three-quarters test
+
+`runner/src/dispatch/extent.rs` was 1 100 lines, of which 755 were its test module — by a distance
+the largest file in the tree, and the *code* in it is 345 lines. The tests moved to
+`extent/tests.rs`, the shape `runner/src/fuzz/domain/tests.rs` already had.
+
+**No other file needed it, and that is worth measuring rather than assuming.** Sorted by length the
+next eight are the same story: `interpret.rs` is 331 lines of code and 460 of tests, `shuffle.rs`
+410 and 410, `access.rs` 296 and 360. Take the test modules off every file in the tree and the
+longest body of code left is **577 lines** — `runner/src/device.rs`, which is FFI and has no test
+module at all.
+
+Two entries need a footnote, and both make the same point. `generate/coverage.rs` measures 638 and
+is a test module in its own right — it is `#[cfg(test)] mod coverage;` from the file beside it, so
+it is already split. And `fuzz/program.rs` measures 522, of which most is the doc comments on a
+23-entry vocabulary: separating a vocabulary from its explanations is the opposite of an
+improvement, and the argument for splitting a file has to be about what a reader is looking for.
+
+There is no thousand-line module here to break up. There was one file whose thoroughness had
+outgrown reading in one screen.
+
+### The consumer check was scoped to half the workspace, and the other half cost three
+
+`every_public_operation_has_a_consumer_outside_its_own_file` asked its question of `src/` only, and
+said why in a paragraph that had been true for months: *"`runner` is `publish = false` and exists to
+be consumed by tests; widening to it is a later decision, not an oversight."*
+
+**That is a description rather than a reason.** A public function nobody calls is untested surface
+whichever crate it sits in — and the crate that dispatches to a device is the one where untested
+surface reaches a driver.
+
+Widened, it cost three of a hundred and seventy-four:
+
+* **`Gpu::run_words`** was public and named by nothing outside its own file, with `Gpu::run_u32` the
+  public spelling of the same thing. Private now.
+* **`Gpu::time_specialized`** had no caller anywhere, examples included. Deleted — an untested
+  timing path that nothing has ever run is a measurement waiting to be quoted.
+* **`Specialization::set_f32`** had none either, and trying to give one is what settled it. The
+  method *is* tested — `a_float_goes_in_as_its_bits`, in the file that declares it — and cannot be
+  tested anywhere else: what that test observes is `data()`, which is `pub(crate)`. An integration
+  test, the only kind this check counts as a consumer, has nothing to look at but `len`, and `len`
+  cannot tell `set_f32(3, 1.5)` from `set(3, 1)`.
+
+  So it is excused, with that as the reason. **A test in the same file is a weaker consumer than one
+  in another crate and it is not *no* consumer**, which is the distinction between this and
+  `Module::memory_barrier` — that one had no test at all. The excuse list is exactly where a line
+  like this belongs: written down, with what would have to change for it to expire.
+
+Three in a hundred and seventy-four is a good ratio and it is not the point. The point is that the
+question had never been asked of that half, and the answer to *"is this scoped narrowly for a
+reason?"* was no.
+
+**Asked of the other two kinds of public thing while the question was open**: of 50 public struct
+fields across all three crates, **zero** are named nowhere else. Of 103 public enum variants, twelve
+— which is the next section, and a different answer.
+
+### Twelve enumerants nothing names, and why they are not the seven opcodes
+
+The opcode sweep asked which `pub const` numbers nothing emits and found seven, and they were
+deleted. The same question of the next kind up — which **public enum variant** is never named
+outside the file that declares it — has an answer too: **12 of 103**, and every one of them is in
+`src/spec/`.
+
+    Decoration     BufferBlock, NonReadable, NonWritable
+    StorageClass   Private
+    BuiltIn        NumSubgroups, SubgroupSize
+    Scope          CrossDevice, Invocation
+    LoopControl    Flatten, DontFlatten, Unroll, DontUnroll
+
+**They look like the seven and they are not, and the difference is what an enum is for.** `op.rs` is
+a *table*: 95 numbers out of Khronos' several hundred, and the only reason any one of them is there
+is that something emits it — so a number nothing emits is a copy of the grammar with nothing
+checking it, and deleting it costs a minute on the day somebody wants it back.
+
+An enum that models a closed set from the specification is a different object. `LoopControl` has
+four members because the specification has four; a `LoopControl` carrying only the two this crate
+emits would be a *wrong type* — it would say the other two do not exist. The same for `Scope`, whose
+members are the levels a memory operation can name, and for `Decoration`'s access qualifiers. The
+next person to need `Scope::Invocation` would add it back with a guess, and the guess is the failure
+`decisions/DR-0001` exists to prevent.
+
+What keeps those twelve honest is weaker than what keeps the opcodes honest, and worth naming: a
+unit test asserting each `word()` against the specification, which is the *second copy of the
+number* DR-0001 warns about — where an emitted opcode is checked by `spirv-val` seeing a real
+module. That is the best available for a number nothing emits, and it is the reason to keep the set
+complete rather than to prune it: a partial enum has the same weak check and a worse type.

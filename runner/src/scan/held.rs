@@ -306,8 +306,9 @@ impl<'gpu> Held<'gpu> {
             .iter()
             .map(|&(_, bytes)| (bytes / size_of::<u32>() as u64) as usize)
             .collect();
-        if let Some(overrun) = crate::dispatch::Bounds::of(spirv)
-            .overrun(crate::dispatch::Grid::linear(workgroups), &held)
+        if let Some(overrun) =
+            crate::dispatch::Bounds::of(spirv, &crate::dispatch::Specialization::none())
+                .overrun(crate::dispatch::Grid::linear(workgroups), &held)
         {
             return Err(overrun.into());
         }

@@ -116,7 +116,10 @@ impl Gpu {
             match Pipeline::new(self, spirv, &bound, &super::Specialization::none()) {
                 Ok(pipeline) => Ok(Session {
                     gpu: self,
-                    bounds: super::extent::Bounds::of(spirv),
+                    // The same `Specialization::none()` the pipeline above is built with. A
+                    // session holds its bound from before the first dispatch, so the two are read
+                    // together here or never.
+                    bounds: super::extent::Bounds::of(spirv, &super::Specialization::none()),
                     held: buffers.iter().map(Buffer::capacity).collect(),
                     staging: Some(staging),
                     buffers,

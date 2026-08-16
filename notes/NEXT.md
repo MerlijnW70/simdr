@@ -1234,8 +1234,12 @@ wants x alone, so a grid two rows deep with two strips would have recovered a st
 `(group.y × pitch) + run` shares — the first version found that instead, reported no pitch, and
 looked exactly like working.
 
-What is left outside is `Kernel::load_offset_by`, whose offset is a specialization constant chosen
-after the module was built with no literal in it to read.
+~~What is left outside is `Kernel::load_offset_by`, whose offset is a specialization constant chosen
+after the module was built with no literal in it to read.~~ **Closed 2026-08-16, and it was the one
+fail-open site in the file.** Every other thing this walk cannot read makes the check *weaker*; that
+one made it **permissive**, because a term counted as zero is a reach the bound allows. The number
+was not unknowable, only written somewhere else: a pipeline is created *with* its specialization, so
+`Bounds::of` takes one. `notes/FINDINGS.md` has the account.
 
 **And the gate was pointed at all of it, five times.** 63% → 85.2% → 86.7% → 90% → **100%, 30 of
 30**. The first run's survivors clustered in the four conditions that identify a grid's row, because
@@ -1350,6 +1354,10 @@ nothing is dispatched. Every hour spent on `spirv-val` coverage, on the lane API
 the mutation gate pays regardless of what any device costs.
 
 **And the whole tree has now been through the gate at full scope: 93 targets, 639 mutants, 100%.**
+*Re-run whole on 2026-08-16: 651 mutants, still every shard at 100% with no survivors — twelve more
+than the first time, which is the vocabulary and the bound growing since. The tree holds 94 targets
+now rather than 93: `extent.rs`'s test module became a file of its own that day, which is one more
+file over the same code.*
 It had never been — a single run exceeds the mutant cap and outlives the client, so every run before
 this was diff-scoped, which answers "did this change arrive covered" and never "is this file
 covered". `NOHA_ONLY` shards it by path; five runs did it. `notes/FINDINGS.md` has the table and the
@@ -1534,7 +1542,7 @@ mappings on the first seed. And it batches — one workgroup per seed, the offse
 which is the shape the sandbox left behind rather than the code it left behind.
 
 **2. The fuzzer keeps watching without being asked.** Every push already sweeps it at 256 rounds a
-domain on lavapipe at 4, 8 and 16. `.github/workflows/fuzz.yml` runs 8 000 a domain at 03:00 UTC and
+domain on lavapipe at 4, 8 and 16. `.github/workflows/nightly.yml` runs 8 000 a domain at 03:00 UTC and
 on demand, and fails when fewer than eight domains report — a domain refused every round has no
 coverage and looks exactly like one that always agreed.
 
@@ -1561,3 +1569,30 @@ The emitter has no external callers, and every promise it makes is checked by so
 repository rather than by anything outside it. `USING.md` is the first attempt at writing down what
 somebody outside would be relying on and what holds each of those up — not a feature, and the one
 piece of work here whose absence nothing in the tree can detect.
+
+## The horizon, after the night of 2026-08-16
+
+The whole tree through the mutation gate in six shards — 93 targets, every shard **100%**, no
+survivors — and then the three things that survey turned up.
+
+**What is closed.** The dispatch bound's last blind term, above. `notes/CLAIMS.md` item 2, which
+asked for a sweep of `src/module/` and turns out to have nothing in it to sweep: that layer has no
+generic parameter anywhere, so a bound cannot be too wide there, and what guards it is `spirv-val`
+alone. And the file-length question, which was worth measuring rather than assuming — one file
+needed splitting and the other eight named as candidates did not.
+
+**What is open, in the order it is worth doing.**
+
+1. **The examples still run nowhere but a workstation.** `notes/CLAIMS.md` item 3, and the one
+   remaining check with no instrument: seventeen programs that compile in CI and are never run, of
+   which sixteen need a device. It is one step in the lavapipe job, and what stops it being one line
+   is that nobody has measured what those sixteen cost on a software driver at four lanes.
+2. **The mapping relationship is still only half mechanised.** `Mapping::of` is the single rule and
+   the fuzzer asserts it takes its mapping from there. What no check asserts is the *absence* of a
+   fourth copy — and this file has paid for that three times.
+3. **The dot products have no generated coverage.** `runner/tests/mappings.rs` holds the twelve
+   combinations; no generated program has ever put a rotate and a rolled loop around one. The
+   blocker is unchanged and real: the input is four bytes in a word and the accumulator's type
+   changes mid-program, which is the first step that does not fit the generator's single-accumulator
+   line.
+4. **The batch API still has no caller**, and the sandbox that was one was deleted on purpose.

@@ -104,7 +104,7 @@ const NOT_MUTATED: [(&str, &str); 15] = [
 ///
 /// The entries below are the ones where "nothing calls it" is the right answer, and each says why.
 /// [`nothing_is_excused_from_needing_a_consumer_and_has_one`] deletes an excuse that has expired.
-const NO_CONSUMER: [(&str, &str); 5] = [
+const NO_CONSUMER: [(&str, &str); 6] = [
     (
         "require_extension",
         "called by require_capability in the same file, which is the only place that knows a \
@@ -119,6 +119,13 @@ const NO_CONSUMER: [(&str, &str); 5] = [
     ("subgroup_f_max", "as subgroup_f_add"),
     ("subgroup_f_min", "as subgroup_f_add"),
     ("subgroup_i_add", "as subgroup_f_add"),
+    (
+        "set_f32",
+        "tested by a_float_goes_in_as_its_bits in the file that declares it, and it cannot be \
+         tested anywhere else: what that test observes is `data`, which is pub(crate), so an \
+         integration test has nothing to look at but `len` — and `len` cannot tell a float from \
+         an integer. A weaker consumer than another crate's, and not no consumer",
+    ),
 ];
 
 /// Every `.rs` file under `src/` and `runner/src/`, as forward-slashed paths from the root.
@@ -150,12 +157,20 @@ fn workspace_files() -> BTreeSet<String> {
     found
 }
 
-/// Every `pub fn` the emitter declares, as `(name, the file that declares it)`.
+/// Every `pub fn` the workspace declares, as `(name, the file that declares it)`.
 ///
-/// Scoped to `src/` rather than the whole workspace because that is the crate with the discipline
-/// this is protecting — `#![forbid(unsafe_code)]`, no panics on any input, and a public surface
-/// somebody outside this repository could call. `runner` is `publish = false` and exists to be
-/// consumed by tests; widening to it is a later decision, not an oversight.
+/// **`runner` as well as `src/` since 2026-08-16, and the widening was the later decision this
+/// paragraph used to defer.** It said `runner` is `publish = false` and exists to be consumed by
+/// tests, which is true and is not a reason: a public function nobody calls is untested surface
+/// whichever crate it sits in, and the crate that dispatches to a device is the one where untested
+/// surface reaches a driver.
+///
+/// It cost three, of a hundred and seventy-four. `Gpu::run_words` was public and named by nothing
+/// outside its own file, with `Gpu::run_u32` the public spelling of the same thing — private now.
+/// `Gpu::time_specialized` had no caller anywhere, examples included — deleted.
+/// `Specialization::set_f32` is excused with its reason above: it *is* tested, in the file that
+/// declares it, and cannot be tested anywhere else, because what that test observes is
+/// `pub(crate)`.
 ///
 /// **The whole file, tests included, and that is deliberate.** The first version stopped at the
 /// first `#[cfg(test)]` on the grounds that a helper inside one is not shipped surface — and a
@@ -170,7 +185,10 @@ fn workspace_files() -> BTreeSet<String> {
 fn public_functions() -> Vec<(String, String)> {
     let mut found = Vec::new();
 
-    for path in sources_on_disk().iter().filter(|p| p.starts_with("src/")) {
+    for path in sources_on_disk()
+        .iter()
+        .filter(|p| p.starts_with("src/") || p.starts_with("runner/src/"))
+    {
         let Ok(text) = fs::read_to_string(root().join(path)) else {
             continue;
         };

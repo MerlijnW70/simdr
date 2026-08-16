@@ -13,10 +13,23 @@
 #
 # It is a *separate* workflow rather than a schedule on `ci.yml` on purpose: a nightly run of the
 # whole matrix would say nothing new about formatting or the MSRV, and a failure here has to be
-# readable as one thing — the fuzzer disagreed with the reference — rather than as one red mark
-# among five.
+# readable as one thing rather than as one red mark among five.
+#
+# # And the examples, for the same reason
+#
+# `notes/CLAIMS.md` counts 378 measured numbers across these documents and observes that CI runs
+# none of the programs that produced them: `cargo clippy --all-targets` **compiles** every example
+# and runs none. So a `Gpu::open` that started refusing, a kernel that started erroring, a harness
+# that stopped dispatching — none of it would be noticed by anything, while the numbers those
+# programs printed went on being quoted.
+#
+# The check is **liveness, not the numbers**. A shared runner's wall clock is not evidence about
+# throughput — `session.rs` skips its own speed ratio when `CI` is set, for exactly that reason — so
+# this asks one question per program: does it still run to a clean exit. It is here rather than in
+# `ci.yml` because seventeen programs on a software rasteriser is minutes rather than seconds, and
+# nobody should wait for that on a push.
 
-name: fuzz
+name: nightly
 
 on:
   schedule:
@@ -95,5 +108,71 @@ jobs:
           echo "$domains domains swept at subgroup ${{ matrix.width }}"
           if [ "$domains" -ne 8 ]; then
             echo "::error::${{ matrix.width }}-wide sweep reported $domains domains and there are eight — a domain that is refused every round has no coverage and looks exactly like one that always agreed"
+            exit 1
+          fi
+
+  liveness:
+    name: every example still runs
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: install lavapipe and spirv-tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers libvulkan1 spirv-tools
+
+      # Without a driver every example reports no device and exits **zero**, which is the shape of
+      # green this whole workflow exists to refuse.
+      - name: find the software driver
+        run: |
+          icd=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json 2>/dev/null | head -n1)
+          if [ -z "$icd" ]; then
+            echo "::error::no lavapipe ICD found — every example would report no device and exit 0"
+            exit 1
+          fi
+          echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
+
+      # **Discovered and counted, not listed.** A loop that finds no examples exits zero and prints
+      # nothing, so the number found is compared against the number the tree holds — the same shape
+      # `tests/documented.rs` uses for the same reason.
+      #
+      # `--release`, because several of these measure something and a debug build of a sweep over a
+      # million elements on a software rasteriser is not a wait anybody needs. And a timeout per
+      # program, because one that hangs must fail rather than take the job's hour with it.
+      - name: run them
+        env:
+          SPIRV_VAL: /usr/bin/spirv-val
+        run: |
+          examples=$(find . -path ./target -prune -o -name '*.rs' -path '*/examples/*' -print)
+          expected=$(echo "$examples" | wc -l)
+          ran=0
+          failed=""
+
+          for path in $examples; do
+            name=$(basename "$path" .rs)
+            case "$path" in
+              ./runner/*) crate="-p runner" ;;
+              *)          crate="-p simdr" ;;
+            esac
+
+            echo "::group::$name"
+            if timeout 240 cargo run $crate --release --example "$name"; then
+              ran=$((ran + 1))
+            else
+              failed="$failed $name(exit $?)"
+            fi
+            echo "::endgroup::"
+          done
+
+          echo "$ran of $expected examples ran to a clean exit"
+          if [ -n "$failed" ]; then
+            echo "::error::these examples did not:$failed"
+            exit 1
+          fi
+          if [ "$ran" -ne "$expected" ]; then
+            echo "::error::$ran ran and the tree holds $expected"
             exit 1
           fi

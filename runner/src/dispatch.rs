@@ -73,7 +73,13 @@ impl Gpu {
         //
         // `extent::Bounds` reads the workgroup size out of the module and refuses instead. It is a
         // floor rather than a proof: see `dispatch::extent` for what it cannot catch.
-        if let Some(overrun) = extent::Bounds::of(spirv).overrun_uniform(grid, count) {
+        // **With the specialization this dispatch will actually use.** `Kernel::load_offset_by`
+        // reaches past its run by a number chosen here rather than written into the module, and a
+        // bound that read the module alone counted zero for it — permissively, which is the one
+        // direction a refusal must never take.
+        if let Some(overrun) =
+            extent::Bounds::of(spirv, specialization).overrun_uniform(grid, count)
+        {
             return Err(overrun.into());
         }
 

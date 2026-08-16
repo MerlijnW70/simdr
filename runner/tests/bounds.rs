@@ -14,6 +14,13 @@
 //! buffers can hold, and expect [`runner::Error::Overrun`] rather than a submission. `execution.rs`
 //! holds the `Gpu::run` half, where the check already was.
 //!
+//! **And one door was open in a different way.** A dispatch's reach can be widened by a
+//! *specialization constant* — a number chosen when the pipeline is created rather than written
+//! into the module — and the bound read the module alone, so it counted zero for that term and let
+//! the dispatch through. It reads the pipeline's specialization now, and the last test here is what
+//! says so: the same module, the same buffer, refused or accepted according to a number that
+//! appears nowhere in it.
+//!
 //! # Why a refusal is the right answer and not a clamp
 //!
 //! A kernel writing past the end of a storage buffer is undefined behaviour, and this project has
@@ -23,9 +30,9 @@
 
 mod common;
 
-use common::{device, ramp};
+use common::{device, elements, ramp};
 use runner::kernels::{self, WORKGROUP_SIZE};
-use runner::{Error, Grid, Pass};
+use runner::{Error, Grid, Pass, Specialization};
 
 /// Words in, for a kernel that reads binding 0 and writes binding 1.
 fn as_words(values: &[f32]) -> Vec<u32> {
@@ -332,5 +339,68 @@ fn a_plane_narrower_than_its_rows_is_measured_by_the_pitch() {
     assert!(
         overran(&outcome),
         "a buffer of the columns dispatched, with no room for the pitch between rows, gave {outcome:?}"
+    );
+}
+
+/// An offset chosen at pipeline creation is inside the bound, not outside it.
+///
+/// `kernels::reduce::fold_halves_open` reads its second operand at an offset held in a
+/// specialization constant, so the module has no literal for it and `Bounds` used to count zero.
+/// That is the permissive direction: the dispatch reads `offset` elements past its run and the
+/// check said it did not.
+///
+/// **Three dispatches of one module, and the buffer never changes.** Unspecialized the offset is
+/// the module's declared default of zero and the read fits; specialized past the end it must be
+/// refused; specialized to something that still fits it must not be. A bound that ignored the
+/// specialization would accept all three, and a bound that panicked on one would refuse all three.
+#[test]
+fn an_offset_chosen_when_the_pipeline_is_built_is_bounded_like_any_other() {
+    let Some(gpu) = device("bounds-specialized") else {
+        return;
+    };
+
+    let width = gpu.limits().subgroup_size;
+    let Ok(spirv) = kernels::reduce::fold_halves_open(width) else {
+        eprintln!("SKIPPED bounds-specialized: no mapping for this width");
+        return;
+    };
+
+    // Exactly what one workgroup reads with the offset at its default, and not one word more.
+    // `fold_halves_open` is built for the device's own width and reads one element per invocation,
+    // so its run is a workgroup whatever the width is. Words rather than floats: `run_specialized`
+    // takes the buffer as it lies.
+    let run = elements(width, width);
+    let input: Vec<u32> = (0..run).map(|index| (index as f32).to_bits()).collect();
+
+    assert!(
+        gpu.run_specialized(&spirv, &input, 1, &Specialization::none())
+            .is_ok(),
+        "the default offset is zero, so this reads its own run twice and fits"
+    );
+
+    let refused = gpu.run_specialized(
+        &spirv,
+        &input,
+        1,
+        &Specialization::none().set(kernels::FOLD_HALF_SPEC_ID, run as u32),
+    );
+    assert!(
+        matches!(refused, Err(Error::Overrun { .. })),
+        "an offset of a whole workgroup reads a workgroup past the end and has to be refused, \\
+         and the number that says so is in the pipeline rather than in the module: {refused:?}"
+    );
+
+    // And the other direction, or the test above would pass on a bound that refused everything.
+    let room: Vec<u32> = (0..run * 2).map(|index| (index as f32).to_bits()).collect();
+    assert!(
+        gpu.run_specialized(
+            &spirv,
+            &room,
+            1,
+            &Specialization::none().set(kernels::FOLD_HALF_SPEC_ID, run as u32),
+        )
+        .is_ok(),
+        "the same offset over a buffer twice as long fits, so the refusal above is about the reach \\
+         rather than about the constant being set at all"
     );
 }

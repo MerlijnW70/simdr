@@ -76,7 +76,8 @@ impl Gpu {
         for pass in passes {
             let grid = super::Grid::linear(pass.workgroups);
             if let Some(overrun) =
-                super::extent::Bounds::of(pass.spirv).overrun_uniform(grid, input.len())
+                super::extent::Bounds::of(pass.spirv, &super::Specialization::none())
+                    .overrun_uniform(grid, input.len())
             {
                 return Err(overrun.into());
             }

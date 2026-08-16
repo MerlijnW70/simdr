@@ -53,8 +53,28 @@
 //! is the caller's `offset` and nothing else. A binding with no offset gives zero, which is the
 //! arithmetic agreeing with the answer this file gave before.
 //!
-//! `Kernel::load_offset_by` stays outside it, and must: its offset is a specialization constant,
-//! which is a number chosen after the module was built and has no literal here to read.
+//! **`Kernel::load_offset_by` used to stay outside it**, and the reason was true and the
+//! conclusion was not: its offset is a specialization constant, a number chosen after the module
+//! was built with no literal here to read. So this counted zero for it — and a bound that
+//! under-counts is a bound that **lets an overrun through**, which is the opposite of the direction
+//! every other unreadable thing here takes.
+//!
+//! The number is not unknowable, it is known somewhere else. A pipeline is created *with* its
+//! specialization, and every caller that bounds a dispatch has that value in scope at the moment it
+//! asks. So [`super::Bounds::of`] takes it, [`specialized`] resolves each constant's id to the
+//! value the pipeline will carry — the caller's, or the module's own default where the caller sets
+//! nothing — and [`open_shift_in`] adds it like any other term.
+//!
+//! **`OpSpecConstantOp` is still outside, and this time the sentence is the right way round.** A
+//! module may derive one constant from another — `offset x 2` — and resolving that would mean an
+//! interpreter for constant expressions here. So the derived term is not counted, and the answer
+//! stays a **floor**, which is what this file gives for everything it cannot read.
+//!
+//! Dropping such a binding from the answer entirely was tried and is *worse*, which the test
+//! written to prove it worthwhile is what showed: a binding with no entry does not go unjudged, it
+//! falls back to the invocation reading — so an address carrying both a folded constant and a
+//! derived one would lose the constant it *could* read as well as the one it could not. Counting
+//! what is legible and being a floor beats counting nothing and being a cruder floor.
 //!
 //! # Every condition here is redundant on the modules this crate emits
 //!
@@ -86,6 +106,7 @@
 //! way reaches no built-in through this walk, so its bindings go uncounted and unchecked — which is
 //! the safe direction, and the same one [`super::fits`] takes for a module it cannot read at all.
 
+use crate::dispatch::Specialization;
 use simdr::decode;
 use simdr::module::op;
 use simdr::spec::{BuiltIn, Decoration};
@@ -123,7 +144,7 @@ pub(super) struct Needs {
 ///
 /// Empty when the module declares no workgroup size this can divide by, when it has no
 /// `LocalInvocationId` to depend on, or when nothing in it addresses a bound buffer.
-pub(super) fn needs(spirv: &[u32], columns: u64) -> BTreeMap<u32, Needs> {
+pub(super) fn needs(spirv: &[u32], columns: u64, chosen: &Specialization) -> BTreeMap<u32, Needs> {
     let mut wanted: BTreeMap<u32, Needs> = BTreeMap::new();
     if columns == 0 {
         return wanted;
@@ -135,6 +156,7 @@ pub(super) fn needs(spirv: &[u32], columns: u64) -> BTreeMap<u32, Needs> {
     let group = component_of(spirv, BuiltIn::WorkgroupId, 0);
     let bindings = bindings(spirv);
     let constants = constants(spirv);
+    let specialized = specialized(spirv, chosen);
     let terms = terms(spirv);
     let row = row_of(spirv, &terms);
 
@@ -156,8 +178,12 @@ pub(super) fn needs(spirv: &[u32], columns: u64) -> BTreeMap<u32, Needs> {
         // What is left of this access's folded constant once its own strip is accounted for. On the
         // last strip that is the caller's offset exactly; on an earlier one it is less, or nothing,
         // so the maximum over a binding's accesses is the offset and the others cost nothing.
+        // Two halves, because an address can carry both: the constant the emitter folded in, and
+        // a specialization constant the pipeline will supply. `load_offset` produces the first and
+        // `load_offset_by` the second, and a kernel is free to use one, the other, or neither.
         let offset = shift_in(&from, &terms, &constants, local)
-            .saturating_sub((strips - 1).saturating_mul(columns));
+            .saturating_sub((strips - 1).saturating_mul(columns))
+            .saturating_add(open_shift_in(&from, &terms, &specialized));
 
         let pitch = row.and_then(|row| pitch_in(&from, &terms, &constants, row));
 
@@ -259,6 +285,70 @@ fn shift_in(
         .map(u64::from)
         .max()
         .unwrap_or(0)
+}
+
+/// The largest specialization constant added into this address, at the value the pipeline will
+/// carry.
+///
+/// `Kernel::load_offset_by` emits `i_add(uint, address, offset)`, so the constant is the right
+/// operand — but **both are read**, and that is the one place this file does not lean on operand
+/// order. [`shift_in`] and [`strips_in`] use the left operand to *identify* which term they are
+/// looking at, and being wrong there finds nothing and counts zero, which is safe. Here the
+/// constant's role is the same in either slot: a sum is shifted by it whichever side it sits on,
+/// and counting zero because a module wrote the operands the other way round is the permissive
+/// direction this whole function exists to close.
+///
+/// The maximum rather than the sum: `load_offset_by` adds the *same* offset once per strip, so each
+/// strip's address carries one copy of it and the binding needs one copy past its run.
+fn open_shift_in(
+    from: &BTreeSet<u32>,
+    terms: &BTreeMap<u32, Term>,
+    specialized: &BTreeMap<u32, u32>,
+) -> u64 {
+    from.iter()
+        .filter_map(|id| terms.get(id))
+        .filter(|term| term.opcode == op::I_ADD)
+        .filter_map(|term| {
+            specialized
+                .get(&term.right)
+                .or_else(|| specialized.get(&term.left))
+                .copied()
+        })
+        .map(u64::from)
+        .max()
+        .unwrap_or(0)
+}
+
+/// Every specialization constant's value, by the id that holds it.
+///
+/// Both halves of the number: a module declares one with a default and a `SpecId`, and a pipeline
+/// may replace the default when it is created. What a dispatch reaches depends on the value the
+/// **pipeline** was built with, so the caller's choice wins and the module's default stands where
+/// there is none — which is exactly what the driver does with the same two numbers.
+///
+/// A specialization constant with no `SpecId` cannot be set by anybody and is skipped: its default
+/// is its value, and it would be read as a plain constant if anything addressed with it.
+fn specialized(spirv: &[u32], chosen: &Specialization) -> BTreeMap<u32, u32> {
+    let ids: BTreeMap<u32, u32> = decode::body(spirv)
+        .filter(|instruction| instruction.opcode() == op::DECORATE)
+        .filter_map(|instruction| match instruction.operands() {
+            [target, decoration, spec_id] if *decoration == Decoration::SpecId.word() => {
+                Some((*target, *spec_id))
+            }
+            _ => None,
+        })
+        .collect();
+
+    decode::body(spirv)
+        .filter(|instruction| instruction.opcode() == op::SPEC_CONSTANT)
+        .filter_map(|instruction| match instruction.operands() {
+            [_type, id, default] => {
+                let spec_id = ids.get(id)?;
+                Some((*id, chosen.value_of(*spec_id).unwrap_or(*default)))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// The largest `workgroup × strips` constant multiplied by the workgroup index, divided back down.

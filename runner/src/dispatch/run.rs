@@ -134,15 +134,11 @@ impl Gpu {
 
     /// Run over raw words, which is what the buffers actually hold.
     ///
-    /// # Errors
-    ///
-    /// As [`Gpu::run`].
-    pub fn run_words(
-        &self,
-        spirv: &[u32],
-        input: &[u32],
-        workgroups: u32,
-    ) -> Result<Vec<u32>, Error> {
+    /// **Private, because `Gpu::run_u32` is the public spelling of the same thing.** It was `pub`
+    /// and named by nothing outside this file — the shape `Module::memory_barrier` had when it
+    /// turned up emitting an instruction Vulkan forbids with no caller and no validator behind it.
+    /// The three typed entry points above are its callers and they are enough.
+    fn run_words(&self, spirv: &[u32], input: &[u32], workgroups: u32) -> Result<Vec<u32>, Error> {
         self.run_grid(spirv, input, Grid::linear(workgroups))
     }
 
@@ -178,29 +174,6 @@ impl Gpu {
     ) -> Result<Vec<u32>, Error> {
         self.execute(spirv, input, Grid::linear(workgroups), 1, specialization)
             .map(|out| out.0)
-    }
-
-    /// Time `iterations` dispatches of a specialized pipeline.
-    ///
-    /// # Errors
-    ///
-    /// As [`Gpu::run`].
-    pub fn time_specialized(
-        &self,
-        spirv: &[u32],
-        input: &[u32],
-        workgroups: u32,
-        iterations: u32,
-        specialization: &Specialization,
-    ) -> Result<Duration, Error> {
-        self.execute(
-            spirv,
-            input,
-            Grid::linear(workgroups),
-            iterations,
-            specialization,
-        )
-        .map(|out| out.1)
     }
 
     /// Time `iterations` back-to-back dispatches of `spirv`.
