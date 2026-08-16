@@ -1411,7 +1411,7 @@ program can reach, and of those, which have an exact reference?** The second hal
 does the work — a fuzzer round is only a test if something can disagree with it, and disagreement
 needs an answer that is *right* rather than close.
 
-`src/lanes/` declares <!--count:lane-operations-->64 public functions, of which perhaps forty are
+`src/lanes/` declares <!--count:lane-operations-->65 public functions, of which perhaps forty are
 operations rather than plumbing — an inexact split, so it is stated inexactly rather than given a
 number nothing checks. What follows is the named list instead.
 
@@ -1526,7 +1526,7 @@ stays open.
 ## Where the work goes now — 2026-08-16, after the sandbox
 
 The generator draws from <!--count:fuzz-operations-->23 operations, against the
-<!--count:lane-operations-->64 public functions `src/lanes/` declares. That ratio is the one number
+<!--count:lane-operations-->65 public functions `src/lanes/` declares. That ratio is the one number
 this list is written against, and it is now checked at both ends rather than typed.
 
 ### Tier 1 — the hole the deletion opened, closed

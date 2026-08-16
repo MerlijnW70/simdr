@@ -241,6 +241,79 @@ impl<'module> Lanes<'module> {
         self.scope
     }
 
+    /// Where each lane sits **inside its own vector**: nought to `LANES - 1`, as a vector.
+    ///
+    /// # The one thing a butterfly network needs and could not ask for
+    ///
+    /// [`Lanes::butterfly`] hands a lane the value at `l ^ mask`, and every algorithm built on it —
+    /// a Walsh–Hadamard or Fourier transform, a bitonic sort, a hand-rolled scan — then has to
+    /// decide what to *do* with it, and the decision is always the same one: whether this lane is
+    /// the low or the high half of the pair, which is one bit of its own position. Without that the
+    /// exchange is symmetric and the algorithm cannot be written at all.
+    ///
+    /// It was missing until a workload needed it, and what a caller reached for instead was
+    /// `local_index & (LANES - 1)`. That is the "cheaper wrong one" [`Lanes::lane_index`] is about:
+    /// it is right only where subgroups are cut from consecutive workgroup indices, which Vulkan
+    /// guarantees for a pipeline that asked for full subgroups — and `decisions/DR-0002` records
+    /// this project deciding *not* to require that extension.
+    ///
+    /// # It is a position in the vector, not in the subgroup
+    ///
+    /// Which is the whole difference, and it is the mapping's:
+    ///
+    /// | mapping | what a lane holds | cost |
+    /// | --- | --- | --- |
+    /// | [`Mapping::WholeSubgroup`] | its subgroup lane | the built-in |
+    /// | [`Mapping::Clusters`] | its lane within its cluster | one `OpBitwiseAnd` |
+    /// | [`Mapping::Strips`] | `lane + strip × width`, per strip | one `OpIAdd` per strip past the first |
+    ///
+    /// A one-lane vector's only position is nought, and that is a constant rather than a mask by
+    /// zero — the module says what the arithmetic does.
+    ///
+    /// # Errors
+    ///
+    /// [`LaneError::NoMapping`] if `LANES` cannot sit on this subgroup, [`LaneError::Build`] if an
+    /// instruction cannot be emitted.
+    pub fn position<const LANES: u32>(&mut self) -> Result<Vector<U32, LANES>, LaneError> {
+        let strips = match self.mapping::<LANES>()? {
+            Mapping::WholeSubgroup => {
+                let lane = self.lane_index()?;
+                return self.from_strips(&[lane]);
+            }
+            Mapping::Clusters { size: 1 } => {
+                let only = self.module().constant_u32(0)?;
+                return self.from_strips(&[only]);
+            }
+            Mapping::Clusters { size } => {
+                let lane = self.lane_index()?;
+                let uint = self.type_of::<U32>()?;
+                let wrap = self.module().constant_u32(size.wrapping_sub(1))?;
+                let within = self
+                    .module()
+                    .binary(crate::module::op::BITWISE_AND, uint, lane, wrap)?;
+                return self.from_strips(&[within]);
+            }
+            Mapping::Strips { count } => count,
+        };
+
+        let lane = self.lane_index()?;
+        let uint = self.type_of::<U32>()?;
+        let width = self.width();
+
+        let mut ids = Vec::with_capacity(strips as usize);
+        for strip in 0..strips {
+            // Strip zero is the lane itself, and adding nought to it would be an instruction
+            // describing no arithmetic — the same reason `Kernel::address` skips its own zero.
+            if strip == 0 {
+                ids.push(lane);
+                continue;
+            }
+            let along = self.module().constant_u32(strip.wrapping_mul(width))?;
+            ids.push(self.module().i_add(uint, lane, along)?);
+        }
+        self.from_strips(&ids)
+    }
+
     /// This invocation's index within its subgroup, loaded from `SubgroupLocalInvocationId`.
     ///
     /// **The defined answer, and there is a cheaper wrong one.** A kernel already knows its index
@@ -365,6 +438,47 @@ mod tests {
         ] {
             assert_eq!(emitted, Some(expected));
         }
+    }
+
+    /// How many instructions of one opcode a module holds after building nothing but a position.
+    fn emitted<const LANES: u32>(width: u32, opcode: u16) -> usize {
+        let mut module = module();
+        let mut lanes = Lanes::new(&mut module, width).expect("built");
+        lanes.position::<LANES>().expect("a mapping");
+
+        let words = module.finish();
+        decode::body(&words)
+            .filter(|instruction| instruction.opcode() == opcode)
+            .count()
+    }
+
+    /// Each mapping's position costs what [`Lanes::position`]'s own table says it costs.
+    ///
+    /// **The mutation gate asked for this one, and it is the right kind of test to be asked for.**
+    /// Skipping the add for strip zero changes the *module* and not the answer — `lane + 0` is
+    /// `lane`, and every device agrees whether the branch is there or not — so the branch was
+    /// "guarded but untested" and a mutant that deleted it survived every check in the repository.
+    ///
+    /// What it protects is a cost, so a cost is what is counted. The same argument the codebase
+    /// already makes at `Kernel::run_start`, where four identical multiplies "made the module say
+    /// something the arithmetic does not": a driver folds them, and the module is still wrong about
+    /// itself.
+    #[test]
+    fn a_position_costs_what_its_mapping_says_it_costs() {
+        // Strip-mined: one add per strip past the first, and the first is the lane itself.
+        assert_eq!(emitted::<64>(32, op::I_ADD), 1, "two strips want one add");
+        assert_eq!(emitted::<128>(32, op::I_ADD), 3, "four strips want three");
+        assert_eq!(emitted::<32>(8, op::I_ADD), 3, "and four again on a narrow device");
+
+        // A whole subgroup is the built-in and nothing else; a cluster is one mask and no add.
+        assert_eq!(emitted::<32>(32, op::I_ADD), 0);
+        assert_eq!(emitted::<32>(32, op::BITWISE_AND), 0);
+        assert_eq!(emitted::<8>(32, op::I_ADD), 0);
+        assert_eq!(emitted::<8>(32, op::BITWISE_AND), 1, "a cluster masks once");
+
+        // And a vector of one is a constant rather than a mask by zero, which would answer the
+        // same and describe arithmetic the kernel does not do.
+        assert_eq!(emitted::<1>(32, op::BITWISE_AND), 0, "nought is not a mask");
     }
 
     /// The opcode `convert_u32::<T>` emits, in a module holding nothing else that could be it.
