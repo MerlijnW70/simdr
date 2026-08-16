@@ -1,8 +1,13 @@
 # demo — procedural worlds on the GPU
 
 A throwaway. Three worlds generated from nothing but the invocation's own coordinates: a
-two-octave landscape, a cave system packed one bit per layer, and an escape-time fractal in fixed
-point.
+two-octave landscape drawn as a cross-section, a cave system packed one bit per layer, and an
+escape-time fractal in fixed point.
+
+The landscape's fine octave ran at a quarter of the resolution first, and the picture came out in
+four-column blocks — a detail layer coarser than the thing being drawn is not a detail layer. It is
+at full resolution now, and a skyline is a shape a reader can tell is wrong, which a shaded map
+from above is not.
 
 ```bash
 cd demo

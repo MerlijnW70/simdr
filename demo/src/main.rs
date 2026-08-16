@@ -32,12 +32,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let limits = gpu.limits().clone();
     println!("{} — subgroup {}\n", limits.name, limits.subgroup_size);
 
-    draw("A landscape", &gpu, landscape, |world| {
-        // Two octaves of value noise, as ground: the byte is a height and the ramp is a hillside.
-        shaded(world, " .:-=+*#%@")
+    draw("A landscape, seen from the side", &gpu, landscape, |world| {
+        // **A cross-section rather than a map.** The kernel answers with one height per column,
+        // which drawn from above is a field of shaded squares and drawn from the side is a
+        // skyline — and a skyline is the thing a reader can tell is wrong.
+        let mut out = String::new();
+        for level in (0..ROWS).rev() {
+            for column in 0..DRAWN as usize {
+                let height = world.get(column).copied().unwrap_or(0) * ROWS / 256;
+                out.push(match height.cmp(&level) {
+                    std::cmp::Ordering::Less => ' ',
+                    std::cmp::Ordering::Equal => '#',
+                    std::cmp::Ordering::Greater => ':',
+                });
+            }
+            out.push('\n');
+        }
+        out
     });
 
-    draw("Caves, one bit a layer", &gpu, caverns, |world| {
+    draw("Caves under it, one bit a layer", &gpu, caverns, |world| {
         // A vertical slice: the row is the layer and the column is the column, so this is what a
         // miner walking east would cut through.
         let mut out = String::new();

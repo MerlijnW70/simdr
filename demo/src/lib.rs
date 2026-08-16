@@ -135,8 +135,12 @@ fn column<const LANES: u32>(kernel: &mut Kernel<U32>) -> Result<Vector<U32, LANE
 /// A height per column of a `pitch`-wide world, from two octaves of value noise.
 ///
 /// One octave is visibly a grid of independent numbers; two is a landscape. The coarse layer runs
-/// at a sixteenth of the resolution and carries the hills, the fine one at a quarter carries the
-/// roughness, and they are added eight to one.
+/// at a sixteenth of the resolution and carries the hills, the fine one at **full** resolution
+/// carries the roughness, and they are added eight to one.
+///
+/// The fine octave was at a quarter of the resolution first, and it showed: four columns shared a
+/// value and the picture came out in blocks. A detail layer that is coarser than the thing being
+/// drawn is not a detail layer.
 ///
 /// **Eight to one and then a shift, rather than a ninth**, because there is no division. The
 /// reference weights it the same way, so the two agree exactly and the picture is the picture on
@@ -156,7 +160,6 @@ pub fn heights<const LANES: u32>(subgroup: u32, pitch: u32) -> Result<Vec<u32>, 
         let y = lanes.splat_id::<U32, LANES>(row)?;
 
         let by4 = lanes.splat_bits::<U32, LANES>(4)?;
-        let by2 = lanes.splat_bits::<U32, LANES>(2)?;
         let by24 = lanes.splat_bits::<U32, LANES>(24)?;
         let eight = lanes.splat_bits::<U32, LANES>(8)?;
 
@@ -164,9 +167,7 @@ pub fn heights<const LANES: u32>(subgroup: u32, pitch: u32) -> Result<Vec<u32>, 
         let coarse_y = lanes.shift_right_logical(y, by4)?;
         let coarse = octave::<LANES>(&mut lanes, coarse_x, coarse_y)?;
 
-        let fine_x = lanes.shift_right_logical(x, by2)?;
-        let fine_y = lanes.shift_right_logical(y, by2)?;
-        let fine = octave::<LANES>(&mut lanes, fine_x, fine_y)?;
+        let fine = octave::<LANES>(&mut lanes, x, y)?;
 
         let weighted = lanes.mul(coarse, eight)?;
         let total = lanes.add(weighted, fine)?;
@@ -188,7 +189,7 @@ pub fn heights_reference(pitch: u32, rows: u32) -> Vec<u32> {
     for y in 0..rows {
         for x in 0..pitch {
             let coarse = mix2(x >> 4, y >> 4);
-            let fine = mix2(x >> 2, y >> 2);
+            let fine = mix2(x, y);
             out.push(coarse.wrapping_mul(8).wrapping_add(fine) >> 24);
         }
     }
