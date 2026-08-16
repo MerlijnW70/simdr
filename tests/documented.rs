@@ -214,11 +214,31 @@ fn fuzz_operations() -> Option<usize> {
         .ok()
 }
 
+/// The directories this workspace is made of.
+///
+/// **A list of what the workspace *is*, rather than the whole tree minus whatever should not be in
+/// it.** The two counters below used to walk everything and skip a named sandbox, and the name in
+/// the skip was itself a reference to a directory meant to be deletable. A positive list needs no
+/// such name: a scratch crate that appears beside `src/` has its own `Cargo.toml`, is excluded from
+/// this workspace, and cannot move a number these documents state — whatever it is called and
+/// however long it stays.
+///
+/// The reference checks are the other way round on purpose and say so: they read every file in the
+/// tree, because a sentence about this repository rots wherever it is written.
+const WORKSPACE: [&str; 5] = ["src", "tests", "examples", "runner", "cli"];
+
+/// Run `visit` over every file of the workspace's own directories.
+fn in_the_workspace(visit: &mut impl FnMut(&Path, &str)) {
+    for directory in WORKSPACE {
+        walk(&root().join(directory), visit);
+    }
+}
+
 /// Every example in the workspace, found by looking for directories named `examples` rather than by
 /// listing the two that exist — a third crate's would otherwise be uncounted and nothing would say.
 fn examples() -> BTreeSet<String> {
     let mut found = BTreeSet::new();
-    walk(&root(), &mut |path, relative| {
+    in_the_workspace(&mut |path, relative| {
         if path.extension().is_some_and(|extension| extension == "rs")
             && path
                 .parent()
@@ -238,16 +258,15 @@ fn examples() -> BTreeSet<String> {
 /// test skips where there is no device, and a `cfg` can take a module out. This one is a property of
 /// the source, so it is the same on every machine and it fails when it changes.
 ///
-/// It walks the whole tree. It used to skip a sandbox directory that was excluded from the
-/// workspace and meant to be deletable, so that removing it could not fail a count the workspace
-/// states — see `notes/FINDINGS.md`, which is where that distinction is recorded now that there is
-/// nothing to skip.
+/// It walks [`WORKSPACE`] rather than the tree, which is what keeps it stable while a throwaway
+/// crate comes and goes beside it — see `notes/FINDINGS.md` for the deletion that taught the
+/// difference.
 ///
 /// The README stopped writing its test count after the third drift. This is the count it can write
 /// again — a narrower quantity, named exactly, with an instrument.
 fn test_functions() -> usize {
     let mut found = 0;
-    walk(&root(), &mut |path, _| {
+    in_the_workspace(&mut |path, _| {
         if path.extension().is_some_and(|extension| extension == "rs")
             && let Ok(text) = fs::read_to_string(path)
         {

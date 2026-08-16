@@ -3910,3 +3910,53 @@ unit test asserting each `word()` against the specification, which is the *secon
 number* DR-0001 warns about — where an emitted opcode is checked by `spirv-val` seeing a real
 module. That is the best available for a number nothing emits, and it is the reason to keep the set
 complete rather than to prune it: a partial enum has the same weak check and a worse type.
+
+## The round trip, redrawn on a workload that looks nothing like a chess engine — 2026-08-16
+
+A throwaway demonstration generated procedural worlds on the GPU — a two-octave value-noise
+landscape, a cave system packed one bit per layer, an escape-time fractal in fixed point — and
+measured all three against one CPU thread at a million answers each, on an RTX 4080:
+
+| world | round trip | host | ratio | the dispatch alone |
+| --- | --- | --- | --- | --- |
+| landscape | 2.76 ms | 2.15 ms | **0.8×** | 73 µs |
+| caverns | 2.84 ms | 8.43 ms | **3.0×** | 126 µs |
+| fractal | 3.42 ms | 41.88 ms | **12.2×** | 166 µs |
+
+**The device's own work is 29×, 67× and 253× faster than the host, and the landscape still loses.**
+Every one of the three returns the same four bytes per answer, so the transfer is the same ~2.8 ms
+of moving eight megabytes in all three rows; what changes is the arithmetic on top of it.
+
+That is `decisions/DR-0008` exactly, on a workload chosen for having nothing in common with the one
+that produced it. The record there is a chess engine's NNUE layer and the conclusion was *stay on
+the CPU*; the same boundary drawn here says **the crossover is work per byte returned**, and names
+where it sits: a kernel doing two octaves of noise per output word is under it, one doing forty
+iterations of fixed-point arithmetic is well over.
+
+**And half the transfer was waste.** `Gpu::run_grid` sizes its output from its input, so a generator
+that reads nothing at all still uploads four megabytes of zeros. `notes/NEXT.md`'s *"a buffer the
+caller already owns"* is the entry that would remove it, and it stays open for want of a caller — a
+throwaway is not one.
+
+### The engine's rules cost three things and none of them was a limitation
+
+Worth recording because all three are decisions this repository argued for and none had been tested
+against a workload written by somebody who wanted the opposite:
+
+* **No per-lane branch** — `decisions/DR-0003`. Procedural generation is branches all the way down
+  (*if the density clears the threshold, place stone*) and every one became a comparison and a
+  `select`. That is not a workaround: a divergent branch runs both sides and masks anyway.
+* **No exclusive-or.** The hash had to mix with multiply, add and shift alone, so `h ^= h >> 16`
+  became `h += h >> 16`. It mixes less per round and it mixed enough.
+* **No subtraction and no division.** `zx² − zy²` is `add(zx², mul(zy², -1))` and a halving is a
+  shift. One extra instruction a driver folds, in the two places it came up.
+
+### And the shape that made generation-from-nothing work
+
+A `Vector<T, LANES>` at `LANES == subgroup` is one element per **invocation**, so a value splatted
+from `Kernel::local_index` is a different number in every lane: the lane's own column. No buffer of
+coordinates is uploaded, and the whole world comes out of the dispatch's own geometry.
+
+That is worth knowing about this API and is written down nowhere else — a splat of a *uniform*
+constant and a splat of a *per-invocation* built-in are the same call, and they are the difference
+between a flat field and a world.

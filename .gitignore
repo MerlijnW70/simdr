@@ -23,3 +23,7 @@
 mnema.store
 mnema.store.key
 mnema.store.lock
+
+# The demo is its own workspace and builds into its own target directory. Deleting `demo/` makes
+# this line dead, which is the intended shape.
+/demo/target/

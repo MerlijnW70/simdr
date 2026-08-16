@@ -1,0 +1,18 @@
+# Its own workspace root, so `cargo test` at the repository root cannot see this directory and
+# nothing here can end up in what the engine claims about itself. The empty table below is what
+# does it: without it cargo walks upward, finds the root manifest and pulls this in.
+[workspace]
+
+[package]
+name = "demo"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# By path, and one way only. The engine has no idea this exists.
+[dependencies]
+simdr = { path = ".." }
+runner = { path = "../runner" }
+
+[profile.release]
+opt-level = 3

@@ -27,6 +27,9 @@ rust-version = "1.88"
 
 [workspace]
 members = ["runner", "cli"]
+# The demo is its own workspace and must stay outside this one — see `demo/README.md`. Deleting
+# the directory and this line is the whole of removing it.
+exclude = ["demo"]
 
 [profile.release]
 opt-level = 3
