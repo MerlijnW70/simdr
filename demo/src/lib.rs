@@ -158,24 +158,44 @@ pub fn heights<const LANES: u32>(subgroup: u32, pitch: u32) -> Result<Vec<u32>, 
     let height = {
         let mut lanes = kernel.lanes()?;
         let y = lanes.splat_id::<U32, LANES>(row)?;
-
-        let by4 = lanes.splat_bits::<U32, LANES>(4)?;
-        let by24 = lanes.splat_bits::<U32, LANES>(24)?;
-        let eight = lanes.splat_bits::<U32, LANES>(8)?;
-
-        let coarse_x = lanes.shift_right_logical(x, by4)?;
-        let coarse_y = lanes.shift_right_logical(y, by4)?;
-        let coarse = octave::<LANES>(&mut lanes, coarse_x, coarse_y)?;
-
-        let fine = octave::<LANES>(&mut lanes, x, y)?;
-
-        let weighted = lanes.mul(coarse, eight)?;
-        let total = lanes.add(weighted, fine)?;
-        lanes.shift_right_logical(total, by24)?
+        terrain::<LANES>(&mut lanes, x, y)?
     };
 
     kernel.store_row(1, pitch, height)?;
     kernel.finish()
+}
+
+/// The height at any column, as a vector — coarse hills, fine roughness, eight to one.
+///
+/// **Taken out of [`heights`] the day the renderer needed it.** A ray samples the terrain at a
+/// coordinate it computed rather than at the one it was dispatched for, and a heightmap kernel that
+/// can only answer about its own invocation cannot be raycast through.
+fn terrain<const LANES: u32>(
+    lanes: &mut Lanes<'_>,
+    x: Vector<U32, LANES>,
+    y: Vector<U32, LANES>,
+) -> Result<Vector<U32, LANES>, LaneError> {
+    let by4 = lanes.splat_bits::<U32, LANES>(4)?;
+    let by24 = lanes.splat_bits::<U32, LANES>(24)?;
+    let eight = lanes.splat_bits::<U32, LANES>(8)?;
+
+    let coarse_x = lanes.shift_right_logical(x, by4)?;
+    let coarse_y = lanes.shift_right_logical(y, by4)?;
+    let coarse = octave::<LANES>(lanes, coarse_x, coarse_y)?;
+
+    let fine = octave::<LANES>(lanes, x, y)?;
+
+    let weighted = lanes.mul(coarse, eight)?;
+    let total = lanes.add(weighted, fine)?;
+    lanes.shift_right_logical(total, by24)
+}
+
+/// The same height on the host, for one column.
+#[must_use]
+pub fn terrain_at(x: u32, y: u32) -> u32 {
+    let coarse = mix2(x >> 4, y >> 4);
+    let fine = mix2(x, y);
+    coarse.wrapping_mul(8).wrapping_add(fine) >> 24
 }
 
 /// The heights the device should produce, computed on the host.
@@ -188,9 +208,7 @@ pub fn heights_reference(pitch: u32, rows: u32) -> Vec<u32> {
     let mut out = Vec::with_capacity((pitch as usize) * (rows as usize));
     for y in 0..rows {
         for x in 0..pitch {
-            let coarse = mix2(x >> 4, y >> 4);
-            let fine = mix2(x, y);
-            out.push(coarse.wrapping_mul(8).wrapping_add(fine) >> 24);
+            out.push(terrain_at(x, y));
         }
     }
     out
@@ -441,6 +459,179 @@ pub fn orbits_reference(pitch: u32, rows: u32) -> Vec<u32> {
     out
 }
 
+/// How far a ray marches before it gives up and calls it sky.
+pub const STEPS: u32 = 96;
+
+/// Where the eye is, in world columns, and how the screen maps onto directions.
+///
+/// The camera looks along +y from `(EYE_X, 0, EYE_Z)`. A ray's slope in x and z is a fixed number
+/// per unit of depth, which is what makes the march an addition rather than a normalisation: step
+/// one unit forward, add the slope. That is the voxel-space renderer's oldest trick and it is
+/// exactly what an engine with no division wants.
+pub const EYE_X: u32 = 512;
+pub const EYE_Z: u32 = 80;
+
+/// The horizon's screen row, and the slopes a pixel away from centre is worth.
+///
+/// Q16.16, so a slope of `ONE / 2` means half a world unit sideways per unit of depth.
+const HORIZON: u32 = 6;
+const X_SLOPE: i32 = ONE / 20;
+const Z_SLOPE: i32 = ONE / 8;
+
+/// World units a ray covers per step.
+///
+/// **Two rather than one, and it is what makes the picture a landscape.** The coarse octave repeats
+/// every sixteen columns, so a march of one unit a step saw four hills in ninety-six steps and drew
+/// noise; two units sees eight and draws hills. Depth costs steps and steps cost instructions, so
+/// this is the cheap axis to spend on.
+const STRIDE: u32 = 2;
+
+/// Everything vertical is biased by this many world units before it is compared.
+///
+/// **Because the comparison is unsigned.** A ray aimed downward has a negative height long before
+/// it has marched far, and an unsigned `greater_than` reads a negative number as an enormous
+/// positive one — so the ray would sail over the ground it is standing on. Biasing both sides by
+/// the same constant keeps every quantity positive, and the bias cancels in the comparison.
+///
+/// This is the sort of thing a float renderer never has to think about and an exact one always
+/// does, which is the trade this whole directory is making.
+const BIAS: u32 = 4096;
+
+/// Render the procedural world from `EYE`, one invocation a pixel.
+///
+/// **The world is never stored.** Each step of each ray recomputes the terrain height at the point
+/// it has reached — two octaves of noise, from the coordinate and nothing else — so the picture is
+/// generated from a function rather than read out of a buffer. That is the whole of what "endless"
+/// means: there is nothing to run out of.
+///
+/// The march is branch-free for `decisions/DR-0003`'s reason and by the same device the fractal
+/// uses: an `alive` flag that a `select` can only turn off, and a depth recorded by adding
+/// `alive × step` exactly once. A `break` would be a per-lane branch and every ray in a subgroup
+/// ends at a different depth.
+///
+/// # Errors
+///
+/// As [`heights`].
+pub fn raycast<const LANES: u32>(subgroup: u32, pitch: u32) -> Result<Vec<u32>, LaneError> {
+    let mut kernel = Kernel::<U32>::new(Shape::grid(subgroup, WORKGROUP, 1, 2))?;
+    let px = column::<LANES>(&mut kernel)?;
+    let row = kernel.row()?;
+
+    let shaded = {
+        let mut lanes = kernel.lanes()?;
+        let py = lanes.splat_id::<U32, LANES>(row)?;
+
+        // The ray's slope, as a signed Q16.16 held in a `u32`'s bits. `px - pitch/2` and
+        // `HORIZON - py` are both differences, which this engine spells as an add and a multiply
+        // by minus one.
+        let minus = lanes.splat_bits::<U32, LANES>(u32::MAX)?;
+        let half = lanes.splat_bits::<U32, LANES>(pitch / 2)?;
+        let horizon = lanes.splat_bits::<U32, LANES>(HORIZON)?;
+
+        let leftward = lanes.mul(half, minus)?;
+        let from_centre = lanes.add(px, leftward)?;
+        let below = lanes.mul(py, minus)?;
+        let above_horizon = lanes.add(horizon, below)?;
+
+        let x_slope = lanes.splat_bits::<U32, LANES>(X_SLOPE as u32)?;
+        let z_slope = lanes.splat_bits::<U32, LANES>(Z_SLOPE as u32)?;
+        let dx = lanes.mul(from_centre, x_slope)?;
+        let dz = lanes.mul(above_horizon, z_slope)?;
+
+        let eye_x = lanes.splat_bits::<U32, LANES>(EYE_X << 16)?;
+        let eye_z = lanes.splat_bits::<U32, LANES>((EYE_Z + BIAS) << 16)?;
+
+        let mut alive = lanes.splat_bits::<U32, LANES>(1)?;
+        let mut depth = lanes.splat_bits::<U32, LANES>(0)?;
+        let zero = lanes.splat_bits::<U32, LANES>(0)?;
+        let one = lanes.splat_bits::<U32, LANES>(1)?;
+        let by16 = lanes.splat_bits::<U32, LANES>(16)?;
+        let bias = lanes.splat_bits::<U32, LANES>(BIAS)?;
+
+        // Unrolled, because the march carries four values and a rolled loop carries one. Ninety-six
+        // steps of about twenty instructions is a large module and a small price: the alternative
+        // is a phi per carried value, which `Lanes::repeat_rolled` does not offer.
+        for step in 1..=STEPS {
+            let along = lanes.splat_bits::<U32, LANES>(step * STRIDE)?;
+
+            // Where the ray is now. One unit of depth per step, so `y` is the step itself.
+            let across = lanes.mul(dx, along)?;
+            let rise = lanes.mul(dz, along)?;
+            let wx = lanes.add(eye_x, across)?;
+            let wz = lanes.add(eye_z, rise)?;
+            let column = lanes.shift_right_logical(wx, by16)?;
+            let height = lanes.shift_right_logical(wz, by16)?;
+
+            let by2 = lanes.splat_bits::<U32, LANES>(2)?;
+            let raw = terrain::<LANES>(&mut lanes, column, along)?;
+            let raw = lanes.shift_right_logical(raw, by2)?;
+            let ground = lanes.add(raw, bias)?;
+
+            // Solid where the ray is at or below the ground. Both sides carry the bias, so the
+            // comparison is unsigned and still means what it says.
+            let above = lanes.greater_than(height, ground)?;
+            let solid = lanes.select(above, zero, one)?;
+
+            // **Two answers in one word.** The low eight bits are how far the ray went and the rest
+            // is how high the ground was where it stopped — a depth alone draws a horizon and
+            // nothing else, because a heightfield seen from above varies far more in elevation than
+            // in distance. One store, two numbers, and the host takes them apart.
+            let by8 = lanes.splat_bits::<U32, LANES>(8)?;
+            let elevation = lanes.shift_left(raw, by8)?;
+            let both = lanes.add(elevation, along)?;
+
+            // The first hit only: `alive` is one until something is solid and zero ever after, so
+            // this is added exactly once and the ray goes on marching harmlessly.
+            let landing = lanes.mul(alive, solid)?;
+            let recorded = lanes.mul(landing, both)?;
+            depth = lanes.add(depth, recorded)?;
+            let staying = lanes.select(above, one, zero)?;
+            alive = lanes.mul(alive, staying)?;
+        }
+
+        depth
+    };
+
+    kernel.store_row(1, pitch, shaded)?;
+    kernel.finish()
+}
+
+/// What every pixel should come back with: the ground's height above, the ray's depth below.
+///
+/// **The same arithmetic in the same order**, including the bias and the unsigned comparison — a
+/// reference that reasoned about the geometry instead would disagree at every pixel where the two
+/// roundings differ, and there is no rounding here to appeal to.
+#[must_use]
+pub fn raycast_reference(pitch: u32, rows: u32) -> Vec<u32> {
+    let mut out = Vec::with_capacity((pitch as usize) * (rows as usize));
+
+    for py in 0..rows {
+        for px in 0..pitch {
+            let from_centre = px.wrapping_add((pitch / 2).wrapping_mul(u32::MAX));
+            let above_horizon = HORIZON.wrapping_add(py.wrapping_mul(u32::MAX));
+
+            let dx = from_centre.wrapping_mul(X_SLOPE as u32);
+            let dz = above_horizon.wrapping_mul(Z_SLOPE as u32);
+
+            let (mut alive, mut depth) = (1_u32, 0_u32);
+            for step in 1..=STEPS {
+                let along = step * STRIDE;
+                let wx = (EYE_X << 16).wrapping_add(dx.wrapping_mul(along));
+                let wz = ((EYE_Z + BIAS) << 16).wrapping_add(dz.wrapping_mul(along));
+                let raw = terrain_at(wx >> 16, along) >> 2;
+                let ground = raw.wrapping_add(BIAS);
+
+                let solid = u32::from((wz >> 16) <= ground);
+                let both = (raw << 8).wrapping_add(along);
+                depth = depth.wrapping_add(alive.wrapping_mul(solid).wrapping_mul(both));
+                alive *= 1 - solid;
+            }
+            out.push(depth);
+        }
+    }
+    out
+}
+
 /// What ran, or the one reason it did not.
 ///
 /// Four ways of not running and one of having run, which `decisions/DR-0009` argues for and which
@@ -532,4 +723,5 @@ at_every_width!(
     landscape from heights,
     caverns from caves,
     fractal from orbits,
+    rendered from raycast,
 );

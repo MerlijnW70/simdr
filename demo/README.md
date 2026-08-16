@@ -1,8 +1,8 @@
 # demo — procedural worlds on the GPU
 
-A throwaway. Three worlds generated from nothing but the invocation's own coordinates: a
+A throwaway. Three worlds generated from nothing but the invocation's own coordinates — a
 two-octave landscape drawn as a cross-section, a cave system packed one bit per layer, and an
-escape-time fractal in fixed point.
+escape-time fractal in fixed point — and **a fourth kernel that renders the first one in 3D**.
 
 The landscape's fine octave ran at a quarter of the resolution first, and the picture came out in
 four-column blocks — a detail layer coarser than the thing being drawn is not a detail layer. It is
@@ -43,6 +43,40 @@ The reference checks in `tests/documented.rs` *do* read this directory, and that
 obligation on purpose: every file path and every `Type::member` named in the prose here is resolved
 against the engine, because a sentence about the engine rots wherever it is written. Deleting the
 directory takes those sentences with it and leaves nothing owed.
+
+## The renderer is a kernel too
+
+`raycast` marches one ray per pixel, one invocation per ray, through a world that is **never
+stored**: every step recomputes the terrain height at the point it has reached, from the coordinate
+and nothing else. That is the whole of what "endless" means — there is nothing to run out of, and
+the module's only buffer is the picture it writes.
+
+The march is branch-free for `decisions/DR-0003`'s reason and by the fractal's device: an `alive`
+flag a `select` can only turn off, and a hit recorded by adding `alive × answer` exactly once. A
+`break` would be a per-lane branch, and every ray in a subgroup ends at a different depth.
+
+Two numbers come back in one word — the ground's height in the high bits, the ray's distance in the
+low eight. Depth alone draws a horizon and horizontal bands, because a heightfield seen from a
+little above varies far more in elevation than in range; height alone throws the perspective away.
+
+**Everything vertical is biased by 4096 before it is compared**, and that is the one line in this
+directory a float renderer would never need. The comparison is unsigned, a ray aimed downward has a
+negative height long before it has marched far, and an unsigned `greater_than` reads a negative
+number as an enormous positive one — so the ray would sail over the ground it is standing on. The
+bias cancels in the comparison and keeps every quantity positive.
+
+### Two ways it looked like it was working when it was not
+
+Both happened while it was being written, and neither would have failed a test that only compared
+the device against the host — the two agreed perfectly on a picture of nothing.
+
+* **The eye inside the terrain.** At `EYE_Z = 52` against peaks of 63, every ray hit at the first
+  step and the picture was a flat wall of the nearest shade.
+* **The eye above a world it could not reach.** Too shallow a slope and ninety-six steps end in
+  mid-air, so the picture is sky.
+
+`the_camera_is_above_the_ground_and_pointed_at_it` is the check that came out of that: it counts
+sky, ground and distinct elevations, on the host, and refuses all three failures.
 
 ## Why it is a test and not a picture
 

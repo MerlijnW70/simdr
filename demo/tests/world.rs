@@ -10,11 +10,16 @@
 //! answers, and one wrong lane is one wrong number in a place a picture would hide.
 
 use demo::{Answer, PITCH, caverns, caves_reference, fractal, generate, landscape};
+use demo::{raycast_reference, rendered};
 use demo::{heights_reference, orbits_reference};
 use runner::Gpu;
 
 /// Rows of world to generate. Enough that every workgroup runs and the grid has a second axis.
 const ROWS: u32 = 64;
+
+/// The rendered picture's size, matching what `main` draws.
+const SHOT: u32 = 128;
+const DEEP: u32 = 36;
 
 /// Open a device, or say why not and hand back nothing.
 ///
@@ -145,5 +150,53 @@ fn the_references_describe_something_worth_generating() {
     assert!(
         orbits.iter().any(|&count| count < 4),
         "everything in the window stayed bounded, so the window is inside the set"
+    );
+}
+
+/// The rendered picture is the picture the host renders, pixel for pixel.
+///
+/// **The longest kernel here by a distance** — ninety-six ray steps, each recomputing two octaves of
+/// noise at the point it has reached — and the one where a mapping mistake would be least visible:
+/// a picture with one wrong lane in every subgroup still looks like a landscape. So it is compared
+/// rather than looked at.
+#[test]
+fn the_render_is_the_render_the_host_computes() {
+    let Some(gpu) = device("rendered") else {
+        return;
+    };
+
+    assert!(checked(&gpu, "rendered", rendered, raycast_reference));
+}
+
+/// The camera sees a horizon rather than a wall or an empty sky.
+///
+/// Three ways a raycaster reports nothing while running perfectly: the eye inside the terrain, so
+/// every ray hits at once; the eye above everything with too few steps, so nothing hits at all; and
+/// a slope that puts the horizon off the screen. **The first two happened while this was being
+/// written**, and both look exactly like a working renderer to a test that only compares numbers.
+#[test]
+fn the_camera_is_above_the_ground_and_pointed_at_it() {
+    let picture = raycast_reference(SHOT, DEEP);
+    let sky = picture.iter().filter(|&&pixel| pixel == 0).count();
+    let ground = picture.len() - sky;
+
+    assert!(
+        sky > picture.len() / 10,
+        "only {sky} pixels of {} are sky, so the eye is inside the terrain",
+        picture.len()
+    );
+    assert!(
+        ground > picture.len() / 2,
+        "only {ground} pixels of {} hit anything, so the eye is above a world it cannot reach",
+        picture.len()
+    );
+
+    // And the ground has relief: a flat answer would pass both counts above.
+    let elevations: std::collections::BTreeSet<u32> =
+        picture.iter().filter(|&&p| p != 0).map(|p| p >> 8).collect();
+    assert!(
+        elevations.len() > 8,
+        "the landscape came back with {} distinct elevations, which is a wall rather than hills",
+        elevations.len()
     );
 }

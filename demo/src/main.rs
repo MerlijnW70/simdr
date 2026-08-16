@@ -5,8 +5,8 @@
 //! failed there — and that the throughput number has the round trip in it, because
 //! `decisions/DR-0008` says that is what a caller actually waits for.
 
-use demo::{Answer, PITCH, caverns, caves_reference, fractal, generate, landscape};
-use demo::{heights_reference, orbits_reference};
+use demo::{Answer, PITCH, caverns, caves_reference, fractal, generate, landscape, rendered};
+use demo::{STEPS, heights_reference, orbits_reference};
 use runner::Gpu;
 use std::time::Instant;
 
@@ -69,6 +69,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         shaded(world, " .:-=+*#%@")
     });
 
+    // **The renderer is a kernel too.** One invocation a pixel, marching a ray through a world
+    // that is never stored — each step recomputes the terrain from the coordinate it has reached.
+    println!("== The same world, raycast — {SHOT_WIDE} × {SHOT_DEEP} pixels, one a lane ==");
+    match generate(&gpu, rendered, SHOT_WIDE, SHOT_DEEP) {
+        Answer::Ran(picture) => print!("{}", lit(&picture)),
+        other => println!(
+            "  not rendered — {}",
+            other.why().unwrap_or_else(|| String::from("no reason given"))
+        ),
+    }
+    println!();
+
     timed(&gpu)?;
     Ok(())
 }
@@ -107,6 +119,44 @@ fn shaded(world: &[u32], ramp: &str) -> String {
             let top = world.iter().copied().max().unwrap_or(1).max(1);
             let shade = (value as usize * (shades.len() - 1)) / top as usize;
             out.push(shades.get(shade).copied().unwrap_or(' '));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// The rendered picture's size, in pixels. Wide is a multiple of the workgroup, as every grid is.
+const SHOT_WIDE: u32 = 128;
+const SHOT_DEEP: u32 = 36;
+
+/// A packed pixel as a lit picture: elevation shaded, distance dimming it, zero is sky.
+///
+/// **Elevation and distance, because either alone is unreadable.** Depth on its own draws a horizon
+/// and horizontal bands — a heightfield seen from a little above varies far more in height than in
+/// range. Height on its own throws the perspective away. The product of the two is a landscape.
+fn lit(picture: &[u32]) -> String {
+    let shades: Vec<char> = " .:-=+*#%@".chars().collect();
+    let far = (STEPS * 2) as usize;
+    let mut out = String::new();
+
+    for row in 0..SHOT_DEEP as usize {
+        for column in 0..SHOT_WIDE as usize {
+            let packed = picture
+                .get(row * SHOT_WIDE as usize + column)
+                .copied()
+                .unwrap_or(0);
+            if packed == 0 {
+                out.push(' ');
+                continue;
+            }
+
+            let depth = (packed & 0xff) as usize;
+            let elevation = (packed >> 8) as usize;
+
+            // Near ground keeps its elevation; far ground fades toward the sky it sits against.
+            let lit = elevation * far.saturating_sub(depth) / far;
+            let shade = (lit * (shades.len() - 1)) / 64;
+            out.push(shades.get(shade.min(shades.len() - 1)).copied().unwrap_or(' '));
         }
         out.push('\n');
     }
