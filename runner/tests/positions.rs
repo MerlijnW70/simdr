@@ -114,8 +114,7 @@ fn check<const LANES: u32>(gpu: &Gpu, subgroup: u32) -> Option<Mapping> {
     let mut mask = 1;
     while mask < reach {
         let spirv = paired::<LANES>(subgroup, mask).expect("built");
-        if let Err(complaint) = validate(&spirv, &format!("butterfly-{LANES}-{mask}"), VULKAN_1_1)
-        {
+        if let Err(complaint) = validate(&spirv, &format!("butterfly-{LANES}-{mask}"), VULKAN_1_1) {
             panic!("spirv-val rejected a butterfly of a position: {complaint}");
         }
         let partner = gpu.run_u32(&spirv, &empty, 1).expect("dispatched");

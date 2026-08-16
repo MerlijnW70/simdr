@@ -288,9 +288,9 @@ impl<'module> Lanes<'module> {
                 let lane = self.lane_index()?;
                 let uint = self.type_of::<U32>()?;
                 let wrap = self.module().constant_u32(size.wrapping_sub(1))?;
-                let within = self
-                    .module()
-                    .binary(crate::module::op::BITWISE_AND, uint, lane, wrap)?;
+                let within =
+                    self.module()
+                        .binary(crate::module::op::BITWISE_AND, uint, lane, wrap)?;
                 return self.from_strips(&[within]);
             }
             Mapping::Strips { count } => count,
@@ -468,7 +468,11 @@ mod tests {
         // Strip-mined: one add per strip past the first, and the first is the lane itself.
         assert_eq!(emitted::<64>(32, op::I_ADD), 1, "two strips want one add");
         assert_eq!(emitted::<128>(32, op::I_ADD), 3, "four strips want three");
-        assert_eq!(emitted::<32>(8, op::I_ADD), 3, "and four again on a narrow device");
+        assert_eq!(
+            emitted::<32>(8, op::I_ADD),
+            3,
+            "and four strips again, reached from the other side — a narrow device"
+        );
 
         // A whole subgroup is the built-in and nothing else; a cluster is one mask and no add.
         assert_eq!(emitted::<32>(32, op::I_ADD), 0);
