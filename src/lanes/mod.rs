@@ -252,7 +252,7 @@ impl<'module> Lanes<'module> {
     /// exchange is symmetric and the algorithm cannot be written at all.
     ///
     /// It was missing until a workload needed it, and what a caller reached for instead was
-    /// `local_index & (LANES - 1)`. That is the "cheaper wrong one" [`Lanes::lane_index`] is about:
+    /// `local_index & (LANES - 1)`. That is the "cheaper wrong one" `Lanes::lane_index` is about:
     /// it is right only where subgroups are cut from consecutive workgroup indices, which Vulkan
     /// guarantees for a pipeline that asked for full subgroups — and `decisions/DR-0002` records
     /// this project deciding *not* to require that extension.
