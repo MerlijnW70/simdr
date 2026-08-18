@@ -704,3 +704,31 @@ fn subtract_divide_and_negate_are_valid_spirv() {
     let words = kernel.finish().expect("finished");
     expect_valid(&words, "subtract, divide and negate", VULKAN_1_1);
 }
+
+#[test]
+fn integer_subtract_and_divide_are_valid_spirv() {
+    // Two more core instructions this crate did not have, added because an index that says *which*
+    // of a batch a lane is working on is a division and a remainder. The numbers were read out of
+    // `spirv.core.grammar.json` at 1.6.7 by the DR-0001 recipe — `OpISub` 130 and `OpUDiv` 134 —
+    // and a wrong one assembles into a different well-formed instruction, so they are validated
+    // rather than only decoded.
+    let mut kernel = Kernel::<U32>::new(shape()).expect("built");
+    let uint = kernel.index_type();
+    let held = kernel.load::<32>(0).expect("loaded");
+    let value = held.id();
+
+    let by = kernel.module().constant_u32(7).expect("a divisor");
+    let over = kernel.module().u_div(uint, value, by).expect("divided");
+    let back = kernel.module().i_mul(uint, over, by).expect("multiplied");
+    let left = kernel.module().i_sub(uint, value, back).expect("subtracted");
+
+    kernel
+        .lanes()
+        .expect("lanes")
+        .from_lane_value::<U32, 32>(left)
+        .and_then(|vector| kernel.store::<32>(1, vector))
+        .expect("stored");
+
+    let words = kernel.finish().expect("finished");
+    expect_valid(&words, "integer subtract and divide", VULKAN_1_1);
+}

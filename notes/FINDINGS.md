@@ -3501,7 +3501,7 @@ The seven were excused for about an hour and then removed, which is the reading 
 actually supports. Keeping a number nothing emits keeps a copy of the grammar that `spirv-val` never
 sees; deleting it costs a doc comment and a minute of `spirv-as` on the day somebody wants it back —
 **which is the day it becomes checkable.** The excuse list is empty now and the check is an absolute:
-every one of the <!--count:opcodes-->98 opcodes this emitter declares reaches a module.
+every one of the <!--count:opcodes-->100 opcodes this emitter declares reaches a module.
 
 The list stays in place at length zero, because an exception should be a line somebody writes rather
 than a silence, and because the expiry test beside it fires the moment an excused opcode gains an

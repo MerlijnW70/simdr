@@ -114,12 +114,19 @@ pub const F_ADD: u16 = 129;
 /// bit and leaves everything else, including on a zero and a NaN, where a multiply is arithmetic
 /// the implementation may contract or reassociate.
 pub const F_NEGATE: u16 = 127;
+/// `OpISub` — integer subtraction.
+pub const I_SUB: u16 = 130;
 /// `OpFSub` — floating-point subtraction.
 pub const F_SUB: u16 = 131;
 /// `OpIMul` — integer multiplication.
 pub const I_MUL: u16 = 132;
 /// `OpFMul` — floating-point multiplication.
 pub const F_MUL: u16 = 133;
+/// `OpUDiv` — unsigned integer division.
+///
+/// Read from the grammar rather than guessed, twice: writing the multi-pass reduction on 2026-08-11
+/// this was 152 from memory, and the probe said 134. `decisions/DR-0001` is that story.
+pub const U_DIV: u16 = 134;
 /// `OpFDiv` — floating-point division.
 ///
 /// Vulkan does not require it to be correctly rounded and implementations differ in the last place,

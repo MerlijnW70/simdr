@@ -88,6 +88,28 @@ impl Module {
         self.unary(op::F_NEGATE, result_type, value)
     }
 
+    /// Integer subtract.
+    ///
+    /// # Errors
+    ///
+    /// [`BuildError`] if the instruction cannot be emitted.
+    pub fn i_sub(&mut self, result_type: Id, left: Id, right: Id) -> Result<Id, BuildError> {
+        self.result_instruction(op::I_SUB, result_type, &[left.word(), right.word()])
+    }
+
+    /// Unsigned integer divide.
+    ///
+    /// A division by a constant is one an implementation turns into a multiply and a shift, so this
+    /// is not the expensive instruction it looks like where the divisor is known when the kernel is
+    /// built — which is the only way anything here uses it.
+    ///
+    /// # Errors
+    ///
+    /// [`BuildError`] if the instruction cannot be emitted.
+    pub fn u_div(&mut self, result_type: Id, left: Id, right: Id) -> Result<Id, BuildError> {
+        self.result_instruction(op::U_DIV, result_type, &[left.word(), right.word()])
+    }
+
     /// Integer add.
     ///
     /// # Errors
