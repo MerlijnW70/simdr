@@ -670,3 +670,37 @@ fn the_lane_surface_is_valid_for_every_narrow_integer() {
     at_every_width!(U16, "u16");
     at_every_width!(I16, "i16");
 }
+
+#[test]
+fn subtract_divide_and_negate_are_valid_spirv() {
+    // Three instructions core SPIR-V has and this crate did not, added because an activation needs
+    // all three: `silu(x)` is `x / (1 + exp(-x))`. They were read out of the grammar at 1.6.7 by
+    // the DR-0001 recipe — 131, 136 and 127 — and a wrong number would assemble into a different
+    // well-formed instruction, so a validator run is the only thing between them and a kernel that
+    // returns plausible nonsense.
+    let mut kernel = Kernel::<F32>::new(shape()).expect("built");
+    let element = kernel.element();
+    let held = kernel.load::<32>(0).expect("loaded");
+    let value = held.id();
+
+    let one = F32::constant_from_bits(kernel.module(), 1.0_f32.to_bits()).expect("one");
+    let flipped = kernel.module().f_negate(element, value).expect("negated");
+    let raised = {
+        let mut lanes = kernel.lanes().expect("lanes");
+        let vector = lanes.from_lane_value::<F32, 32>(flipped).expect("a lane value");
+        lanes.exp::<32>(vector).expect("exp").id()
+    };
+    let below = kernel.module().f_add(element, one, raised).expect("added");
+    let gated = kernel.module().f_div(element, value, below).expect("divided");
+    let left = kernel.module().f_sub(element, value, gated).expect("subtracted");
+
+    kernel
+        .lanes()
+        .expect("lanes")
+        .from_lane_value::<F32, 32>(left)
+        .and_then(|vector| kernel.store::<32>(1, vector))
+        .expect("stored");
+
+    let words = kernel.finish().expect("finished");
+    expect_valid(&words, "subtract, divide and negate", VULKAN_1_1);
+}

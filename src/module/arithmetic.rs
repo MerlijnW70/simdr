@@ -58,6 +58,36 @@ impl Module {
         self.result_instruction(op::F_ADD, result_type, &[left.word(), right.word()])
     }
 
+    /// Floating-point subtract.
+    ///
+    /// # Errors
+    ///
+    /// [`BuildError`] if the instruction cannot be emitted.
+    pub fn f_sub(&mut self, result_type: Id, left: Id, right: Id) -> Result<Id, BuildError> {
+        self.result_instruction(op::F_SUB, result_type, &[left.word(), right.word()])
+    }
+
+    /// Floating-point divide.
+    ///
+    /// # Errors
+    ///
+    /// [`BuildError`] if the instruction cannot be emitted.
+    pub fn f_div(&mut self, result_type: Id, left: Id, right: Id) -> Result<Id, BuildError> {
+        self.result_instruction(op::F_DIV, result_type, &[left.word(), right.word()])
+    }
+
+    /// A float with its sign flipped.
+    ///
+    /// Not a multiply by −1.0: this flips the sign bit and touches nothing else, including on a
+    /// zero and a NaN, and it is one instruction the implementation may not reassociate.
+    ///
+    /// # Errors
+    ///
+    /// [`BuildError`] if the instruction cannot be emitted.
+    pub fn f_negate(&mut self, result_type: Id, value: Id) -> Result<Id, BuildError> {
+        self.unary(op::F_NEGATE, result_type, value)
+    }
+
     /// Integer add.
     ///
     /// # Errors

@@ -276,7 +276,7 @@ has to come back through — and the validator is the only layer downstream of i
 
    **All seven were deleted** rather than left excused, which is the consistent reading of DR-0001.
    The excuse list stays in place at length zero — an exception should be a line somebody writes
-   rather than a silence — so the check is now an absolute: each of the **<!--count:opcodes-->95**
+   rather than a silence — so the check is now an absolute: each of the **<!--count:opcodes-->98**
    opcodes `op.rs` declares reaches a module. Reading them out of the grammar again costs a minute on the day
    somebody wants one back, and that is the day it becomes checkable.
 1. **~~Assert the counts.~~ — done.** Ten counters, resolved against the tree by

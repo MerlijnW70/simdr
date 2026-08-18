@@ -108,10 +108,23 @@ pub const BITCAST: u16 = 124;
 pub const I_ADD: u16 = 128;
 /// `OpFAdd` — floating-point addition.
 pub const F_ADD: u16 = 129;
+/// `OpFNegate` — a float with its sign flipped.
+///
+/// One instruction rather than a multiply by −1.0, and not the same thing: negating flips the sign
+/// bit and leaves everything else, including on a zero and a NaN, where a multiply is arithmetic
+/// the implementation may contract or reassociate.
+pub const F_NEGATE: u16 = 127;
+/// `OpFSub` — floating-point subtraction.
+pub const F_SUB: u16 = 131;
 /// `OpIMul` — integer multiplication.
 pub const I_MUL: u16 = 132;
 /// `OpFMul` — floating-point multiplication.
 pub const F_MUL: u16 = 133;
+/// `OpFDiv` — floating-point division.
+///
+/// Vulkan does not require it to be correctly rounded and implementations differ in the last place,
+/// which is worth knowing before a kernel and a CPU reference are asked to agree exactly.
+pub const F_DIV: u16 = 136;
 /// `OpShiftRightLogical` — shift right, filling with zeros.
 pub const SHIFT_RIGHT_LOGICAL: u16 = 194;
 /// `OpShiftRightArithmetic` — shift right, filling with copies of the sign bit.
