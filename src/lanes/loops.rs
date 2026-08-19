@@ -62,8 +62,47 @@ where
     H: Emits + ?Sized,
     F: FnOnce(&mut H, Id, Id) -> Result<Id, LaneError>,
 {
-    if times == 0 {
-        return Ok(initial);
+    let held = rolled_many(host, times, carried_type, &[initial], |host, carried, counter| {
+        let one = carried.first().copied().ok_or(LaneError::BadCarry {
+            given: carried.len(),
+            wanted: 1,
+        })?;
+        body(host, one, counter).map(|one| vec![one])
+    })?;
+    held.first().copied().ok_or(LaneError::BadCarry {
+        given: held.len(),
+        wanted: 1,
+    })
+}
+
+/// The same, carrying **several** values rather than one.
+///
+/// One phi a value at the header, all of them declared before the body is built. That is why the
+/// body's return length is checked rather than assumed: the phis have already promised how many
+/// values will arrive, and a body producing fewer leaves one of them naming an id that does not
+/// exist — which the validator reports as a bad id and not as a broken promise.
+///
+/// Every carried value shares `carried_type`. A loop wanting two types wants two loops, or a
+/// struct, and neither has been needed.
+///
+/// # Why this exists
+///
+/// A reduction that accumulates more than one running total, which is what a weighted sum over
+/// several vectors is. Carrying one value forces one loop a total, and each of those loops reads
+/// the same data again — so a blend over sixteen heads read its cache sixteen times.
+pub(crate) fn rolled_many<H, F>(
+    host: &mut H,
+    times: u32,
+    carried_type: Id,
+    initial: &[Id],
+    body: F,
+) -> Result<Vec<Id>, LaneError>
+where
+    H: Emits + ?Sized,
+    F: FnOnce(&mut H, &[Id], Id) -> Result<Vec<Id>, LaneError>,
+{
+    if times == 0 || initial.is_empty() {
+        return Ok(initial.to_vec());
     }
 
     let uint = host.module().type_int(32, false)?;
@@ -87,16 +126,22 @@ where
     // The phis come first in the header, before the merge declaration — SPIR-V requires every
     // `OpPhi` at the very start of its block.
     let counter = host.module().alloc_id()?;
-    let carried = host.module().alloc_id()?;
     let stepped = host.module().alloc_id()?;
-    let produced = host.module().alloc_id()?;
+    let mut carried = Vec::with_capacity(initial.len());
+    let mut produced = Vec::with_capacity(initial.len());
+    for _ in initial {
+        carried.push(host.module().alloc_id()?);
+        produced.push(host.module().alloc_id()?);
+    }
     host.module()
         .phi_at(counter, uint, &[(zero, entry), (stepped, continue_block)])?;
-    host.module().phi_at(
-        carried,
-        carried_type,
-        &[(initial, entry), (produced, continue_block)],
-    )?;
+    for ((&name, &was), &will) in carried.iter().zip(initial).zip(&produced) {
+        host.module().phi_at(
+            name,
+            carried_type,
+            &[(was, entry), (will, continue_block)],
+        )?;
+    }
 
     // The comparison comes *before* the merge declaration. `OpLoopMerge` has to be the
     // second-to-last instruction in its block, immediately preceding the branch — putting the
@@ -110,11 +155,18 @@ where
         .branch_conditional(carry_on, body_block, merge_block)?;
 
     host.module().label_at(body_block)?;
-    let result = body(host, carried, counter)?;
-    // `produced` was promised to the phi above, so the body's result has to arrive under that
-    // name. A copy is the honest way to say so without a mutable local.
-    host.module()
-        .copy_object_at(produced, carried_type, result)?;
+    let result = body(host, &carried, counter)?;
+    if result.len() != produced.len() {
+        return Err(LaneError::BadCarry {
+            given: result.len(),
+            wanted: produced.len(),
+        });
+    }
+    // Each `produced` was promised to a phi above, so the body's results have to arrive under those
+    // names. A copy is the honest way to say so without a mutable local.
+    for (&will, &one) in produced.iter().zip(&result) {
+        host.module().copy_object_at(will, carried_type, one)?;
+    }
     host.module().branch(continue_block)?;
 
     host.module().label_at(continue_block)?;

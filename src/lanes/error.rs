@@ -71,6 +71,19 @@ pub enum LaneError {
     /// Refused rather than treated as one row: a kernel that stacks every row on top of the first
     /// validates, runs, and returns whichever row happened to be written last.
     BadPitch,
+    /// A rolled loop's body returned a different number of carried values than it was handed.
+    ///
+    /// The phis at the loop header are declared *before* the body is built — that is the whole
+    /// difficulty of the shape — so how many values come out is promised before any of them exist.
+    /// A body returning fewer leaves a phi naming an id nothing produced, and the validator's
+    /// complaint is then about an id rather than about the promise. Refused here, where both
+    /// numbers are still known.
+    BadCarry {
+        /// How many the body returned.
+        given: usize,
+        /// How many it was handed.
+        wanted: usize,
+    },
     /// A workgroup array of no elements.
     ///
     /// Apart from [`LaneError::BadShape`] because the kernel's shape is not what is wrong: the
@@ -155,6 +168,10 @@ impl fmt::Display for LaneError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Build(error) => write!(f, "{error}"),
+            Self::BadCarry { given, wanted } => write!(
+                f,
+                "a rolled body carried {given} value(s) out where {wanted} were promised"
+            ),
             Self::BadWidth { width } => {
                 write!(f, "a subgroup width of {width} is not a power of two")
             }
@@ -235,6 +252,7 @@ mod tests {
     fn wanted(error: &LaneError) -> &'static str {
         match error {
             LaneError::Build(_) => "id",
+            LaneError::BadCarry { .. } => "2 value(s) out where 3",
             LaneError::BadWidth { .. } => "24",
             LaneError::NoMapping { .. } => "12",
             LaneError::TooManyStrips { .. } => "16",
@@ -258,6 +276,10 @@ mod tests {
         // wrong number satisfies as well as the right one.
         let cases = [
             LaneError::Build(BuildError::IdSpaceExhausted),
+            LaneError::BadCarry {
+                given: 2,
+                wanted: 3,
+            },
             LaneError::BadWidth { width: 24 },
             LaneError::NoMapping {
                 lanes: 12,

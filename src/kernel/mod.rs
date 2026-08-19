@@ -188,6 +188,36 @@ impl<T: Element> Kernel<T> {
         crate::lanes::loops::rolled(self, times, carried_type, initial, body)
     }
 
+    /// The same, carrying **several** values rather than one.
+    ///
+    /// One phi a value at the loop header, and the body is handed all of them and returns all of
+    /// them. Every value shares `carried_type`.
+    ///
+    /// # What it is for
+    ///
+    /// A reduction that keeps more than one running total while reading each input once. Carrying
+    /// one value forces one loop a total, and every one of those loops reads the same data again —
+    /// so a weighted sum over sixteen vectors reads its input sixteen times, which is a bandwidth
+    /// problem rather than an arithmetic one and does not show up until it is measured.
+    ///
+    /// # Errors
+    ///
+    /// [`LaneError::BadCarry`] where the body returns a different number of values than it was
+    /// handed — the phis promised how many before the body was built, so this cannot be discovered
+    /// later. [`LaneError::Build`] if an instruction cannot be emitted, or whatever `body` returns.
+    pub fn repeat_rolled_many<F>(
+        &mut self,
+        times: u32,
+        carried_type: Id,
+        initial: &[Id],
+        body: F,
+    ) -> Result<Vec<Id>, LaneError>
+    where
+        F: FnOnce(&mut Self, &[Id], Id) -> Result<Vec<Id>, LaneError>,
+    {
+        crate::lanes::loops::rolled_many(self, times, carried_type, initial, body)
+    }
+
     /// The SPIR-V type of `T`.
     #[must_use]
     pub const fn element(&self) -> Id {
@@ -300,7 +330,7 @@ mod tests {
 
     use super::*;
     use crate::decode;
-    use crate::lanes::{F32, U32};
+    use crate::lanes::{F32, LaneError, U32};
     use crate::module::op;
     use crate::spec::{Capability, Decoration};
 
@@ -340,6 +370,62 @@ mod tests {
         assert_eq!(count(&words, op::PHI), 2, "the counter and the value");
         assert_eq!(count(&words, op::F_ADD), 1, "the body is built once, whatever the trips");
         assert!(count(&words, op::ACCESS_CHAIN) >= 1, "and it reaches a buffer");
+    }
+
+    #[test]
+    fn a_rolled_loop_can_carry_several_running_totals_at_once() {
+        // **What one carried value costs.** A weighted sum over four vectors, keeping four totals
+        // and reading the input once — where carrying one would be four loops and four reads of the
+        // same data. That is a bandwidth problem, and it does not announce itself: the answer is
+        // right either way.
+        let mut kernel = Kernel::<F32>::new(Shape::new(32, 32, 2)).expect("built");
+        let element = kernel.element();
+        let nought =
+            F32::constant_from_bits(kernel.module(), 0.0_f32.to_bits()).expect("nought");
+        let start = vec![nought; 4];
+
+        let out = kernel
+            .repeat_rolled_many(16, element, &start, |kernel, carried, counter| {
+                let value = kernel.load_at(0, counter)?;
+                carried
+                    .iter()
+                    .map(|one| Ok(kernel.module().f_add(element, *one, value)?))
+                    .collect()
+            })
+            .expect("looped");
+        assert_eq!(out.len(), 4, "four totals out for four in");
+
+        let at = kernel.module().constant_u32(0).expect("at");
+        kernel.store_at(1, at, out[0]).expect("stored");
+        let words = kernel.finish().expect("finished");
+
+        // One loop and one body carrying four totals, which is what says the input is read once:
+        // four loops would be four merges and four reads of the same data.
+        assert_eq!(count(&words, op::LOOP_MERGE), 1, "one loop and not four");
+        assert_eq!(count(&words, op::PHI), 5, "the counter and four values");
+        assert_eq!(count(&words, op::F_ADD), 4, "one body, four totals");
+    }
+
+    #[test]
+    fn a_rolled_body_that_carries_the_wrong_number_out_is_refused() {
+        // The phis promise how many values arrive before the body exists, so a body returning fewer
+        // leaves one naming an id nothing produced — which the validator reports as a bad id rather
+        // than as a broken promise. Both numbers are still known here.
+        let mut kernel = Kernel::<F32>::new(Shape::new(32, 32, 2)).expect("built");
+        let element = kernel.element();
+        let nought =
+            F32::constant_from_bits(kernel.module(), 0.0_f32.to_bits()).expect("nought");
+
+        let refused = kernel.repeat_rolled_many(4, element, &[nought; 3], |_, carried, _| {
+            Ok(carried[..2].to_vec())
+        });
+        assert!(matches!(
+            refused,
+            Err(LaneError::BadCarry {
+                given: 2,
+                wanted: 3
+            })
+        ));
     }
 
     #[test]

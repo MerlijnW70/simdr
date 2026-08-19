@@ -340,3 +340,36 @@ fn a_rolled_loop_of_no_trips_is_the_value_it_started_with() {
         VULKAN_1_1,
     );
 }
+
+#[test]
+fn a_rolled_loop_carrying_several_totals_is_valid_spirv() {
+    // The shape a weighted sum over several vectors wants: read the input once, keep a running
+    // total apiece. Carrying one value would be one loop a total and one read of the same data
+    // apiece, which is a bandwidth problem that does not show in the answer.
+    //
+    // Four phis at the header rather than two, all of them before the merge declaration — the
+    // arrangement the validator has the strongest opinion about, and the reason this is here rather
+    // than only in a unit test.
+    let mut kernel = Kernel::<F32>::new(shape()).expect("built");
+    let element = kernel.element();
+    let nought = F32::constant_from_bits(kernel.module(), 0.0_f32.to_bits()).expect("nought");
+
+    let out = kernel
+        .repeat_rolled_many(8, element, &[nought; 3], |kernel, carried, counter| {
+            let value = kernel.load_at(0, counter)?;
+            carried
+                .iter()
+                .map(|one| Ok(kernel.module().f_add(element, *one, value)?))
+                .collect()
+        })
+        .expect("looped");
+
+    let at = kernel.module().constant_u32(0).expect("at");
+    kernel.store_at(1, at, out[0]).expect("stored");
+    let words = kernel.finish().expect("finished");
+    expect_valid(
+        &words,
+        "a_rolled_loop_carrying_several_totals_is_valid_spirv",
+        VULKAN_1_1,
+    );
+}
