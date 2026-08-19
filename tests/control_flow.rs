@@ -10,7 +10,7 @@ mod common;
 
 use common::{VULKAN_1_1, expect_valid};
 use simdr::kernel::{Kernel, Shape};
-use simdr::lanes::{F32, U32};
+use simdr::lanes::{Element, F32, U32};
 
 /// A 32-wide subgroup, 64 invocations, two buffers — the shape every kernel here shares.
 fn shape() -> Shape {
@@ -288,4 +288,55 @@ fn a_rolled_loop_reading_its_counter_is_valid_spirv() {
 
     let words = kernel.finish().expect("finished");
     expect_valid(&words, "kernel-loop-counter", VULKAN_1_1);
+}
+
+#[test]
+fn a_rolled_loop_over_a_kernel_may_read_its_buffers() {
+    // **The whole reason this sits beside `Lanes::repeat_rolled`.** A body handed a `Lanes` can
+    // compute and cannot fetch — a `Lanes` holds a module and a width and no bindings — so the one
+    // shape that most wants a rolled loop, a reduction over a run too long to unroll, had nowhere
+    // to live. This is that shape: eight values summed a trip at a time.
+    let mut kernel = Kernel::<F32>::new(shape()).expect("built");
+    let element = kernel.element();
+    let nought = F32::constant_from_bits(kernel.module(), 0.0_f32.to_bits()).expect("nought");
+
+    let total = kernel
+        .repeat_rolled(8, element, nought, |kernel, carried, counter| {
+            let value = kernel.load_at(0, counter)?;
+            Ok(kernel.module().f_add(element, carried, value)?)
+        })
+        .expect("looped");
+
+    let at = kernel.module().constant_u32(0).expect("at");
+    kernel.store_at(1, at, total).expect("stored");
+
+    let words = kernel.finish().expect("finished");
+    expect_valid(
+        &words,
+        "a_rolled_loop_over_a_kernel_may_read_its_buffers",
+        VULKAN_1_1,
+    );
+}
+
+#[test]
+fn a_rolled_loop_of_no_trips_is_the_value_it_started_with() {
+    // Nought trips is a legal ask — a caller whose run turned out to be empty — and it emits no
+    // loop at all rather than one that runs once.
+    let mut kernel = Kernel::<F32>::new(shape()).expect("built");
+    let element = kernel.element();
+    let nought = F32::constant_from_bits(kernel.module(), 0.0_f32.to_bits()).expect("nought");
+
+    let total = kernel
+        .repeat_rolled(0, element, nought, |_, _, _| panic!("a body that cannot run"))
+        .expect("looped");
+    assert_eq!(total, nought, "the value it started with, and no loop");
+
+    let at = kernel.module().constant_u32(0).expect("at");
+    kernel.store_at(1, at, total).expect("stored");
+    let words = kernel.finish().expect("finished");
+    expect_valid(
+        &words,
+        "a_rolled_loop_of_no_trips_is_the_value_it_started_with",
+        VULKAN_1_1,
+    );
 }

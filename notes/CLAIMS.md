@@ -16,7 +16,7 @@ Stated first because the gap is only visible against it.
 | --- | --- | --- |
 | every **branch** in the source | mutation gate | 94 targets, 651 mutants over 93 of them, **100%** |
 | every emitted module's **legality** | `spirv-val` | the kernel library at 5 widths, plus 232 generated programs |
-| the zero-dependency boundary, the decision records' presence, the fail-closed sites | `noha gate` | 56 + <!--count:decisions-->9 + 1 checks |
+| the zero-dependency boundary, the decision records' presence, the fail-closed sites | `noha gate` | 56 + <!--count:decisions-->10 + 1 checks |
 | every public operation has a consumer; **every opcode is emitted by something**; every pipeline builder bounds its dispatch; the mutation config matches the tree | `tests/integrity.rs` | <!--count:integrity-tests-->17 tests |
 | **the numbers these documents state**; **every file and every member they name**; every decision record naming what enforces it | `tests/documented.rs` | <!--count:documented-tests-->11 tests |
 | formatting, lints, **doc links**, the MSRV, the skip counts per width; **a long differential sweep and every example, nightly** | CI | <!--count:ci-jobs-->5 jobs across two workflows, two of them a matrix |
@@ -112,6 +112,7 @@ artefact and its kind:
 | DR-0001 — numbers from the grammar | `spirv-val` catches a wrong number that makes an *invalid* module, and nothing catches one that makes a valid one | **partial** |
 | DR-0005 — a constant defers a number | an `Id` is an `Id` | **weakest** |
 | DR-0009 — a test outcome is not a result | nothing yet: a rule two harnesses follow and no check compares a third against | **none** |
+| DR-0010 — a rolled loop is offered where the buffers are | `src/kernel/mod.rs`: one merge, two phis, one body | **checked** |
 
 Three are enforced by the type system and cannot be violated; one by something not existing; one is
 tested and was checked by breaking it; one has an instrument and no schedule; one has nothing and

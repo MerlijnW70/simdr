@@ -108,6 +108,12 @@ pub struct Kernel<T: Element> {
     marker: core::marker::PhantomData<T>,
 }
 
+impl<T: Element> crate::lanes::loops::Emits for Kernel<T> {
+    fn module(&mut self) -> &mut Module {
+        Self::module(self)
+    }
+}
+
 impl<T: Element> Kernel<T> {
     /// Set up the interface and open `main`, ready for loads and lane operations.
     ///
@@ -145,6 +151,41 @@ impl<T: Element> Kernel<T> {
     /// The module underneath, for anything this layer does not cover.
     pub const fn module(&mut self) -> &mut Module {
         &mut self.module
+    }
+
+    /// Repeat `body` a fixed number of times as a **real loop**, threading one value through it.
+    ///
+    /// The same shape as [`Lanes::repeat_rolled`] and the same fixed trip count, with one
+    /// difference that is the whole reason it exists: the body is handed the kernel, so it can read
+    /// and write the buffers. A `Lanes` holds a module and a width and has no bindings to offer, so
+    /// a rolled loop over one can compute and cannot fetch — which makes it useless for the shape
+    /// that wants it most, a reduction over a run too long to unroll.
+    ///
+    /// `body` receives the carried value and the *iteration number*, a `u32` id that is 0 on the
+    /// first trip and `times - 1` on the last. It is one value rather than one per iteration,
+    /// because the body is built once: a body that wants `data[i]` indexes with it.
+    ///
+    /// # When to prefer unrolling
+    ///
+    /// A plain Rust `for` around the body, which is what every kernel here did before this existed.
+    /// It produces better SPIR-V and keeps each iteration's values in registers, so it is right
+    /// whenever the count is small and known. This is for when it is not: the module a loop emits
+    /// is one body however many trips it takes.
+    ///
+    /// # Errors
+    ///
+    /// [`LaneError::Build`] if any instruction cannot be emitted, or whatever `body` returns.
+    pub fn repeat_rolled<F>(
+        &mut self,
+        times: u32,
+        carried_type: Id,
+        initial: Id,
+        body: F,
+    ) -> Result<Id, LaneError>
+    where
+        F: FnOnce(&mut Self, Id, Id) -> Result<Id, LaneError>,
+    {
+        crate::lanes::loops::rolled(self, times, carried_type, initial, body)
     }
 
     /// The SPIR-V type of `T`.
@@ -274,6 +315,31 @@ mod tests {
         decode::body(words)
             .filter(|instruction| instruction.opcode() == op::CAPABILITY)
             .any(|instruction| instruction.operands().first() == Some(&capability.word()))
+    }
+
+    #[test]
+    fn a_rolled_loop_over_a_kernel_builds_one_body_that_reads_a_buffer() {
+        // **The capability itself.** Before this the shape was unreachable: `Lanes::repeat_rolled`
+        // hands its body a `Lanes`, which holds a module and a width and no bindings, so a rolled
+        // body could compute and could not fetch. Every kernel therefore unrolled and paid a body
+        // an iteration, which is fine for a run of sixty-four and not for one of eight thousand.
+        let mut kernel = Kernel::<F32>::new(Shape::new(32, 32, 2)).expect("built");
+        let element = kernel.element();
+        let nought =
+            F32::constant_from_bits(kernel.module(), 0.0_f32.to_bits()).expect("nought");
+
+        kernel
+            .repeat_rolled(16, element, nought, |kernel, carried, counter| {
+                let value = kernel.load_at(0, counter)?;
+                Ok(kernel.module().f_add(element, carried, value)?)
+            })
+            .expect("looped");
+        let words = kernel.finish().expect("finished");
+
+        assert_eq!(count(&words, op::LOOP_MERGE), 1, "a real loop and not sixteen bodies");
+        assert_eq!(count(&words, op::PHI), 2, "the counter and the value");
+        assert_eq!(count(&words, op::F_ADD), 1, "the body is built once, whatever the trips");
+        assert!(count(&words, op::ACCESS_CHAIN) >= 1, "and it reaches a buffer");
     }
 
     #[test]

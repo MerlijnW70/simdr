@@ -37,7 +37,7 @@ mod dot;
 mod element;
 mod error;
 mod extremes;
-mod loops;
+pub(crate) mod loops;
 mod mapping;
 mod math;
 mod narrow;

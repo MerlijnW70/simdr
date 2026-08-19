@@ -25,8 +25,105 @@
 //! anyway, and what an unrolled reduction is.
 
 use super::{LaneError, Lanes};
-use crate::module::Id;
+use crate::module::{Id, Module};
 use crate::spec::LoopControl;
+
+/// Anything that emits into a module, which is what the loop shape needs and all it needs.
+///
+/// Both [`Lanes`] and [`crate::kernel::Kernel`] offer a rolled loop, and the four-block shape above
+/// is delicate enough that having it twice would be having it wrong once. What differs between them
+/// is only what a body is handed: lane code wants lane operations, and a kernel body wants the
+/// buffers — which a `Lanes` does not have and is not going to get, because it holds a module and
+/// a width and nothing else.
+pub(crate) trait Emits {
+    /// The module being built.
+    fn module(&mut self) -> &mut Module;
+}
+
+impl Emits for Lanes<'_> {
+    fn module(&mut self) -> &mut Module {
+        Self::module(self)
+    }
+}
+
+/// The four-block loop, over whatever emits it.
+///
+/// `times` is fixed when the module is built, for the reason [`Lanes::repeat_rolled`] gives: a trip
+/// count that varied per lane would diverge, and a subgroup instruction inside a diverged loop
+/// answers for whoever is still there. `decisions/DR-0003`.
+pub(crate) fn rolled<H, F>(
+    host: &mut H,
+    times: u32,
+    carried_type: Id,
+    initial: Id,
+    body: F,
+) -> Result<Id, LaneError>
+where
+    H: Emits + ?Sized,
+    F: FnOnce(&mut H, Id, Id) -> Result<Id, LaneError>,
+{
+    if times == 0 {
+        return Ok(initial);
+    }
+
+    let uint = host.module().type_int(32, false)?;
+    let boolean = host.module().type_bool()?;
+    let zero = host.module().constant_u32(0)?;
+    let one = host.module().constant_u32(1)?;
+    let limit = host.module().constant_u32(times)?;
+
+    let header = host.module().alloc_id()?;
+    let body_block = host.module().alloc_id()?;
+    let continue_block = host.module().alloc_id()?;
+    let merge_block = host.module().alloc_id()?;
+
+    // The block the loop is entered from, which the phis name as an incoming edge.
+    let entry = host.module().alloc_id()?;
+    host.module().branch(entry)?;
+    host.module().label_at(entry)?;
+    host.module().branch(header)?;
+
+    host.module().label_at(header)?;
+    // The phis come first in the header, before the merge declaration — SPIR-V requires every
+    // `OpPhi` at the very start of its block.
+    let counter = host.module().alloc_id()?;
+    let carried = host.module().alloc_id()?;
+    let stepped = host.module().alloc_id()?;
+    let produced = host.module().alloc_id()?;
+    host.module()
+        .phi_at(counter, uint, &[(zero, entry), (stepped, continue_block)])?;
+    host.module().phi_at(
+        carried,
+        carried_type,
+        &[(initial, entry), (produced, continue_block)],
+    )?;
+
+    // The comparison comes *before* the merge declaration. `OpLoopMerge` has to be the
+    // second-to-last instruction in its block, immediately preceding the branch — putting the
+    // comparison between them is a module the validator rejects, and it did.
+    let carry_on =
+        host.module()
+            .binary(crate::module::op::U_LESS_THAN, boolean, counter, limit)?;
+    host.module()
+        .loop_merge(merge_block, continue_block, LoopControl::None)?;
+    host.module()
+        .branch_conditional(carry_on, body_block, merge_block)?;
+
+    host.module().label_at(body_block)?;
+    let result = body(host, carried, counter)?;
+    // `produced` was promised to the phi above, so the body's result has to arrive under that
+    // name. A copy is the honest way to say so without a mutable local.
+    host.module()
+        .copy_object_at(produced, carried_type, result)?;
+    host.module().branch(continue_block)?;
+
+    host.module().label_at(continue_block)?;
+    host.module().i_add_at(stepped, uint, counter, one)?;
+    host.module().branch(header)?;
+
+    host.module().label_at(merge_block)?;
+    Ok(carried)
+}
 
 impl Lanes<'_> {
     /// Repeat `body` a fixed number of times, threading one value through it.
@@ -84,67 +181,7 @@ impl Lanes<'_> {
     where
         F: FnOnce(&mut Self, Id, Id) -> Result<Id, LaneError>,
     {
-        if times == 0 {
-            return Ok(initial);
-        }
-
-        let uint = self.module().type_int(32, false)?;
-        let boolean = self.module().type_bool()?;
-        let zero = self.module().constant_u32(0)?;
-        let one = self.module().constant_u32(1)?;
-        let limit = self.module().constant_u32(times)?;
-
-        let header = self.module().alloc_id()?;
-        let body_block = self.module().alloc_id()?;
-        let continue_block = self.module().alloc_id()?;
-        let merge_block = self.module().alloc_id()?;
-
-        // The block the loop is entered from, which the phis name as an incoming edge.
-        let entry = self.module().alloc_id()?;
-        self.module().branch(entry)?;
-        self.module().label_at(entry)?;
-        self.module().branch(header)?;
-
-        self.module().label_at(header)?;
-        // The phis come first in the header, before the merge declaration — SPIR-V requires every
-        // `OpPhi` at the very start of its block.
-        let counter = self.module().alloc_id()?;
-        let carried = self.module().alloc_id()?;
-        let stepped = self.module().alloc_id()?;
-        let produced = self.module().alloc_id()?;
-        self.module()
-            .phi_at(counter, uint, &[(zero, entry), (stepped, continue_block)])?;
-        self.module().phi_at(
-            carried,
-            carried_type,
-            &[(initial, entry), (produced, continue_block)],
-        )?;
-
-        // The comparison comes *before* the merge declaration. `OpLoopMerge` has to be the
-        // second-to-last instruction in its block, immediately preceding the branch — putting the
-        // comparison between them is a module the validator rejects, and it did.
-        let carry_on =
-            self.module()
-                .binary(crate::module::op::U_LESS_THAN, boolean, counter, limit)?;
-        self.module()
-            .loop_merge(merge_block, continue_block, LoopControl::None)?;
-        self.module()
-            .branch_conditional(carry_on, body_block, merge_block)?;
-
-        self.module().label_at(body_block)?;
-        let result = body(self, carried, counter)?;
-        // `produced` was promised to the phi above, so the body's result has to arrive under that
-        // name. A copy is the honest way to say so without a mutable local.
-        self.module()
-            .copy_object_at(produced, carried_type, result)?;
-        self.module().branch(continue_block)?;
-
-        self.module().label_at(continue_block)?;
-        self.module().i_add_at(stepped, uint, counter, one)?;
-        self.module().branch(header)?;
-
-        self.module().label_at(merge_block)?;
-        Ok(carried)
+        rolled(self, times, carried_type, initial, body)
     }
 }
 
