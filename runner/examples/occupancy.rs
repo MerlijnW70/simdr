@@ -25,6 +25,17 @@
 //! documents both folds and what stopped them. The check that caught it is the cheap one: run the
 //! loop at 64 and at 512 and see whether the number moves.
 //!
+//! # Why every cell is five repeats
+//!
+//! It was one, and printed bare. On 2026-08-25 a single run of this table was read off as "one
+//! subgroup is the worst column on the Radeon, 12-20% on the reduction", which is the opposite of
+//! what `notes/FINDINGS.md` had recorded from the same sweep. Five runs settled it: one subgroup
+//! is the *best* column there in four of five, and the reduction row wanders by more than any
+//! difference between its columns. Nothing had changed but the luck of one sample.
+//!
+//! Every other measurement here that reports a ratio — `sweep`, `nnue`, `reducer` — already
+//! repeated and already marked its unsteady rows. This one asked to be misread and was.
+//!
 //! # What this cannot say
 //!
 //! One device per run, and three synthetic kernels. It says which sizes are worth trying and that
@@ -52,6 +63,12 @@ const SIZES: [(u32, u32); 2] = [(1 << 14, 200), (1 << 18, 50)];
 /// Multiply-adds per element in the arithmetic-bound kernel.
 const REPEATS: u32 = 512;
 
+/// How many times each cell is measured before one of them is printed.
+///
+/// Five, the same as `runner/examples/sweep.rs`, and for the reason that example gives: one timing
+/// on a shared device is a sample, and a table of samples reads as a table of results.
+const SAMPLES: u32 = 5;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let Some(gpu) = Gpu::open()? else {
         println!("no Vulkan device");
@@ -76,7 +93,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "Every column runs the same total work over the same elements and differs only in how\n\
          many subgroups share a workgroup. A dash is a size past this device's ceiling, or one\n\
-         that does not divide the invocation count."
+         that does not divide the invocation count. Each cell is the median of five repeats, and\n\
+         `!` marks one whose repeats disagreed by more than a fifth: not evidence, whichever way\n\
+         it leans."
     );
 
     Ok(())
@@ -158,9 +177,16 @@ fn one(
 
     // One untimed pass, so the driver's lazy pipeline work stays out of the measurement.
     gpu.time(&spirv, &input, workgroups, 1)?;
-    let elapsed = gpu.time(&spirv, &input, workgroups, iterations)? / iterations;
+    let timing = gpu.time_repeated(&spirv, &input, workgroups, iterations, SAMPLES)?;
 
-    Ok(micros(elapsed))
+    // The median rather than the best, and a mark when the repeats did not agree. Printed as one
+    // unqualified number, this table was read off once and quoted as a 12% finding that five
+    // repeats then refused to reproduce — see `notes/FINDINGS.md`, 2026-08-25.
+    Ok(format!(
+        "{}{}",
+        micros(timing.median / iterations),
+        if timing.is_steady() { "" } else { "!" }
+    ))
 }
 
 /// Microseconds, which is the scale these land on.
