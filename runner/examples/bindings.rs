@@ -18,17 +18,19 @@
 //! Both are one-shot calls that build a pipeline per invocation, so both pay that equally and it
 //! cancels out of the difference.
 
+mod common;
+
 use runner::kernels::{
     WORKGROUP_SIZE,
     network::{Layer, clipped_dot, clipped_dot_split},
 };
 use runner::{Error, Gpu};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// How many times each side runs. Enough that the median is not one scheduling accident.
 const REPEATS: u32 = 40;
 
-fn main() -> Result<(), Error> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let Some(gpu) = Gpu::open()? else {
         eprintln!("no Vulkan device");
         return Ok(());
@@ -67,21 +69,29 @@ fn main() -> Result<(), Error> {
         gpu.run_u32(&joined, &joined_words, 1)?;
         gpu.run_bound(&split, &[&left, &right], operands, 1)?;
 
-        let one = median(REPEATS, || {
+        let one = common::host(REPEATS, || {
             gpu.run_u32(&joined, &joined_words, 1).map(|_| ())
         })?;
-        let two = median(REPEATS, || {
+        let two = common::host(REPEATS, || {
             gpu.run_bound(&split, &[&left, &right], operands, 1)
                 .map(|_| ())
         })?;
 
+        // The difference is the whole point of the table and it is a *subtraction*, so it inherits
+        // the instability of both sides rather than either. Marked when either wandered.
+        let steady = one.is_steady() && two.is_steady();
         println!(
             "{operands:>12} {:>14} {:>14} {:>12}",
-            micros(one),
-            micros(two),
-            signed_micros(two, one),
+            common::marked(one, 1),
+            common::marked(two, 1),
+            format!(
+                "{}{}",
+                signed_micros(two.median, one.median),
+                if steady { "" } else { "!" }
+            ),
         );
     }
+    println!("\n{}", common::LEGEND);
 
     println!(
         "\n  Two buffers is one more upload submission — a command buffer, a submission and a\n\
@@ -99,23 +109,6 @@ fn main() -> Result<(), Error> {
 /// `value` as the bits a `u32` buffer carries it in.
 fn bits(value: i32) -> u32 {
     u32::from_ne_bytes(value.to_ne_bytes())
-}
-
-/// The median of `repeats` runs, which a mean would let one scheduling stall dominate.
-fn median(repeats: u32, mut once: impl FnMut() -> Result<(), Error>) -> Result<Duration, Error> {
-    let mut taken = Vec::with_capacity(repeats as usize);
-    for _ in 0..repeats {
-        let started = Instant::now();
-        once()?;
-        taken.push(started.elapsed());
-    }
-    taken.sort_unstable();
-    Ok(taken.get(taken.len() / 2).copied().unwrap_or_default())
-}
-
-/// Microseconds, which is the scale these land on.
-fn micros(taken: Duration) -> String {
-    format!("{:.1} us", taken.as_secs_f64() * 1e6)
 }
 
 /// The difference between two of them, with its sign.

@@ -12,6 +12,8 @@
 //! throughput. The buffers are host-visible, which is the slow choice everywhere and equally slow
 //! for every row. And one run on one device says nothing about another.
 
+mod common;
+
 use runner::Gpu;
 use runner::kernels::{self, WORKGROUP_SIZE};
 use simdr::lanes::F32;
@@ -99,18 +101,20 @@ fn measure(
         // One untimed pass so the driver's lazy pipeline work does not land in the measurement.
         gpu.time(&spirv, &input, workgroups, 1)?;
 
-        let elapsed = gpu.time(&spirv, &input, workgroups, iterations)?;
-        let per_pass = elapsed / iterations;
+        let timing = gpu.time_repeated(&spirv, &input, workgroups, iterations, common::SAMPLES)?;
+        let per_pass = timing.median / iterations;
         let elements = invocations * strips;
         let per_second = elements as f64 / per_pass.as_secs_f64();
+        let mark = common::mark(timing);
 
         println!(
             "{label:<22} {:>10} {:>12} {:>14}",
-            format_duration(per_pass),
+            format!("{}{mark}", format_duration(per_pass)),
             thousands(elements),
-            format!("{:.1} G", per_second / 1e9)
+            format!("{:.1} G{mark}", per_second / 1e9)
         );
     }
+    println!("{}", common::LEGEND);
 
     Ok(())
 }

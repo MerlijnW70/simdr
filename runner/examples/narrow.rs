@@ -14,8 +14,10 @@
 //! And a clamp over 8-bit elements is not what a real kernel does with them — it is what isolates
 //! the thing being asked about.
 
-use runner::Gpu;
+mod common;
+
 use runner::kernels::{self, WORKGROUP_SIZE};
+use runner::{Gpu, Timing};
 use simdr::lanes::{Element, I8, I16, I32};
 use std::time::Duration;
 
@@ -66,7 +68,7 @@ fn measure(gpu: &Gpu, elements: usize, iterations: u32) -> Result<(), Box<dyn st
     // The strip count is a free parameter and it turns out to matter more than the width does: an
     // `i8` invocation holding one element loads a single byte, and one holding four loads a word.
     // Both rows read the same buffer and compute the same answer.
-    let mut rows: Vec<(&str, Duration, usize)> = Vec::new();
+    let mut rows: Vec<(&str, Timing, usize)> = Vec::new();
     for (label, spirv, stride, strips) in [
         (
             "i8",
@@ -108,27 +110,30 @@ fn measure(gpu: &Gpu, elements: usize, iterations: u32) -> Result<(), Box<dyn st
 
         // One untimed pass, so the driver's lazy pipeline work stays out of the measurement.
         gpu.time(&spirv, &input, workgroups, 1)?;
-        let per_pass = gpu.time(&spirv, &input, workgroups, iterations)? / iterations;
-        rows.push((label, per_pass, bytes));
+        let timing = gpu.time_repeated(&spirv, &input, workgroups, iterations, common::SAMPLES)?;
+        rows.push((label, timing, bytes));
     }
 
     let widest = rows.last().map(|row| row.1);
-    for (label, per_pass, bytes) in &rows {
+    for (label, timing, bytes) in &rows {
+        let per_pass = timing.median / iterations;
         // Read once and written once, so twice the buffer.
         let rate = (bytes * 2) as f64 / per_pass.as_secs_f64() / 1e9;
+        let mark = common::mark(*timing);
         let against = widest.map_or_else(
-            || String::from("—"),
-            |slowest| format!("{:.2}x", slowest.as_secs_f64() / per_pass.as_secs_f64()),
+            || String::from("-"),
+            |slowest| common::ratio(slowest, *timing),
         );
 
         println!(
             "{label:<16} {:>10} {:>12} {:>12} {:>10}",
-            format_duration(*per_pass),
+            format!("{}{mark}", format_duration(per_pass)),
             thousands(*bytes),
-            format!("{rate:.1}"),
+            format!("{rate:.1}{mark}"),
             against
         );
     }
+    println!("{}", common::LEGEND);
 
     Ok(())
 }

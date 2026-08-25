@@ -24,9 +24,11 @@
 //! Both columns are asserted to compute the same numbers, so what is timed is the route and not
 //! two different answers.
 
+mod common;
+
 use runner::Gpu;
 use runner::kernels::{self, WORKGROUP_SIZE};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Element counts to measure at, and how many scans to time at each.
 ///
@@ -49,16 +51,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "{:>12} {:>8} {:>12} {:>14}",
         "elements", "levels", "dispatches", "Scanner::scan"
     );
-    for (elements, repeats) in SIZES {
+    for (elements, iterations) in SIZES {
         let input: Vec<f32> = (0..elements).map(|index| (index % 3) as f32).collect();
         let mut scanner = gpu.scanner(elements)?;
         scanner.scan(&input)?;
 
-        let started = Instant::now();
-        for _ in 0..repeats {
-            scanner.scan(&input)?;
-        }
-        let held = started.elapsed() / repeats;
+        // This row is why `common::host` exists. Timed once, the 65 536-element point came back at
+        // 13 002 µs — eight times the 1 048 576-element point below it, which is impossible — and
+        // printed it beside two sane figures with nothing to mark it. Three runs afterwards put it
+        // near 130 µs.
+        let timing = common::host(common::SAMPLES, || {
+            for _ in 0..iterations {
+                scanner.scan(&input)?;
+            }
+            Ok::<(), runner::Error>(())
+        })?;
 
         // `2 * levels + 1`, so the level count is the dispatch count read backwards.
         let levels = (scanner.dispatches() - 1) / 2;
@@ -67,9 +74,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             thousands(elements),
             levels,
             scanner.dispatches(),
-            micros(held)
+            common::marked(timing, iterations)
         );
     }
+    println!("\n{}", common::LEGEND);
 
     in_place(&gpu)?;
     mapped(&gpu)?;
@@ -91,9 +99,16 @@ fn in_place(gpu: &Gpu) -> Result<(), Box<dyn std::error::Error>> {
     let input: Vec<f32> = (0..elements).map(|index| (index % 3) as f32).collect();
 
     scanner.scan_timed(&input)?;
-    let started = Instant::now();
-    let (_, spans) = scanner.scan_timed(&input)?;
-    let wall = started.elapsed();
+
+    // The wall clock this is compared against is the one that carried the hundredfold outlier, so
+    // it is repeated too. The spans come from the device's own timestamps and from the last repeat
+    // — they are a profile of one chain rather than a summary, and the text below says so.
+    let mut spans = Vec::new();
+    let wall = common::host(common::SAMPLES, || {
+        let (_, taken) = scanner.scan_timed(&input)?;
+        spans = taken;
+        Ok::<(), runner::Error>(())
+    })?;
 
     println!(
         "
@@ -143,11 +158,26 @@ fn in_place(gpu: &Gpu) -> Result<(), Box<dyn std::error::Error>> {
          a scan faster means making those two traversals faster rather than shortening the
          recursion.
 
-         And the dispatches are not the call. Against the {} above, this device spends {} of it
-         on the chain — the rest is the host writing its input and waiting for one submission,
-         neither of which is inside the command buffer. `runner/examples/reducer.rs` reaches the
-         same conclusion for the reduction and measures the upload directly.",
-        micros(wall),
+         And the dispatches are not the call. Against the {} above — the median of {} repeats{} —
+         this device spends {} of it on the chain, and the rest is the host writing its input and
+         waiting for one submission, neither of which is inside the command buffer.
+         `runner/examples/reducer.rs` reaches the same conclusion for the reduction and measures the
+         upload directly.
+
+         The per-pass spans are the device's own timestamps from the *last* of those repeats. They
+         are a profile of one chain rather than a summary of five, which is the honest thing to say
+         about them: the shares below are what that chain spent, and the wall clock beside them is
+         what five of them agreed on.",
+        micros(wall.median),
+        wall.repeats,
+        if wall.is_steady() {
+            String::new()
+        } else {
+            format!(
+                ", which disagreed by {:.1}x and are not evidence",
+                wall.spread()
+            )
+        },
         micros(total),
     );
 
@@ -165,7 +195,7 @@ fn mapped(gpu: &Gpu) -> Result<(), Box<dyn std::error::Error>> {
         "elements", "three crossings", "one crossing", "faster"
     );
 
-    for (elements, repeats) in SIZES {
+    for (elements, iterations) in SIZES {
         // Values of 0, 1 and 2. The totals have to stay inside the 2²⁴ an `f32` counts exactly or
         // the comparison below is a tolerance wearing an equals sign — and 2 has to be present,
         // because x² and x agree on 0 and 1 and a map that had stopped squaring would go
@@ -188,33 +218,47 @@ fn mapped(gpu: &Gpu) -> Result<(), Box<dyn std::error::Error>> {
         let expected = plain.scan(&squares)?;
         assert_eq!(fused.scan(&input)?, expected, "the two routes disagree");
 
-        let started = Instant::now();
-        for _ in 0..repeats {
-            // The best a caller can do without `scanner_of`: send the input, run the map, bring
-            // the squares home, send them back to be scanned.
-            mapping.write(0, &words)?;
-            mapping.dispatch(groups, 1)?;
-            let squares: Vec<f32> = mapping
-                .read(1, elements)?
-                .into_iter()
-                .map(f32::from_bits)
-                .collect();
-            plain.scan(&squares)?;
-        }
-        let stepwise = started.elapsed() / repeats;
+        let stepwise = common::host(common::SAMPLES, || {
+            for _ in 0..iterations {
+                // The best a caller can do without `scanner_of`: send the input, run the map, bring
+                // the squares home, send them back to be scanned.
+                mapping.write(0, &words)?;
+                mapping.dispatch(groups, 1)?;
+                let squares: Vec<f32> = mapping
+                    .read(1, elements)?
+                    .into_iter()
+                    .map(f32::from_bits)
+                    .collect();
+                plain.scan(&squares)?;
+            }
+            Ok::<(), runner::Error>(())
+        })?;
 
-        let started = Instant::now();
-        for _ in 0..repeats {
-            fused.scan(&input)?;
-        }
-        let chained = started.elapsed() / repeats;
+        let chained = common::host(common::SAMPLES, || {
+            for _ in 0..iterations {
+                fused.scan(&input)?;
+            }
+            Ok::<(), runner::Error>(())
+        })?;
 
+        // The ratio comes from the two medians and is marked when *either* side wandered, which is
+        // stricter than marking the sides alone: a steady numerator over a wandering denominator is
+        // still a wandering ratio, and this column is the number people quote.
+        //
+        // From single samples it read 10.4x, 2.2x and 21.4x down its three rows — an order of
+        // magnitude apart for the same comparison at three sizes, which is what an unrepeated
+        // measurement looks like when nothing beside it says so.
+        let steady = stepwise.is_steady() && chained.is_steady();
         println!(
             "{:>12} {:>16} {:>16} {:>10}",
             thousands(elements),
-            micros(stepwise),
-            micros(chained),
-            format!("{:.1}x", stepwise.as_secs_f64() / chained.as_secs_f64())
+            common::marked(stepwise, iterations),
+            common::marked(chained, iterations),
+            format!(
+                "{:.1}x{}",
+                stepwise.median.as_secs_f64() / chained.median.as_secs_f64(),
+                if steady { "" } else { "!" }
+            )
         );
     }
 

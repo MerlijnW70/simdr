@@ -14,9 +14,11 @@
 //! pipeline is created, so ten values still need ten pipelines — what it removes is ten *modules*,
 //! not ten compilations. Whether that is most of the cost or a rounding error is the question.
 
+mod common;
+
 use runner::kernels::{self, FOLD_HALF_SPEC_ID};
-use runner::{Gpu, Specialization};
-use std::time::{Duration, Instant};
+use runner::{Gpu, Specialization, Timing};
+use std::time::Duration;
 
 /// A buffer of a million elements folds fifteen times, which is the shape `Gpu::sum` runs.
 const ELEMENTS: usize = 1 << 20;
@@ -45,7 +47,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for fold in &folds {
             kernels::fold_by(width, fold.factor, fold.stride).expect("built");
         }
-    });
+    })?;
 
     // 2. One pipeline per module, which is what the chain does now.
     //
@@ -93,29 +95,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // actually does: fourteen modules and fourteen pipelines, against one module and fourteen
     // pipelines. Comparing the pipeline columns alone would leave out the thing specialization
     // removes.
-    let one_emission = emitting / folds.len() as u32;
-    let today = emitting + per_module;
-    let deferred = one_emission + specialized;
+    let one_emission = emitting.median / folds.len() as u32;
+    let today = emitting.median + per_module.median;
+    let deferred = one_emission + specialized.median;
+
+    // All three feed both strategy totals, so a wandering repeat anywhere makes both of them — and
+    // the percentage below, which `decisions/DR-0005` now quotes — unquotable.
+    let mark = if emitting.is_steady() && per_module.is_steady() && specialized.is_steady() {
+        ""
+    } else {
+        "!"
+    };
     let saved = today.as_secs_f64() - deferred.as_secs_f64();
 
     println!("\n{:>34} {:>12}", "", "setup per call");
     println!(
         "{:>34} {:>12}",
         "fourteen modules, fourteen pipelines",
-        micros(today)
+        format!("{}{mark}", micros(today))
     );
     println!(
         "{:>34} {:>12}",
         "one module, fourteen pipelines",
-        micros(deferred)
+        format!("{}{mark}", micros(deferred))
     );
     println!(
-        "\nSpecializing removes {:.1}% of the setup — {}. Emission is {:.1}% of what building the\n\
+        "\nSpecializing removes {:.1}%{mark} of the setup — {}. Emission is {:.1}% of what building the\n\
          pipelines costs, and a specialization constant is fixed *at* pipeline creation, so\n\
          fourteen values still need fourteen pipelines however few modules they came from.",
         saved / today.as_secs_f64() * 100.0,
         micros(Duration::from_secs_f64(saved.abs())),
-        emitting.as_secs_f64() / per_module.as_secs_f64() * 100.0
+        emitting.median.as_secs_f64() / per_module.median.as_secs_f64() * 100.0
     );
     println!(
         "\nCompare `cargo run --release --example reducer -p runner`, which removes the setup\n\
@@ -125,32 +135,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Time `body` `REPEATS` times and return the mean.
-fn repeat(mut body: impl FnMut()) -> Duration {
-    let started = Instant::now();
-    for _ in 0..REPEATS {
-        body();
-    }
-    started.elapsed() / REPEATS
+/// Time `body` `REPEATS` times, `common::SAMPLES` times over, and summarise.
+///
+/// The mean of one batch was what this returned, and the headline it feeds — how much of the setup
+/// specializing removes — is now quoted in `decisions/DR-0005`. A number that reaches a decision
+/// record has to carry its spread with it.
+fn repeat(mut body: impl FnMut()) -> Result<Timing, Box<dyn std::error::Error>> {
+    let batches = common::host(common::SAMPLES, || {
+        for _ in 0..REPEATS {
+            body();
+        }
+        Ok::<(), runner::Error>(())
+    })?;
+    Ok(per_iteration(batches))
 }
 
 /// The same, for a body that can fail.
 fn repeat_result(
     mut body: impl FnMut() -> Result<(), runner::Error>,
-) -> Result<Duration, runner::Error> {
-    let started = Instant::now();
-    for _ in 0..REPEATS {
-        body()?;
+) -> Result<Timing, Box<dyn std::error::Error>> {
+    let batches = common::host(common::SAMPLES, || {
+        for _ in 0..REPEATS {
+            body()?;
+        }
+        Ok::<(), runner::Error>(())
+    })?;
+    Ok(per_iteration(batches))
+}
+
+/// A batch of `REPEATS` divided back down to one of them.
+///
+/// `common::host` reports per batch, the way `Gpu::time_repeated` does, and every figure in this
+/// file means *one* emission or *one* pipeline build. Dividing here keeps that true in one place
+/// rather than at each of the six sites that print one.
+fn per_iteration(batches: Timing) -> Timing {
+    Timing {
+        best: batches.best / REPEATS,
+        median: batches.median / REPEATS,
+        worst: batches.worst / REPEATS,
+        repeats: batches.repeats,
     }
-    Ok(started.elapsed() / REPEATS)
 }
 
 /// One line of the table.
-fn row(label: &str, total: Duration, count: usize) {
+fn row(label: &str, timing: Timing, count: usize) {
+    let mark = common::mark(timing);
     println!(
         "{label:>34} {:>12} {:>12}",
-        micros(total),
-        micros(total / count as u32)
+        format!("{}{mark}", micros(timing.median)),
+        format!("{}{mark}", micros(timing.median / count as u32))
     );
 }
 

@@ -39,9 +39,12 @@
 //! [`Session`]: runner::Session
 
 use runner::Gpu;
+mod common;
+
+use runner::Timing;
 use runner::kernels::{self, WORKGROUP_SIZE};
 use simdr::lanes::F32;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// How many round trips to time, after a warm-up.
 const ROUND_TRIPS: u32 = 200;
@@ -137,20 +140,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn timed(
     calls: u32,
     mut work: impl FnMut() -> Result<(), Box<dyn std::error::Error>>,
-) -> Result<Duration, Box<dyn std::error::Error>> {
+) -> Result<Timing, Box<dyn std::error::Error>> {
     // Warm up: the first call of a module pays for pipeline creation, and the first read faults in
     // the staging mapping.
     work()?;
 
-    let mut best = Duration::MAX;
-    for _ in 0..3 {
-        let started = Instant::now();
+    // This took the *best* of three, which is a defensible choice and an undeclared one: the best
+    // of three hides a disagreement between the three exactly as well as a single sample hides
+    // having no second opinion at all. The median of five, with the spread carried alongside, says
+    // the same thing about a steady measurement and says something different about a wandering one.
+    let batches = common::host(common::SAMPLES, || {
         for _ in 0..calls {
             work()?;
         }
-        best = best.min(started.elapsed() / calls);
-    }
-    Ok(best)
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })?;
+
+    Ok(Timing {
+        best: batches.best / calls,
+        median: batches.median / calls,
+        worst: batches.worst / calls,
+        repeats: batches.repeats,
+    })
 }
 
 fn heading() {
@@ -161,13 +172,14 @@ fn heading() {
 }
 
 /// One measured row, with the per-answer figure derived rather than assumed.
-fn row(label: &str, each: Duration, answers: f64) {
-    let per_answer = each.as_secs_f64() / answers;
+fn row(label: &str, each: Timing, answers: f64) {
+    let per_answer = each.median.as_secs_f64() / answers;
+    let mark = common::mark(each);
     println!(
         "{label:<32} {:>11} {:>12} {:>14}",
-        format!("{:.1} us", each.as_secs_f64() * 1e6),
-        format!("{:.3} us", per_answer * 1e6),
-        format!("{:.0}", 1.0 / per_answer)
+        format!("{:.1} us{mark}", each.median.as_secs_f64() * 1e6),
+        format!("{:.3} us{mark}", per_answer * 1e6),
+        format!("{:.0}{mark}", 1.0 / per_answer)
     );
 }
 
@@ -175,8 +187,8 @@ fn row(label: &str, each: Duration, answers: f64) {
 ///
 /// Printed rather than substituted: the difference between these two is the submission, the fence
 /// and the copy back, and it is the whole of what a latency-bound caller pays.
-fn beside(label: &str, device: Duration, wall: Duration) {
-    let share = device.as_secs_f64() / wall.as_secs_f64() * 100.0;
+fn beside(label: &str, device: Duration, wall: Timing) {
+    let share = device.as_secs_f64() / wall.median.as_secs_f64() * 100.0;
     println!(
         "  {label:<30} {:>11}   {share:.1}% of the wall clock",
         format!("{:.1} us", device.as_secs_f64() * 1e6)
@@ -189,10 +201,11 @@ fn beside(label: &str, device: Duration, wall: Duration) {
 /// the device wins only where a CPU producing one answer every `cpu` nanoseconds would take longer
 /// than the whole round trip — that is `round_trip / cpu` answers, and they must be **independent**,
 /// because a caller that needs answer *n* before it knows whether to ask for *n + 1* has one.
-fn crossover(each: Duration, answers: f64) {
-    let round_trip = each.as_secs_f64();
+fn crossover(each: Timing, answers: f64) {
+    let round_trip = each.median.as_secs_f64();
     let device_per_answer = round_trip / answers;
 
+    println!("\n{}", common::LEGEND);
     println!("\nindependent answers needed before this beats a CPU that takes:");
     for cpu_ns in [50.0_f64, 100.0, 1_000.0, 10_000.0] {
         let cpu = cpu_ns * 1e-9;

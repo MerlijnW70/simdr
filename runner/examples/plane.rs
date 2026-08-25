@@ -26,7 +26,9 @@
 //! cells come out equal, the arithmetic between them hid behind the loads — not that it is free in
 //! a kernel where it would not.
 
-use runner::{Gpu, Grid, kernels};
+mod common;
+
+use runner::{Gpu, Grid, Timing, kernels};
 use std::time::Duration;
 
 /// How many rows of the matrix to run, and how many timed iterations at that size.
@@ -87,35 +89,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             // One untimed pass, so the driver's lazy pipeline work stays out of the measurement.
             gpu.time_grid(spirv, &input, grid, 1)?;
-            timings.push(Some(
-                gpu.time_grid(spirv, &input, grid, iterations)? / iterations,
-            ));
+            timings.push(Some(common::samples(common::SAMPLES, || {
+                gpu.time_grid(spirv, &input, grid, iterations)
+            })?));
         }
 
         println!(
             "{:>8} {:>12} {:>12} {:>12} {:>13} {:>13} {:>12}",
             height,
             thousands(invocations),
-            cell(timings.first().copied().flatten()),
-            cell(timings.get(1).copied().flatten()),
-            cell(timings.get(2).copied().flatten()),
-            cell(timings.get(3).copied().flatten()),
-            cell(timings.get(4).copied().flatten()),
+            cell(timings.first().copied().flatten(), iterations),
+            cell(timings.get(1).copied().flatten(), iterations),
+            cell(timings.get(2).copied().flatten(), iterations),
+            cell(timings.get(3).copied().flatten(), iterations),
+            cell(timings.get(4).copied().flatten(), iterations),
         );
     }
 
     println!(
         "\nAll five compute the same answer over the same elements. `runner/tests/plane.rs`\n\
          checks the grid ones against a host reference; `kernels::flat_scale` differs from them\n\
-         in the address and in nothing else."
+         in the address and in nothing else.
+{}",
+        common::LEGEND
     );
 
     Ok(())
 }
 
 /// One cell of the table, or a dash where the shape did not divide.
-fn cell(duration: Option<Duration>) -> String {
-    duration.map_or_else(|| "-".to_owned(), micros)
+///
+/// The median of the repeats, marked when they disagreed. Five cells across a row are compared by
+/// eye here, and a single unrepeated sample in any one of them makes the whole comparison a guess.
+fn cell(timing: Option<Timing>, iterations: u32) -> String {
+    timing.map_or_else(
+        || "-".to_owned(),
+        |timing| {
+            format!(
+                "{}{}",
+                micros(timing.median / iterations),
+                common::mark(timing)
+            )
+        },
+    )
 }
 
 /// Microseconds, which is the scale these land on.

@@ -20,10 +20,11 @@
 //! Caveats: one device per run, and a synthetic loop rather than a real layer. What this can say is
 //! whether the instruction does anything and when; what it cannot say is what a given kernel gains.
 
+mod common;
+
 use runner::Gpu;
 use runner::kernels::{self, WORKGROUP_SIZE};
 use simdr::lanes::pack;
-use std::time::Duration;
 
 /// Dispatch sizes, and how many timed iterations at each.
 const SIZES: [(u32, u32); 2] = [(64, 400), (4_096, 100)];
@@ -87,24 +88,20 @@ fn compare(gpu: &Gpu, packed: &[u32], unpacked: &[u32]) -> Result<(), Box<dyn st
         gpu.time(packed, &input, workgroups, 1)?;
         gpu.time(unpacked, &input, workgroups, 1)?;
 
-        let one = gpu.time(packed, &input, workgroups, iterations)? / iterations;
-        let many = gpu.time(unpacked, &input, workgroups, iterations)? / iterations;
+        let one = gpu.time_repeated(packed, &input, workgroups, iterations, common::SAMPLES)?;
+        let many = gpu.time_repeated(unpacked, &input, workgroups, iterations, common::SAMPLES)?;
 
         println!(
             "{:>12} {:>14} {:>16} {:>10}",
             thousands(invocations),
-            micros(one),
-            micros(many),
-            format!("{:.2}x", many.as_secs_f64() / one.as_secs_f64())
+            common::marked(one, iterations),
+            common::marked(many, iterations),
+            common::ratio(many, one)
         );
     }
+    println!("{}", common::LEGEND);
 
     Ok(())
-}
-
-/// Microseconds, which is the scale these land on.
-fn micros(duration: Duration) -> String {
-    format!("{:.2} us", duration.as_secs_f64() * 1e6)
 }
 
 /// A count with separators.

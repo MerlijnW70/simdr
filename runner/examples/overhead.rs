@@ -15,9 +15,11 @@
 //! What is left after both subtractions is the part a persistent-resource API could remove, and
 //! that is the only honest way to say how much is on the table.
 
+mod common;
+
 use runner::Gpu;
 use runner::kernels;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Buffer sizes in words. The kernel is empty at every one, so any difference is not the kernel.
 const SIZES: [(usize, &str); 5] = [
@@ -48,34 +50,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let mut fixed = Duration::ZERO;
+    let mut fixed_steady = true;
     for (words, label) in SIZES {
         let input = vec![1_u32; words];
 
         // Warm: the first call of a module pays for pipeline compilation.
         gpu.run_u32(&empty, &input, 1)?;
 
-        let started = Instant::now();
-        for _ in 0..TRIPS {
-            gpu.run_u32(&empty, &input, 1)?;
-        }
-        let trip = started.elapsed() / TRIPS;
+        let round = common::host(common::SAMPLES, || {
+            for _ in 0..TRIPS {
+                gpu.run_u32(&empty, &input, 1)?;
+            }
+            Ok::<(), runner::Error>(())
+        })?;
+        let trip = round.median / TRIPS;
 
         // The device's own clock, for the dispatch alone. Everything else in `run` is untimed by
         // it: the allocations, both copies, and the fence.
-        let dispatch = gpu.time(&empty, &input, 1, 1)?;
+        let timed = gpu.time_repeated(&empty, &input, 1, 1, common::SAMPLES)?;
+        let dispatch = timed.median;
         let overhead = trip.saturating_sub(dispatch);
 
         if words == 64 {
             fixed = overhead;
+            fixed_steady = round.is_steady();
         }
         let bytes = (words * size_of::<u32>()) as f64;
+        let mark = common::mark(round);
 
         println!(
             "{label:>8} {:>12} {:>12} {:>12} {:>10}",
-            micros(trip),
-            micros(dispatch),
-            micros(overhead),
-            format!("{:.0}", bytes / overhead.as_secs_f64() / 1e6)
+            format!("{}{mark}", micros(trip)),
+            format!("{}{}", micros(dispatch), common::mark(timed)),
+            format!("{}{mark}", micros(overhead)),
+            format!("{:.0}{mark}", bytes / overhead.as_secs_f64() / 1e6)
         );
     }
 
@@ -90,16 +98,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let bytes = (words * size_of::<u32>()) as u64;
 
         gpu.probe_resident(bytes, 1)?;
-        let started = Instant::now();
-        for _ in 0..TRIPS {
-            gpu.probe_resident(bytes, 1)?;
-        }
-        let each = started.elapsed() / TRIPS;
+        let allocation = common::host(common::SAMPLES, || {
+            for _ in 0..TRIPS {
+                gpu.probe_resident(bytes, 1)?;
+            }
+            Ok::<(), runner::Error>(())
+        })?;
+        let each = allocation.median / TRIPS;
+        let mark = common::mark(allocation);
 
-        println!("{label:>8} {:>16} {:>18}", micros(each), micros(each * 3));
+        println!(
+            "{label:>8} {:>16} {:>18}",
+            format!("{}{mark}", micros(each)),
+            format!("{}{mark}", micros(each * 3))
+        );
     }
 
-    println!("\nfixed cost, from the smallest buffer: {}", micros(fixed));
+    println!(
+        "\nfixed cost, from the smallest buffer: {}{}\n{}",
+        micros(fixed),
+        if fixed_steady { "" } else { "!" },
+        common::LEGEND
+    );
     println!(
         "That is what a persistent-resource API could remove. It is charged once per `run` call,\n\
          and `run` allocates three buffers and builds a pipeline every time."
