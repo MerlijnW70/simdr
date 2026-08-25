@@ -103,7 +103,13 @@ type Counter = (&'static str, fn() -> Option<usize>);
 /// Adding a row is half a change. The other half is a sentence somewhere that states it, without
 /// which [`every_counter_is_stated_by_some_document`] fails — because a counter nothing reads is the
 /// shape the seven dead opcodes had.
-const COUNTERS: [Counter; 10] = [
+const COUNTERS: [Counter; 11] = [
+    // **The registry counts itself, including this row.** `notes/CLAIMS.md` stated the size of
+    // this array in prose and was wrong by three within a day of writing it, in the paragraph
+    // arguing that a number in a document should carry an instrument. This is that instrument, and
+    // it is the smallest one here: a counter is a claim about the tree, and how many claims there
+    // are is one too.
+    ("counters", || Some(COUNTERS.len())),
     ("opcodes", || count_lines("src/module/op.rs", "pub const ")),
     ("lane-operations", || Some(lane_operations())),
     ("test-functions", || Some(test_functions())),
@@ -1197,5 +1203,192 @@ fn no_file_opens_with_a_byte_order_mark() {
          did it. A file that gains one has been round-tripped through something that has an opinion \
          about encodings, and the line above is what that opinion does to the rest of the text.",
         marked.join(", ")
+    );
+}
+
+/// Nouns that name a **standing set** in this tree, and the counter that knows its size.
+///
+/// [`every_marked_number_is_the_number_that_is_there`] reads the digits behind a marker. This reads
+/// the other half of the same problem: a count written as an English word, which no marker can
+/// precede — a marker resolves to digits — and which drifts at exactly the same speed.
+///
+/// Both failures it was written after were that shape. `notes/CLAIMS.md` said *"Seven counters
+/// exist"* in the very paragraph arguing that there is "no argument for leaving these to prose",
+/// while stating the right number two hundred lines further down; and `README.md` and
+/// `notes/CLAIMS.md` said seven and eight decision records where the directory holds ten. Neither
+/// was reachable by anything here, because both numbers are spelled.
+///
+/// # Why these three nouns and not the ones with more hits
+///
+/// The vocabulary was chosen by measuring the documents rather than by taste. `tests`,
+/// `operations`, `opcodes` and `jobs` sit beside a spelled numeral forty-odd times between them,
+/// and nearly every one is an *account of something that happened* — "Eleven tests reading past
+/// their input", "seven opcodes deleted in one commit", "all ten opcodes then in `module::op`".
+/// Those sentences are true permanently. Checking them against today's tree would fail a document
+/// that is telling the truth, which is the gate `ci.yml` describes as teaching everybody to ignore
+/// red.
+///
+/// So the rule is not "spelled numbers are forbidden". It is that a noun belongs here when it names
+/// a set that **exists now** and whose size this file can ask the tree for. Counters, decision
+/// records and examples do. Tests that once failed do not.
+const SPELLED_SETS: [(&str, &str); 3] = [
+    ("counters", "counters"),
+    ("decisions", "decisions"),
+    ("examples", "examples"),
+];
+
+/// The words a count may be written as, up to the largest any of these sets is likely to reach.
+const NUMERALS: [(&str, usize); 20] = [
+    ("one", 1),
+    ("two", 2),
+    ("three", 3),
+    ("four", 4),
+    ("five", 5),
+    ("six", 6),
+    ("seven", 7),
+    ("eight", 8),
+    ("nine", 9),
+    ("ten", 10),
+    ("eleven", 11),
+    ("twelve", 12),
+    ("thirteen", 13),
+    ("fourteen", 14),
+    ("fifteen", 15),
+    ("sixteen", 16),
+    ("seventeen", 17),
+    ("eighteen", 18),
+    ("nineteen", 19),
+    ("twenty", 20),
+];
+
+/// A newline, spelled as its byte so that no escape has to survive being written here.
+const NEWLINE: u8 = 10;
+
+/// `text` with every code span blanked, newlines flattened to spaces and the ASCII lowered.
+///
+/// **Backticks are the other check's territory, and reading them here was a false positive on the
+/// first run.** `notes/FINDINGS.md` says "the one `decisions/DR-0004` rests on", where the path
+/// tokenises to `decisions` and lands next to `one` — a claim that this repository holds one
+/// decision record, which nobody wrote. A backticked token is a *name*, and names are what
+/// [`every_member_the_prose_names_is_a_name_this_repository_declares`] reads.
+///
+/// Toggling on each backtick handles fenced blocks for free: three backticks flip the state an odd
+/// number of times, so a fence opens into the blanked state and its closing fence leaves it.
+///
+/// Blanked rather than removed, because every transform here is byte-for-byte length-preserving —
+/// which is what lets a failure below quote a line number a reader can open.
+fn prose_of(text: &str) -> Vec<u8> {
+    let mut flat = Vec::with_capacity(text.len());
+    let mut in_code = false;
+
+    for byte in text.bytes() {
+        if byte == b'`' {
+            in_code = !in_code;
+            flat.push(b' ');
+        } else if in_code || byte == NEWLINE {
+            flat.push(b' ');
+        } else {
+            flat.push(byte.to_ascii_lowercase());
+        }
+    }
+
+    flat
+}
+
+/// Every maximal run of word bytes in `flat`, as `(offset, word)`.
+///
+/// Tokenised rather than searched for as `"seven counters"`, and the difference is a loophole this
+/// check had for as long as it took to write the paragraph announcing it: `*sixteen* examples` in
+/// `notes/NEXT.md` slipped straight past a scan for the two words with one space between them.
+/// Markdown puts emphasis, backticks and line breaks between a number and its noun, and none of
+/// that makes the sentence any less of a claim.
+fn words_of(flat: &[u8]) -> Vec<(usize, String)> {
+    let mut found = Vec::new();
+    let mut at = 0;
+
+    while at < flat.len() {
+        if !is_word_byte(flat, at) {
+            at += 1;
+            continue;
+        }
+        let from = at;
+        while at < flat.len() && is_word_byte(flat, at) {
+            at += 1;
+        }
+        found.push((from, String::from_utf8_lossy(&flat[from..at]).into_owned()));
+    }
+
+    found
+}
+
+/// Whether the bytes between two words end the sentence, so the pair is not a phrase.
+///
+/// Without this, "...was seven. Examples of this..." reads as a claim about how many examples
+/// there are. A count and its noun belong to each other only inside one sentence.
+fn separated(flat: &[u8], from: usize, to: usize) -> bool {
+    flat[from..to]
+        .iter()
+        // No newline arm: `flat` replaced every one with a space before this is reached.
+        .any(|byte| matches!(byte, b'.' | b'!' | b'?' | b':' | b';' | b'|'))
+}
+
+/// Whether the byte at `at` is part of a word.
+fn is_word_byte(text: &[u8], at: usize) -> bool {
+    text.get(at)
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+}
+
+#[test]
+fn every_spelled_count_of_a_standing_set_is_the_number_that_is_there() {
+    let mut wrong: Vec<String> = Vec::new();
+
+    for path in documents() {
+        let Ok(text) = fs::read_to_string(root().join(&path)) else {
+            continue;
+        };
+
+        let flat = prose_of(&text);
+
+        let words = words_of(&flat);
+        for pair in words.windows(2) {
+            let (at, spelled) = (&pair[0].0, &pair[0].1);
+            let (noun_at, noun) = (&pair[1].0, &pair[1].1);
+
+            let Some((_, stated)) = NUMERALS.iter().find(|(word, _)| word == spelled) else {
+                continue;
+            };
+            let Some((counter, _)) = SPELLED_SETS.iter().find(|(_, set)| set == noun) else {
+                continue;
+            };
+            if separated(&flat, at + spelled.len(), *noun_at) {
+                continue;
+            }
+
+            let Some(truth) = COUNTERS
+                .iter()
+                .find(|(name, _)| name == counter)
+                .and_then(|(_, count)| count())
+            else {
+                continue;
+            };
+            if *stated == truth {
+                continue;
+            }
+
+            let line = text[..*at].matches('\n').count() + 1;
+            wrong.push(format!(
+                "{path}:{line} says {spelled} {noun}, there are {truth}"
+            ));
+        }
+    }
+
+    assert!(
+        wrong.is_empty(),
+        "counts written as words that the tree does not agree with:
+  {}
+
+         A marker resolves to digits, so it cannot stand in front of one of these — write the          number, or say something that is not a count. A document describing a wrong count is an          instance of one: describe it rather than quoting it, the way the mojibake note does.",
+        wrong.join("
+  ")
     );
 }

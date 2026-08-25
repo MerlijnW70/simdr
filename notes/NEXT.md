@@ -1725,3 +1725,81 @@ in it.
 A candidate for the next sitting, in that spirit: nothing here checks that a test which is *supposed*
 to run actually ran. The lavapipe job asserts a skip count per width and is the only place in the
 tree that does. The workstation asserts nothing of the kind, which is how 631 of them went unnoticed.
+
+## Where the work goes now — 2026-08-26, and the question the last list asked
+
+The section above closed by asking, of the instruments this repository already has, **whether each
+one still touches its subject**. It was taken up the next day. Both answers were no, and neither
+was found by a gate — one by asking which public functions `cargo test` never runs, the other by
+reading documents against the tree.
+
+### Tier 1 — found and closed, 2026-08-26
+
+**1. The whole measurement surface had never been run by the suite.** `Gpu::time_grid`,
+`time_repeated`, `memory_types`, `probe_memory`, `probe_resident`, `Reducer::sum_timed` and
+`Scanner::scan_timed` were reachable from `runner/examples/` and from nowhere else. Every one
+passed `every_public_operation_has_a_consumer_outside_its_own_file`, because an example is a
+consumer — the check doing exactly what it says, on a question nobody had asked it.
+
+Asked instead: which `pub fn` is named by *no test at all*. Nineteen of four hundred. Seven were
+the above; twelve were `Module` emitters run only through their callers, which is the shape
+`dot_unsigned` had. `src/module/arithmetic.rs` had 167 lines and **no test module at all**.
+
+`runner/tests/instruments.rs` holds the first seven. It makes no wall-clock claim — `ci.yml`
+already argues that at length — so `time_grid`'s second axis, the only thing it offers that
+`Gpu::time` does not, is held through the **bounds check** instead: eight workgroups by eight and a
+linear sixty-four must be refused for the same extent, which is false the moment `grid.y` is
+dropped. Checked by dropping it and watching the test go red. The twelve are held to their opcode
+*and their operand order*, because an `OpFAdd` where an `OpFSub` belongs still returns a number.
+
+**2. `Gpu::time_repeated` documented an error its own code could not produce.** The `# Errors`
+section promised `Error::NoPipeline` "if `repeats` is zero and there is nothing to summarise", over
+a loop reading `repeats.max(1)`. Zero has always taken one sample.
+
+The floor stayed and the sentence went. `NoPipeline` reads *the driver returned no compute
+pipeline*, which is not what a caller who passed a zero did; `Gpu::probe_resident` floors its own
+count at the same malformed question and promises nothing; and the result does not lie, because
+`Timing::repeats` reports the one sample taken rather than the zero asked for. That is a different
+case from `Timing::of(&[])`, which would have to invent a duration and still refuses.
+
+**3. Three counts written as words, and the instrument that now reads them.** `notes/CLAIMS.md`
+understated the size of the counter registry, in words, inside the very paragraph arguing there is
+"no argument for leaving these to prose" — while stating it correctly two hundred lines further
+down. The wrong number is described rather than quoted, for the reason the mojibake note gives:
+this file is one the new check reads, and a quotation would be an instance. `README.md` and
+`notes/CLAIMS.md` disagreed with each other about how many decision records there are, and both
+were short of the <!--count:decisions-->10 in `decisions/`. Two more undercounted the examples by
+one, where there are <!--count:examples-->17.
+
+None was reachable, and the reason is structural rather than an oversight: **a marker resolves to
+digits, so it cannot stand in front of a spelled numeral.** Every count written as an English word
+was outside the instrument by construction.
+
+`every_spelled_count_of_a_standing_set_is_the_number_that_is_there` reads them now, and its
+vocabulary was *measured* rather than chosen. `tests`, `operations`, `opcodes` and `jobs` sit beside
+a spelled numeral forty-odd times between them and are almost all accounts of something that
+happened — "Eleven tests reading past their input", "seven opcodes deleted in one commit". Those
+are true permanently, and a gate that failed them would fail a document telling the truth, which is
+the red-for-the-wrong-reason `ci.yml` is about. A noun qualifies when it names a set that **exists
+now**. Three do.
+
+`COUNTERS` also counts itself now, which is the smallest instrument in the file and the one whose
+absence started this: how many claims a document may make about the tree is a claim about the tree.
+
+### What this list is asking the next one
+
+**This file went stale again, and the commits above are what made it stale.** The section before
+this one was written *because* nine days of work had not reached it; two days later two more
+commits had not either. Nothing checks that a note is current, and the audit that found everything
+above did not close that — it is the one finding with no instrument behind it.
+
+Three things were looked at and not finished, stated so they are not mistaken for covered:
+
+- `notes/FINDINGS.md` — 4 117 lines, and by `notes/CLAIMS.md`'s own count 222 measured numbers —
+  was not audited at all.
+- Of the seventy-nine `# Errors` blocks naming a concrete variant, exactly one was found to promise
+  a *condition* its body contradicts, and it was found by reading. Matching on variant names finds
+  nothing, because almost everything delegates and produces the variant deeper. There is no
+  instrument for this class and no obvious one.
+- Branch reachability was sampled, not exhausted: the `ok_or` and `unwrap_or` sites were read, the
+  thirty-odd `saturating_*` calls and the match arms were not.

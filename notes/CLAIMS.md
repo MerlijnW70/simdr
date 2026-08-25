@@ -18,7 +18,7 @@ Stated first because the gap is only visible against it.
 | every emitted module's **legality** | `spirv-val` | the kernel library at 5 widths, plus 232 generated programs |
 | the zero-dependency boundary, the decision records' presence, the fail-closed sites | `noha gate` | 56 + <!--count:decisions-->10 + 1 checks |
 | every public operation has a consumer; **every opcode is emitted by something**; every pipeline builder bounds its dispatch; the mutation config matches the tree | `tests/integrity.rs` | <!--count:integrity-tests-->17 tests |
-| **the numbers these documents state**; **every file and every member they name**; **the text they are written in**; every decision record naming what enforces it | `tests/documented.rs` | <!--count:documented-tests-->14 tests |
+| **the numbers these documents state**; **every file and every member they name**; **the text they are written in**; every decision record naming what enforces it | `tests/documented.rs` | <!--count:documented-tests-->15 tests |
 | formatting, lints, **doc links**, the MSRV, the skip counts per width; **a long differential sweep and every example, nightly** | CI | <!--count:ci-jobs-->5 jobs across two workflows, two of them a matrix |
 | behaviour | two GPUs and lavapipe | widths 4, 8, 16, 32, 64 |
 
@@ -31,7 +31,7 @@ every "only if", "unless" and "when the mapping is…" in a doc comment has some
 That is why the classes below are what they are. What is left unchecked is precisely the claims that
 **are not encoded as a branch**.
 
-## 1. Measured numbers — 378 of them, and CI runs none of the sixteen examples
+## 1. Measured numbers — 378 of them, and CI runs none of the <!--count:examples-->17 examples
 
 `README.md` carries 55, `notes/FINDINGS.md` 222, `notes/NEXT.md` 101. Every one rests on a manual run
 at a moment in time. `.github/workflows/ci.yml` mentions the word *example* zero times.
@@ -49,7 +49,7 @@ The class splits three ways and the honest answer differs for each:
   which works for one sentence and does not scale — a document that may not state a number cannot
   describe the thing it documents. So the number stays and carries a marker,
   `<!--` `count:name` `-->` immediately before the digits, which renders as nothing and resolves in
-  `tests/documented.rs` against the tree. Seven counters exist; every marked number in every
+  `tests/documented.rs` against the tree. <!--count:counters-->11 counters exist; every marked number in every
   markdown file in this repository is one of them. A marker naming no
   counter fails rather than rendering as an ordinary number, and a counter no document states fails
   too — which is the rule that emptied `NO_EMITTER`, one level up.
@@ -85,7 +85,7 @@ that consumes it is. **DR-0008** — *a round trip is the unit of cost* — has 
 strict about the pairing: *"status `prose-only` forbids an `invariant` — an invariant nobody enforces
 is a false promise"*. Four kinds exist: `zero-deps`, `forbid-unsafe`, `sole-use` and `sole-ref`.
 
-**All four operate on the import graph of the audited surface**, and none of the eight decisions is
+**All four operate on the import graph of the audited surface**, and none of the <!--count:decisions-->10 decisions is
 an import-confinement claim. Marking DR-0007 as `enforced` with a `sole-use` invariant was tried;
 the gate accepted the syntax and reported
 
@@ -280,7 +280,7 @@ has to come back through — and the validator is the only layer downstream of i
    rather than a silence — so the check is now an absolute: each of the **<!--count:opcodes-->100**
    opcodes `op.rs` declares reaches a module. Reading them out of the grammar again costs a minute on the day
    somebody wants one back, and that is the day it becomes checkable.
-1. **~~Assert the counts.~~ — done.** Ten counters, resolved against the tree by
+1. **~~Assert the counts.~~ — done.** <!--count:counters-->11 counters, resolved against the tree by
    `tests/documented.rs`, and the number has drifted five more times since; each was reported by the
    check rather than noticed.
 2. **~~Sweep `src/module/` for type bounds wider than the instruction allows~~ — swept, and there

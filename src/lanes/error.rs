@@ -148,8 +148,19 @@ pub enum LaneError {
 impl LaneError {
     /// The error for a vector that produced no strips at all.
     ///
-    /// Unreachable — [`super::Vector`] refuses to exist empty — and spelled once here rather than
-    /// four times at the call sites that have to name *something* for the empty case.
+    /// Unreachable — [`super::Vector`] refuses to exist empty — and spelled once here rather
+    /// than at each call site that has to name *something* for the empty case.
+    ///
+    /// **It said "four times" until there were five.** The count was written on 2026-08-12;
+    /// [`Lanes::all_equal`](super::Lanes::all_equal) added the fifth two days later — itself a
+    /// public operation an audit found nothing could reach. Nothing here could see the drift:
+    /// `tests/documented.rs` resolves marked digits and backticked names, and a spelled numeral
+    /// in a doc comment is neither.
+    ///
+    /// The number is gone rather than instrumented, because it described nothing the sentence
+    /// needs — "at each call site" is the whole claim. `notes/CLAIMS.md` is right that deleting a
+    /// count does not scale as an answer; it scales exactly as far as a count that was never
+    /// load-bearing, which is this one.
     pub(super) const fn no_strips() -> Self {
         Self::TooManyStrips {
             strips: 0,
