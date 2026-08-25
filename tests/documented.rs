@@ -823,7 +823,7 @@ fn declared() -> (BTreeSet<String>, BTreeSet<String>) {
     // cannot see reads to it exactly like a name that does not exist. Widening what *counts as
     // declared* can only ever excuse more, so a deleted sandbox cannot fail anything by leaving.
     walk(&root(), &mut |path, _| {
-        if !path.extension().is_some_and(|extension| extension == "rs") {
+        if path.extension().is_none_or(|extension| extension != "rs") {
             return;
         }
         let Ok(text) = fs::read_to_string(path) else {
