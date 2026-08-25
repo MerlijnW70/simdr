@@ -222,10 +222,19 @@ impl Gpu {
     /// allocated, so the repeats differ only in what the machine was doing at the time — which is
     /// exactly the thing being measured.
     ///
+    /// **A `repeats` of zero takes one, and is not refused.** This used to document
+    /// [`Error::NoPipeline`] "if `repeats` is zero and there is nothing to summarise", and the
+    /// loop below has read `repeats.max(1)` for as long as that sentence stood — so the error was
+    /// unreachable and nothing outside this file could have found that out. There is none worth
+    /// adding in its place: `NoPipeline` says *the driver returned no compute pipeline*, which is
+    /// not what a caller who passed a zero did, and a variant for an input nobody passes is a
+    /// wider public surface with no reader. [`Gpu::probe_resident`] floors its own count the same
+    /// way, and the answer stays honest without a refusal — [`Timing::repeats`] reports the one
+    /// sample that was taken rather than the zero that was asked for.
+    ///
     /// # Errors
     ///
-    /// As [`Gpu::run`], or [`Error::NoPipeline`] if `repeats` is zero and there is nothing to
-    /// summarise.
+    /// As [`Gpu::run`].
     pub fn time_repeated(
         &self,
         spirv: &[u32],
@@ -234,10 +243,18 @@ impl Gpu {
         iterations: u32,
         repeats: u32,
     ) -> Result<Timing, Error> {
+        // Floored once and used twice. It read `with_capacity(repeats)` beside `0..repeats.max(1)`,
+        // which is the same decision written in two places — and the copy that was not load-bearing
+        // reserved nothing and then pushed.
+        let repeats = repeats.max(1);
         let mut samples = Vec::with_capacity(repeats as usize);
-        for _ in 0..repeats.max(1) {
+        for _ in 0..repeats {
             samples.push(self.time(spirv, input, workgroups, iterations)?);
         }
+        // Never `None`, because of the `max(1)` above. It is written as the type asks rather than
+        // as a second guard: `Timing::of` owns the decision that a measurement of nothing is not a
+        // measurement of zero, and this is a call site that cannot reach it. The note is here
+        // because its absence is how the paragraph above came to claim otherwise.
         Timing::of(&samples).ok_or(Error::NoPipeline)
     }
 }

@@ -151,10 +151,10 @@ fn a_repeated_timing_asked_for_no_repeats_still_takes_one() {
     let spirv = scaling(&gpu);
     let input = ramp(WORKGROUP_SIZE as usize);
 
-    // `Gpu::time_repeated` documents `Error::NoPipeline` for `repeats` of zero, "if there is
-    // nothing to summarise". Its body reads `repeats.max(1)`, so there is always something: zero
-    // takes one sample and summarises that. This pins the behaviour that exists — the doc claims
-    // an error the code cannot produce, and the two disagree.
+    // Zero repeats takes one rather than being refused, which is what `Gpu::time_repeated` says
+    // and what `Gpu::probe_resident` does with its own count. The method documented an
+    // `Error::NoPipeline` here that its own `max(1)` made unreachable, and nothing outside the
+    // file could see that — so the floor gets a test rather than another sentence.
     let timing = gpu
         .time_repeated(&spirv, &words(&input), 1, 1, 0)
         .expect("zero repeats is floored to one rather than refused");
