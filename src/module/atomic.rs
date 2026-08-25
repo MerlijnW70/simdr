@@ -338,4 +338,51 @@ mod tests {
         assert_eq!(first, second);
         assert_ne!(first, other);
     }
+
+    #[test]
+    fn an_exchange_carries_a_value_and_a_load_is_the_same_instruction_without_one() {
+        // The two ends of the family `atomic_i_add` sits in the middle of, and the pair that says
+        // what the shape actually is: pointer, scope and semantics are what every atomic names,
+        // and the value operand is what separates one that writes from one that only reads. A load
+        // that carried a value would be an exchange nobody asked for.
+        let mut module = module();
+        let uint = module.type_int(32, false).expect("u32");
+        let pointer = module.alloc_id().expect("%pointer");
+        let scope = module.scope(Scope::Device).expect("device");
+        let semantics = module
+            .memory_semantics(MemorySemantics::None)
+            .expect("no ordering");
+        let replacement = module.constant_u32(9).expect("9");
+
+        let swapped = module
+            .atomic_exchange(uint, pointer, scope, semantics, replacement)
+            .expect("exchanged");
+        let read = module
+            .atomic_load(uint, pointer, scope, semantics)
+            .expect("loaded");
+
+        let words = module.finish();
+        assert_eq!(
+            operands_of(&words, op::ATOMIC_EXCHANGE),
+            vec![
+                uint.word(),
+                swapped.word(),
+                pointer.word(),
+                scope.word(),
+                semantics.word(),
+                replacement.word()
+            ]
+        );
+        assert_eq!(
+            operands_of(&words, op::ATOMIC_LOAD),
+            vec![
+                uint.word(),
+                read.word(),
+                pointer.word(),
+                scope.word(),
+                semantics.word()
+            ],
+            "a load has no value to write and must not name one"
+        );
+    }
 }

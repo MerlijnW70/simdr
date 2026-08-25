@@ -314,4 +314,48 @@ mod tests {
 
         assert_eq!(operands_of(&module.finish(), op::PHI).len(), 4);
     }
+
+    #[test]
+    fn the_forms_that_write_into_an_id_allocated_earlier_name_that_id_as_their_result() {
+        // **The half of `phi` that nothing else can do.** A phi has to name ids that do not exist
+        // yet when the block it merges is written, so the id is allocated first and the
+        // instruction written into it — and the whole family shares that shape. An `*_at` that
+        // allocated a fresh id instead would emit a perfectly valid instruction whose result
+        // nobody holds, and the branch it belongs to would read whatever was there before.
+        let mut module = Module::new(Version::V1_3);
+        let uint = module.type_int(32, false).expect("u32");
+        let left = module.constant_u32(1).expect("1");
+        let right = module.constant_u32(2).expect("2");
+
+        let copied = module.alloc_id().expect("%copied");
+        let summed = module.alloc_id().expect("%summed");
+        let merged = module.alloc_id().expect("%merged");
+        let from_entry = module.alloc_id().expect("%entry");
+
+        module
+            .copy_object_at(copied, uint, left)
+            .expect("copy_object_at");
+        module
+            .i_add_at(summed, uint, left, right)
+            .expect("i_add_at");
+        module
+            .phi_at(merged, uint, &[(left, from_entry)])
+            .expect("phi_at");
+
+        let words = module.finish();
+        assert_eq!(
+            operands_of(&words, op::COPY_OBJECT),
+            vec![uint.word(), copied.word(), left.word()]
+        );
+        assert_eq!(
+            operands_of(&words, op::I_ADD),
+            vec![uint.word(), summed.word(), left.word(), right.word()]
+        );
+        // The interleaving of a phi's sources is `a_phi_interleaves_each_value_with_the_block_it_came_from`,
+        // which asks it of `phi`. What is left to ask of `phi_at` is the id, and only the id.
+        assert_eq!(
+            operands_of(&words, op::PHI),
+            vec![uint.word(), merged.word(), left.word(), from_entry.word()]
+        );
+    }
 }

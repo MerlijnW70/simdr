@@ -315,4 +315,57 @@ mod tests {
         assert_eq!(body[0] & 0xffff, Word::from(op::TYPE_FLOAT));
         assert_eq!(body[3] & 0xffff, Word::from(op::TYPE_VECTOR));
     }
+
+    #[test]
+    fn an_array_type_names_its_element_and_its_length_and_a_runtime_one_names_no_length() {
+        let mut module = Module::new(Version::V1_3);
+        let float = module.type_float(32).expect("f32");
+        let length = module.constant_u32(4).expect("4");
+
+        let sized = module.type_array(float, length).expect("array");
+        let unsized_array = module.type_runtime_array(float).expect("runtime array");
+
+        let words = module.finish();
+        let operands = |opcode: u16| {
+            crate::decode::body(&words)
+                .find(|instruction| instruction.opcode() == opcode)
+                .expect("the type was declared")
+                .operands()
+                .to_vec()
+        };
+
+        assert_eq!(
+            operands(op::TYPE_ARRAY),
+            vec![sized.word(), float.word(), length.word()],
+            "the length is an id and not a literal, which is the whole difference between \
+             OpTypeArray and a size somebody wrote down"
+        );
+        assert_eq!(
+            operands(op::TYPE_RUNTIME_ARRAY),
+            vec![unsized_array.word(), float.word()],
+            "a runtime array has no length to carry"
+        );
+    }
+
+    #[test]
+    fn two_arrays_of_the_same_shape_are_two_types_the_way_two_structs_are() {
+        // Unlike every scalar and vector type above, the arrays are not interned — each call
+        // allocates. That is the same answer `two_structurally_identical_structs_are_two_valid_types`
+        // in `tests/validated.rs` establishes is acceptable SPIR-V, and it is asserted here so that
+        // interning them later is a decision somebody makes rather than one that changes an id
+        // under a caller holding it.
+        let mut module = Module::new(Version::V1_3);
+        let float = module.type_float(32).expect("f32");
+        let length = module.constant_u32(4).expect("4");
+
+        let first = module.type_array(float, length).expect("array");
+        let second = module.type_array(float, length).expect("array again");
+        let first_runtime = module.type_runtime_array(float).expect("runtime array");
+        let second_runtime = module
+            .type_runtime_array(float)
+            .expect("runtime array again");
+
+        assert_ne!(first, second);
+        assert_ne!(first_runtime, second_runtime);
+    }
 }

@@ -252,4 +252,28 @@ mod tests {
         assert_eq!(body[0] & 0xffff, Word::from(op::TYPE_FLOAT));
         assert_eq!(body[3] & 0xffff, Word::from(op::CONSTANT));
     }
+
+    #[test]
+    fn the_general_scalar_form_interns_with_the_typed_one_it_generalises() {
+        // `constant_scalar` is what a caller with a type in hand reaches for; `constant_u32` is the
+        // spelling for the type this crate uses most. They key on the same shape, so asking both
+        // for the same number of the same type has to yield one declaration and one id — otherwise
+        // a module would carry two `OpConstant`s that mean the same thing and every caller holding
+        // the older id would be pointing at a duplicate.
+        let mut module = Module::new(Version::V1_3);
+        let uint = module.type_int(32, false).expect("u32");
+
+        let typed = module.constant_u32(7).expect("7");
+        let general = module.constant_scalar(uint, 7).expect("7 again");
+
+        assert_eq!(typed, general);
+        assert_eq!(
+            crate::decode::opcodes(&module.finish())
+                .iter()
+                .filter(|opcode| **opcode == op::CONSTANT)
+                .count(),
+            1,
+            "one constant, declared once"
+        );
+    }
 }

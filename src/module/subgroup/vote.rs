@@ -238,4 +238,26 @@ mod tests {
             4
         );
     }
+
+    #[test]
+    fn a_vote_on_a_value_takes_the_value_itself_and_not_a_predicate_about_it() {
+        // `OpGroupNonUniformAllEqual` is shaped like the votes above and asks a different question:
+        // its operand is the value being compared across lanes rather than a boolean, and only the
+        // result is a boolean. It sat in this crate with no caller until an audit found it, which
+        // is why it gets its own check rather than sharing one with `all` and `any`.
+        let mut module = Module::new(Version::V1_3);
+        let boolean = module.type_bool().expect("bool");
+        let value = module.constant_f32(1.5).expect("1.5");
+        let scope = module.scope(Scope::Subgroup).expect("subgroup");
+
+        let agreed = module
+            .subgroup_all_equal(boolean, scope, value)
+            .expect("all_equal");
+
+        assert_eq!(
+            operands_of(&module.finish(), op::GROUP_NON_UNIFORM_ALL_EQUAL),
+            vec![boolean.word(), agreed.word(), scope.word(), value.word()],
+            "the result type is the boolean and the operand is the value, not the other way round"
+        );
+    }
 }
