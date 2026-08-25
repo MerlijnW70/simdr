@@ -355,8 +355,7 @@ mod tests {
         // an iteration, which is fine for a run of sixty-four and not for one of eight thousand.
         let mut kernel = Kernel::<F32>::new(Shape::new(32, 32, 2)).expect("built");
         let element = kernel.element();
-        let nought =
-            F32::constant_from_bits(kernel.module(), 0.0_f32.to_bits()).expect("nought");
+        let nought = F32::constant_from_bits(kernel.module(), 0.0_f32.to_bits()).expect("nought");
 
         kernel
             .repeat_rolled(16, element, nought, |kernel, carried, counter| {
@@ -366,10 +365,21 @@ mod tests {
             .expect("looped");
         let words = kernel.finish().expect("finished");
 
-        assert_eq!(count(&words, op::LOOP_MERGE), 1, "a real loop and not sixteen bodies");
+        assert_eq!(
+            count(&words, op::LOOP_MERGE),
+            1,
+            "a real loop and not sixteen bodies"
+        );
         assert_eq!(count(&words, op::PHI), 2, "the counter and the value");
-        assert_eq!(count(&words, op::F_ADD), 1, "the body is built once, whatever the trips");
-        assert!(count(&words, op::ACCESS_CHAIN) >= 1, "and it reaches a buffer");
+        assert_eq!(
+            count(&words, op::F_ADD),
+            1,
+            "the body is built once, whatever the trips"
+        );
+        assert!(
+            count(&words, op::ACCESS_CHAIN) >= 1,
+            "and it reaches a buffer"
+        );
     }
 
     #[test]
@@ -380,8 +390,7 @@ mod tests {
         // right either way.
         let mut kernel = Kernel::<F32>::new(Shape::new(32, 32, 2)).expect("built");
         let element = kernel.element();
-        let nought =
-            F32::constant_from_bits(kernel.module(), 0.0_f32.to_bits()).expect("nought");
+        let nought = F32::constant_from_bits(kernel.module(), 0.0_f32.to_bits()).expect("nought");
         let start = vec![nought; 4];
 
         let out = kernel
@@ -413,8 +422,7 @@ mod tests {
         // than as a broken promise. Both numbers are still known here.
         let mut kernel = Kernel::<F32>::new(Shape::new(32, 32, 2)).expect("built");
         let element = kernel.element();
-        let nought =
-            F32::constant_from_bits(kernel.module(), 0.0_f32.to_bits()).expect("nought");
+        let nought = F32::constant_from_bits(kernel.module(), 0.0_f32.to_bits()).expect("nought");
 
         let refused = kernel.repeat_rolled_many(4, element, &[nought; 3], |_, carried, _| {
             Ok(carried[..2].to_vec())

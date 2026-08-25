@@ -687,12 +687,20 @@ fn subtract_divide_and_negate_are_valid_spirv() {
     let flipped = kernel.module().f_negate(element, value).expect("negated");
     let raised = {
         let mut lanes = kernel.lanes().expect("lanes");
-        let vector = lanes.from_lane_value::<F32, 32>(flipped).expect("a lane value");
+        let vector = lanes
+            .from_lane_value::<F32, 32>(flipped)
+            .expect("a lane value");
         lanes.exp::<32>(vector).expect("exp").id()
     };
     let below = kernel.module().f_add(element, one, raised).expect("added");
-    let gated = kernel.module().f_div(element, value, below).expect("divided");
-    let left = kernel.module().f_sub(element, value, gated).expect("subtracted");
+    let gated = kernel
+        .module()
+        .f_div(element, value, below)
+        .expect("divided");
+    let left = kernel
+        .module()
+        .f_sub(element, value, gated)
+        .expect("subtracted");
 
     kernel
         .lanes()
@@ -720,7 +728,10 @@ fn integer_subtract_and_divide_are_valid_spirv() {
     let by = kernel.module().constant_u32(7).expect("a divisor");
     let over = kernel.module().u_div(uint, value, by).expect("divided");
     let back = kernel.module().i_mul(uint, over, by).expect("multiplied");
-    let left = kernel.module().i_sub(uint, value, back).expect("subtracted");
+    let left = kernel
+        .module()
+        .i_sub(uint, value, back)
+        .expect("subtracted");
 
     kernel
         .lanes()

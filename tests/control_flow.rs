@@ -327,7 +327,9 @@ fn a_rolled_loop_of_no_trips_is_the_value_it_started_with() {
     let nought = F32::constant_from_bits(kernel.module(), 0.0_f32.to_bits()).expect("nought");
 
     let total = kernel
-        .repeat_rolled(0, element, nought, |_, _, _| panic!("a body that cannot run"))
+        .repeat_rolled(0, element, nought, |_, _, _| {
+            panic!("a body that cannot run")
+        })
         .expect("looped");
     assert_eq!(total, nought, "the value it started with, and no loop");
 

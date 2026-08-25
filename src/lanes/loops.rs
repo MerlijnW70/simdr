@@ -62,13 +62,19 @@ where
     H: Emits + ?Sized,
     F: FnOnce(&mut H, Id, Id) -> Result<Id, LaneError>,
 {
-    let held = rolled_many(host, times, carried_type, &[initial], |host, carried, counter| {
-        let one = carried.first().copied().ok_or(LaneError::BadCarry {
-            given: carried.len(),
-            wanted: 1,
-        })?;
-        body(host, one, counter).map(|one| vec![one])
-    })?;
+    let held = rolled_many(
+        host,
+        times,
+        carried_type,
+        &[initial],
+        |host, carried, counter| {
+            let one = carried.first().copied().ok_or(LaneError::BadCarry {
+                given: carried.len(),
+                wanted: 1,
+            })?;
+            body(host, one, counter).map(|one| vec![one])
+        },
+    )?;
     held.first().copied().ok_or(LaneError::BadCarry {
         given: held.len(),
         wanted: 1,
@@ -136,19 +142,16 @@ where
     host.module()
         .phi_at(counter, uint, &[(zero, entry), (stepped, continue_block)])?;
     for ((&name, &was), &will) in carried.iter().zip(initial).zip(&produced) {
-        host.module().phi_at(
-            name,
-            carried_type,
-            &[(was, entry), (will, continue_block)],
-        )?;
+        host.module()
+            .phi_at(name, carried_type, &[(was, entry), (will, continue_block)])?;
     }
 
     // The comparison comes *before* the merge declaration. `OpLoopMerge` has to be the
     // second-to-last instruction in its block, immediately preceding the branch — putting the
     // comparison between them is a module the validator rejects, and it did.
-    let carry_on =
-        host.module()
-            .binary(crate::module::op::U_LESS_THAN, boolean, counter, limit)?;
+    let carry_on = host
+        .module()
+        .binary(crate::module::op::U_LESS_THAN, boolean, counter, limit)?;
     host.module()
         .loop_merge(merge_block, continue_block, LoopControl::None)?;
     host.module()
