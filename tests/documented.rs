@@ -1,7 +1,8 @@
 //! What this repository's prose says about itself, checked against the repository.
 //!
-//! Three claims, and only the first needed a marker invented for it: the **numbers** the documents
-//! state, the **files** they name, and the **members** they name. The last two need nothing new,
+//! Four claims, and only the first needed a marker invented for it: the **numbers** the documents
+//! state, the **files** they name, the **members** they name, and — added last, after it had already
+//! gone wrong — the **text** they are written in. The middle two need nothing new,
 //! because this tree already quotes what it means — a file, a type, an instruction — and leaves
 //! ordinary prose unquoted. **The backticks were already the markup**; nothing read them.
 //!
@@ -61,6 +62,21 @@
 //! that are not here: a file in the sibling project, and four members that were **deleted** — two of
 //! them in the same sentence that records the deletion. [`NOT_IN_THE_TREE`] and [`GONE`] hold those
 //! by name with a reason, and an expiry test fails if an excused name comes back.
+//!
+//! # And the text itself, which all three of those can be true of a ruined document
+//!
+//! The three checks above read digits and backticked names. Both are ASCII. So a document may rot
+//! in every character they do not touch and pass all of them — which `README.md` did, for nine days
+//! and eight commits, after one edit re-encoded it and turned every em dash, every micro sign and
+//! every ratio's multiplication sign into three characters of rubbish.
+//!
+//! [`every_document_is_the_text_it_was_written_as`] is the fourth claim. It undoes the round trip
+//! that causes the damage rather than matching a list of known-bad sequences: take each character
+//! back to the byte Windows-1252 would have decoded it from, and ask whether those bytes are a
+//! character. When they are, nobody typed them. That covers the damage this repository has not met
+//! yet as well as the ten shapes it has, and it reaches `.rs` as readily as `.md` — a doc comment
+//! carries the same punctuation as a paragraph, and the front page was only the file that happened
+//! to be open.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -955,5 +971,231 @@ fn nothing_excused_as_gone_has_come_back() {
 
          An excuse that outlives its reason is the drift this file is about, one level up: the          prose would go on describing a deletion that has been undone, and the check that should          have said so is the one holding the excuse.",
         returned.join(", ")
+    );
+}
+
+/// What Windows-1252 makes of the thirty-two bytes where it is not Latin-1.
+///
+/// A byte from `0xA0` up decodes to the character of its own number, so only this range needs a
+/// table. The five Windows-1252 leaves undefined — `0x81`, `0x8D`, `0x8F`, `0x90`, `0x9D` — are
+/// written as themselves, which is what the editor that did the damage did with them: it is the
+/// Latin-1 fallback every real implementation of this codepage carries, and a repair that omitted
+/// it would leave five bytes it could not name.
+const CP1252_HIGH: [char; 32] = [
+    '\u{20AC}', '\u{81}', '\u{201A}', '\u{0192}', '\u{201E}', '\u{2026}', '\u{2020}', '\u{2021}',
+    '\u{02C6}', '\u{2030}', '\u{0160}', '\u{2039}', '\u{0152}', '\u{8D}', '\u{017D}', '\u{8F}',
+    '\u{90}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}', '\u{2022}', '\u{2013}', '\u{2014}',
+    '\u{02DC}', '\u{2122}', '\u{0161}', '\u{203A}', '\u{0153}', '\u{9D}', '\u{017E}', '\u{0178}',
+];
+
+/// The character Windows-1252 decodes `byte` to.
+fn cp1252(byte: u8) -> char {
+    match byte {
+        0x80..=0x9F => CP1252_HIGH
+            .get(usize::from(byte - 0x80))
+            .copied()
+            .unwrap_or(char::REPLACEMENT_CHARACTER),
+        _ => char::from(byte),
+    }
+}
+
+/// The byte Windows-1252 would have decoded to `character`, if any did.
+fn byte_of(character: char) -> Option<u8> {
+    let code = u32::from(character);
+    if (0xA0..=0xFF).contains(&code) {
+        return u8::try_from(code).ok();
+    }
+    CP1252_HIGH
+        .iter()
+        .position(|&mapped| mapped == character)
+        .and_then(|index| u8::try_from(0x80 + index).ok())
+}
+
+/// Every run in `line` that is UTF-8 read as Windows-1252, as `(what is there, what it was)`.
+///
+/// The damage is a round trip: a document's UTF-8 bytes handed to something that believed they were
+/// Windows-1252, and the characters that came out written back as UTF-8. It is detected by undoing
+/// exactly that — take each character back to the byte it would have decoded from, and ask whether
+/// the run those bytes form is a character. When it is, the run is not text anybody typed.
+///
+/// **A run is claimed only when every one of its bytes fits.** A lead byte needs continuation bytes
+/// after it in the right count, and the whole must decode; anything short of that is left alone.
+/// That direction makes the scan a floor rather than a proof — a damaged sequence whose bytes happen
+/// not to form a character would be missed — and never lets it rewrite something a person wrote.
+///
+/// Runs cannot cross a line, because a newline is ASCII and no continuation byte decodes to one.
+fn damage(line: &str) -> Vec<(String, String)> {
+    let characters: Vec<char> = line.chars().collect();
+    let mut found = Vec::new();
+    let mut index = 0;
+
+    while index < characters.len() {
+        let width = match characters.get(index).copied().and_then(byte_of) {
+            Some(0xC2..=0xDF) => 2,
+            Some(0xE0..=0xEF) => 3,
+            Some(0xF0..=0xF4) => 4,
+            _ => {
+                index += 1;
+                continue;
+            }
+        };
+
+        let Some(run) = characters.get(index..index + width) else {
+            index += 1;
+            continue;
+        };
+        let Some(bytes) = run
+            .iter()
+            .copied()
+            .map(byte_of)
+            .collect::<Option<Vec<u8>>>()
+        else {
+            index += 1;
+            continue;
+        };
+        if !bytes
+            .iter()
+            .skip(1)
+            .all(|byte| (0x80..=0xBF).contains(byte))
+        {
+            index += 1;
+            continue;
+        }
+
+        match std::str::from_utf8(&bytes) {
+            Ok(original) => {
+                found.push((run.iter().collect(), original.to_owned()));
+                index += width;
+            }
+            Err(_) => index += 1,
+        }
+    }
+
+    found
+}
+
+/// Every file in the workspace whose text this suite is willing to read.
+///
+/// Wider than [`documents`] deliberately. The damage below arrived in a markdown file, and nothing
+/// about the editor that caused it cares which extension it is saving — a doc comment carries the
+/// same em dashes as a paragraph, and `README.md` was only the file that happened to be open.
+fn text_files() -> BTreeSet<String> {
+    let mut found = BTreeSet::new();
+    walk(&root(), &mut |path, relative| {
+        let readable = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| matches!(extension, "md" | "rs" | "toml" | "yml"));
+        if readable {
+            found.insert(relative.to_owned());
+        }
+    });
+    found
+}
+
+#[test]
+fn every_document_is_the_text_it_was_written_as() {
+    let mut damaged = Vec::new();
+
+    for name in text_files() {
+        // **A file that is not UTF-8 at all fails here rather than being skipped.** Skipping it
+        // would be this check's own version of the bug it exists for: the worst-damaged file in the
+        // tree is the one `read_to_string` cannot read, and `continue` would pass over it in
+        // silence while reporting on the ones that are merely wrong.
+        let text = match fs::read_to_string(root().join(&name)) {
+            Ok(text) => text,
+            Err(complaint) => {
+                damaged.push(format!("{name}: is not readable as UTF-8 — {complaint}"));
+                continue;
+            }
+        };
+        for (number, line) in text.lines().enumerate() {
+            for (there, was) in damage(line) {
+                damaged.push(format!(
+                    "{name}:{}: {:?} was written as {was:?}",
+                    number + 1,
+                    there
+                ));
+            }
+        }
+    }
+
+    assert!(
+        damaged.is_empty(),
+        "text that is UTF-8 read as Windows-1252:\n  {}\n\n\
+         `README.md` sat like this for nine days and eight commits. One edit re-encoded it — 136 \
+         lines in a diff whose message was about something else — and every em dash, every `us` \
+         with a micro sign on it and every ratio's multiplication sign became three characters of \
+         rubbish on the repository's front page.\n\n\
+         Nothing here could see it. The counters check digits and the reference checks check \
+         backticked names, and both of those are ASCII: a document can rot in every character \
+         those two do not read and pass this suite. That is `notes/CLAIMS.md`'s own subject — a \
+         claim nothing checks — arriving in the shape it warns about, which is why the check is \
+         here rather than a note asking somebody to look.",
+        damaged.join("\n  ")
+    );
+}
+
+#[test]
+fn the_damage_scanner_finds_it_where_there_is_some_and_not_where_there_is_none() {
+    // Built rather than typed. A literal example of the damage would *be* damage, in a file the
+    // test above reads — the check would fail on its own teeth. `OPENS` is split one screen up for
+    // the same reason, and this is that rule for a second kind of markup.
+    let damaged: String = "\u{2014}\u{00B5}\u{2192}"
+        .as_bytes()
+        .iter()
+        .map(|&byte| cp1252(byte))
+        .collect();
+
+    let found = damage(&damaged);
+    let recovered: String = found.iter().map(|(_, was)| was.as_str()).collect();
+    assert_eq!(
+        recovered,
+        "\u{2014}\u{00B5}\u{2192}",
+        "the scanner found {} runs in three characters' worth of damage and read them back as \
+         {recovered:?} — a scanner that cannot recover what it detects would report the repair as \
+         complete while the file still said something else",
+        found.len()
+    );
+
+    // And the other half, which is the one that matters: ordinary prose must survive it untouched.
+    // Every character below is one this repository writes on purpose, and each is exactly what a
+    // damaged run decodes *to* — so a scan that could not tell the two apart would eat the
+    // documents it is meant to protect.
+    for intact in [
+        "a round trip \u{2014} the unit of cost",
+        "127 \u{00B5}s per pass, 6.45\u{00D7} against `i32`",
+        "f32 \u{2194} f16, and 2\u{00B2}\u{2074} exactly",
+        "\u{03A3} over the strips, then \u{2192} the buffer",
+    ] {
+        assert!(
+            damage(intact).is_empty(),
+            "the scanner called {intact:?} damaged, and it is what this repository writes"
+        );
+    }
+}
+
+#[test]
+fn no_file_opens_with_a_byte_order_mark() {
+    let mut marked = Vec::new();
+
+    for name in text_files() {
+        let Ok(bytes) = fs::read(root().join(&name)) else {
+            continue;
+        };
+        if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+            marked.push(name);
+        }
+    }
+
+    assert!(
+        marked.is_empty(),
+        "files opening with a byte order mark: {}\n\n\
+         Three bytes that render as nothing and mean UTF-8, which every file here already is. It is \
+         checked because of what it indicates rather than what it costs: `README.md` grew one on \
+         the same save that mangled 136 of its lines, and it is the fingerprint of the editor that \
+         did it. A file that gains one has been round-tripped through something that has an opinion \
+         about encodings, and the line above is what that opinion does to the rest of the text.",
+        marked.join(", ")
     );
 }
