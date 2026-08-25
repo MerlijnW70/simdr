@@ -9,7 +9,7 @@ mod common;
 use common::{device, grouped_sums, ramp, runnable};
 use runner::kernels::{self, WORKGROUP_SIZE};
 use simdr::lanes::F32;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Words in, words out, for a kernel that reads binding 0 and writes binding 1.
 fn as_words(values: &[f32]) -> Vec<u32> {
@@ -100,22 +100,23 @@ fn a_session_answers_far_faster_than_rebuilding_everything() {
     let trips = 50;
 
     gpu.run_u32(&spirv, &input, 1).expect("warm");
-    let started = Instant::now();
-    for _ in 0..trips {
-        gpu.run_u32(&spirv, &input, 1).expect("dispatched");
-    }
-    let per_run = started.elapsed() / trips;
+    let per_run = median_of(REPEATS, || {
+        for _ in 0..trips {
+            gpu.run_u32(&spirv, &input, 1).expect("dispatched");
+        }
+    }) / trips;
 
     let mut session = gpu.session(&spirv, &[count, count]).expect("opened");
     session.dispatch(1, 1).expect("warm");
-    let started = Instant::now();
-    for _ in 0..trips {
-        session.dispatch(1, 1).expect("dispatched");
-    }
-    let per_dispatch = started.elapsed() / trips;
+    let per_dispatch = median_of(REPEATS, || {
+        for _ in 0..trips {
+            session.dispatch(1, 1).expect("dispatched");
+        }
+    }) / trips;
 
     eprintln!(
-        "session: {:.1} us per dispatch against {:.1} us per run ({:.0}x)",
+        "session: {:.1} us per dispatch against {:.1} us per run ({:.0}x), \
+         medians of {REPEATS} repeats of {trips}",
         per_dispatch.as_secs_f64() * 1e6,
         per_run.as_secs_f64() * 1e6,
         per_run.as_secs_f64() / per_dispatch.as_secs_f64()
@@ -132,6 +133,15 @@ fn a_session_answers_far_faster_than_rebuilding_everything() {
     // the integrated part in the same machine at 5×. "Ten was a property of one device dressed up
     // as a property of sessions." Three is a property of *two* devices dressed up the same way, and
     // a third machine said so.
+    //
+    // **And a ratio of two single samples fails at random, which this did.** On 2026-08-25 it went
+    // red twice in one sitting on a machine where it normally reads 8x, and passed the runs either
+    // side of each. The bar was not the problem — 3x has a 2.7x margin here — the *measurement* was:
+    // one timed batch each side, so one scheduling stall anywhere in either one decides the suite.
+    //
+    // Both sides are the median of five batches now. The bar is untouched, because lowering a bar
+    // to survive a noisy measurement is how it got to three from ten; what changed is that the
+    // number the bar is applied to is no longer a sample of one.
     //
     // So the number is still printed everywhere, because it is the honest half of a benchmark
     // inside a test suite — and it is asserted only where a timing means something. Reported
@@ -275,4 +285,22 @@ fn reading_or_writing_a_binding_that_does_not_exist_is_refused() {
     assert_eq!(session.bindings(), 2);
     assert!(session.write(2, &[1, 2, 3]).is_err());
     assert!(session.read(2, 4).is_err());
+}
+
+/// How many batches each side of the speed ratio is timed over.
+const REPEATS: u32 = 5;
+
+/// The median wall-clock duration of `repeats` runs of `batch`.
+///
+/// The suite's one timing assertion used to compare two single batches, and went red at random
+/// because of it. A median resists the one stall that a mean or a lone sample cannot.
+fn median_of(repeats: u32, mut batch: impl FnMut()) -> Duration {
+    let mut taken = Vec::with_capacity(repeats.max(1) as usize);
+    for _ in 0..repeats.max(1) {
+        let started = Instant::now();
+        batch();
+        taken.push(started.elapsed());
+    }
+    taken.sort_unstable();
+    taken.get(taken.len() / 2).copied().unwrap_or_default()
 }
