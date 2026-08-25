@@ -3973,47 +3973,94 @@ sixteen run on the Radeon; four skip themselves, which is its own finding and is
 
 ### What the numbers say, against what was written down
 
+Every figure below is the **median of five repeats**, and `!` marks one whose repeats disagreed by
+more than a fifth. That qualification is not decoration: the first version of this table was
+single-samples throughout, and most of what it claimed was wrong. The corrections are the row after
+it.
+
 | | RTX 4080 (recorded) | RTX 5060 Ti | integrated Radeon |
 | --- | --- | --- | --- |
-| round trip, 256 B, `Gpu::run` | ~807 µs | **1218 µs** | 2596 µs |
-| the same dispatch, amortised | 0.8 µs | 2.0 µs | 0.2 µs |
-| allocate + free, one buffer | ~310 µs | 1332 µs | 2923 µs |
-| `Reducer::sum` over 2²⁰ | ~280 µs | **733 µs** | 773 µs |
-| `Reducer::sum` against `Gpu::sum`, 2²⁰ | 2.2× (older code) | 16.3× | 4.9× |
-| NNUE, one evaluation waited on | ~940 µs | **4547 µs** | — skipped |
-| NNUE, batched peak | 766 M/s at 8192 | 248 M/s at 1024 | — skipped |
-| `i8` × 4 strips against `i32` | 6.45× | **7.12×** | 4.09× |
-| `OpSDot`, arithmetic-bound | — | 2.35× | **9.34×** |
-| scan: five middle passes / two ends | ~10 / 21 µs | 10.3 / 31.1 µs | 36.9 / 1048.3 µs |
+| round trip, 256 B, `Gpu::run` | ~807 µs | **1139 µs** | 2482 µs |
+| allocate + free, one buffer | ~310 µs | 371 µs | 370 µs |
+| `Reducer::sum` over 2²⁰ | ~280 µs | 275 µs | 741 µs |
+| `Reducer::sum` against `Gpu::sum`, 2²⁰ | 2.2× (older code) | 8.9× | 4.9× |
+| NNUE, one evaluation waited on | ~940 µs | 994 µs | — skipped |
+| NNUE, against one CPU thread | ~4700× | 4971× | — skipped |
+| NNUE, batched peak | 766 M/s at 8192 | **250 M/s at 1024** | — skipped |
+| `i8` × 4 strips against `i32` | 6.45× | 7.13×! | 4.36× |
+| `OpSDot`, arithmetic-bound | — | 2.34× | **9.52×** |
+| specializing removes, of the setup | +9.7% | +6.2% … +12% | +6.0%! |
 
-**Every conclusion in this file survived the swap except one.** Strip mining still wins and wins
-harder; the two ends are still the scan and the depth is still nearly free; the round trip is still
-a fixed cost that no kernel change touches; holding pipelines still beats rebuilding them by more
-than any algorithm here has ever bought. The shapes are intact.
+**The card performs like the card it replaced, on almost everything.** `Reducer::sum` over 2²⁰ is
+275 µs against the 4080's ~280. One NNUE evaluation waited on is 994 µs against ~940, so the
+comparison against a chess engine's own loop is 4971× rather than the recorded ~4700×. Allocation is
+371 µs against ~310, and it is **370 µs on the integrated Radeon too** — the same number on two
+completely different parts, which is what a cost dominated by the driver rather than the hardware
+looks like.
 
-What moved is the *host* side, uniformly and by a lot. A submission and its fence priced at 56 µs
-on the 4080 prices at **1285 µs** here — and because so many ratios in this file are device time
-against host time, they all move the same way. That is why NNUE-in-search went from ~4700× behind
-one CPU thread to **22 733×**: the same answer, one digit worse, for a reason that is not the
-kernel.
+Three things genuinely differ, and only three:
 
-### The one that inverted: specializing is now a loss on both devices
+- **The round trip is about 1.4× longer** — 1139 µs against ~807. It is the one host cost that
+  really did get worse, and it is the one every latency-bound conclusion in this file already turns
+  on.
+- **Batched NNUE throughput is a third of what it was**, and it peaks at 1024 positions rather than
+  8192. This is a smaller card and the throughput numbers say so plainly.
+- **The working-set cliff moved down**, which has its own section below.
 
-| device | 14 modules → 14 pipelines | 1 module → 14 pipelines | specializing gives |
+Strip mining still wins and wins slightly harder, the two ends are still the scan, and holding
+pipelines still beats rebuilding them by more than any algorithm here has bought.
+
+### The version of this table that was wrong, and why it was wrong
+
+The first draft of the section above said the host side was "uniformly more expensive, and by a
+lot": a submission and its fence priced at 1285 µs against the 4080's 56, allocation at 1332 µs
+against ~310, `Reducer::sum` at 733 µs against ~280, and NNUE inside a search at **22 733×** behind
+one CPU thread rather than ~4700×. It drew a conclusion from that — that so many ratios here are
+device time over host time, so they all move together — and the conclusion was tidy and completely
+false.
+
+Every one of those figures was a **single unrepeated sample**, taken while sixteen examples ran
+back to back on a machine that had just finished a release build.
+
+| | single sample | median of five | wrong by |
 | --- | --- | --- | --- |
-| RTX 4080 (recorded) | 809.6 µs | 793.0 µs | **+9.7%** |
-| RTX 5060 Ti | 1313.4 µs | 2974.3 µs | **−126.5%** |
-| integrated Radeon | 1271.4 µs | 1872.1 µs | **−47.2%** |
+| allocate + free, 256 B, 5060 Ti | 1332 µs | 371 µs | 3.6× |
+| allocate + free, 256 B, Radeon | 2923 µs | 370 µs | 7.9× |
+| `Reducer::sum` over 2²⁰, 5060 Ti | 733 µs | 275 µs | 2.7× |
+| NNUE, one evaluation, 5060 Ti | 4547 µs | 994 µs | 4.6× |
+| `Scanner::scan` over 2²⁰, Radeon | 11 731 µs | 2340 µs | 5.0× |
+| `Scanner::scan` over 65 536, 5060 Ti | 13 002 µs | 114 µs | **114×** |
 
-Two independent drivers, the same sign, and one of them more than doubles the setup the technique
-was supposed to shave. `decisions/DR-0005` carries the correction and keeps its old row rather than
-overwriting it. The *decision* does not move — a specialization constant is fixed at pipeline
-creation, so fourteen values need fourteen pipelines however few modules they came from, and that
-is structural at any sign — but the number under it is now true of a card that is gone and false of
-both that are here.
+The last row is the one that should have stopped everything: a scan over 65 536 elements reported
+as eight times slower than the same scan over sixteen times as many. It was printed in a results
+table, beside two sane figures, with nothing to mark it — and it was read past.
 
-`runner/examples/specialize.rs` needed no edit. It printed `Specializing removes -126.5% of the
-setup` on its own, because it was written to compute the difference rather than to report a saving.
+### The one that looked inverted, and the retraction that followed it
+
+This section first read "specializing is now a loss on both devices", with a table giving −126.5%
+on the 5060 Ti and −47.2% on the Radeon, and the sentence "two independent drivers, the same sign".
+
+**It was wrong, and every figure in it was a single unrepeated sample.** `specialize` timed each
+measurement exactly once and printed it bare, and one batch of pipeline builds landing slow gets
+attributed wholly to whichever strategy happened to run second.
+
+Repeated five times over on the 5060 Ti: **+12.2%, +4.2%!, −10.7%!, +13.7%, +10.4%**, where `!`
+marks a run whose own repeats disagreed by more than a fifth. The three that hold cluster at +12%,
+which is the 4080's recorded 9.7% within the noise of a different card. On the Radeon nothing
+settles at all — +0.7%!, +5.3%!, +12.6%!, every one marked — so there is no quotable figure for that
+device, and nothing supporting a 47% loss either.
+
+So `decisions/DR-0005` needed no correction, got one anyway, and has had it retracted. The record
+keeps the retraction rather than the deletion.
+
+**What makes this worth a section of its own is how convincing it was.** Two devices agreeing. A
+mechanism written out in plausible detail — the driver re-specializes the shader per pipeline, and
+re-specialization costs more than the emission it saves. A number the example printed itself,
+unprompted, as `removes -126.5%`. And a decision record updated within the hour on the strength of
+it.
+
+None of that is evidence. The only thing missing was a second run, and a second run reverses the
+sign.
 
 ### The working-set cliff moved down, and the tempting explanation is one that was already refuted
 

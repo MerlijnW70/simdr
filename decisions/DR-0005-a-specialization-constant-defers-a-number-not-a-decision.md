@@ -73,31 +73,35 @@ pipelines.
 The premise was wrong in a way worth stating plainly: one module per parameter value is **cheap**.
 One *pipeline* per parameter value is not, and no specialization constant makes it less so.
 
-> **Re-measured 2026-08-25, on two devices, and the 9.7% is now a loss on both.** The RTX 4080 the
-> table above was taken on is no longer in the machine. Re-run on what is:
+> **Re-measured 2026-08-25 on two devices, and the 9.7% stands.** The RTX 4080 this table was
+> taken on is no longer in the machine. On the RTX 5060 Ti that replaced it, `specialize` reports
+> **+12.2%, +13.7% and +10.4%** across the runs whose repeats agreed — the same figure as above,
+> within the noise of a different card and driver.
 >
-> | device | fourteen modules → fourteen pipelines | one module → fourteen pipelines | specializing gives |
-> | --- | --- | --- | --- |
-> | RTX 4080 (above, kept for the record) | 809.6 µs | 793.0 µs | **+9.7%** |
-> | RTX 5060 Ti (width 32) | 1313.4 µs | 2974.3 µs | **−126.5%** |
-> | integrated Radeon (width 64) | 1271.4 µs | 1872.1 µs | **−47.2%** |
+> ### The retraction this paragraph replaces, which is the more useful half
 >
-> Two independent drivers, the same sign, and one of them more than doubles the setup it was
-> supposed to shave. Specializing a module is not free to *compile*: the driver sees a new constant
-> and re-specializes the shader per pipeline, and on these two it re-specializes for more than the
-> module emission it saves — 20.1 µs and 17.6 µs a fold, against hundreds.
+> Earlier the same day this record carried a correction saying the 9.7% had **inverted**: a 126.5%
+> *loss* on the 5060 Ti and a 47.2% loss on the integrated Radeon, "two independent drivers, the
+> same sign". It was wrong, and it was wrong in the way this project keeps finding things: both
+> figures were **single unrepeated samples**, read off one run of an example that timed each
+> measurement exactly once and printed it bare.
 >
-> **The decision does not move, and it is worth being clear that it never rested on this number.**
-> The argument is that a specialization constant is fixed *at* pipeline creation, so fourteen
-> values need fourteen pipelines however few modules they came from. That is structural and holds
-> at any sign. What changed is that the measurement underneath it stopped being a small win and
-> became a large loss — so the sentence "specializing removes 9.7% of the setup" is now true of one
-> device that is gone and false of both that are here.
+> Repeated five times over, the 5060 Ti gives +12.2%, +4.2%!, −10.7%!, +13.7%, +10.4% — where `!`
+> marks a run whose own repeats disagreed by more than a fifth. The three that hold cluster at
+> **+12%**. The Radeon never settles at all: +0.7%!, +5.3%!, +12.6%!, every one of them marked, so
+> there is no quotable figure for that device — and no support for a 47% loss either. What the
+> single sample caught was one batch of pipeline builds landing slow, attributed wholly to whichever
+> strategy happened to run second.
 >
-> The 9.7% row is kept rather than replaced, because a decision record that quietly restates its
-> evidence teaches nobody that evidence moves under it. `runner/examples/specialize.rs` prints
-> today's number on whatever runs it; it needs no edit, and it reported the loss as
-> `removes -126.5%` without being asked to.
+> The retracted paragraph is described rather than deleted for the same reason the 485 µs row above
+> is: a decision record that silently swallows its own wrong turns teaches nobody what a wrong turn
+> looked like. This one looked *completely convincing*. It had two devices agreeing, a plausible
+> mechanism written out — "the driver re-specializes the shader per pipeline" — and a number the
+> example had printed itself. None of that is evidence, and the only thing missing was a second run.
+>
+> `runner/examples/specialize.rs` now repeats every measurement five times, reports medians, and
+> marks any figure whose repeats disagreed. The `!` is what stands between this record and the
+> next confident inversion.
 
 > **Corrected 2026-08-12, later the same day.** This table first read 485.5 µs per pipeline and
 > "saves 1.0%". Both numbers were wrong. The probe took one module and allocated two buffers *per

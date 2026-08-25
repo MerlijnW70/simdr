@@ -529,12 +529,22 @@ cargo test --workspace          # the whole suite, now on a 64-wide subgroup
 > measurements *were* taken on a 4080 and relabelling them would make them lies rather than
 > history. Read every "on an RTX 4080" here as "on the card that used to be in this machine".
 >
-> All sixteen examples were re-run on both current devices that day and the results are in
-> `notes/FINDINGS.md`. The shape of every conclusion survived — strip mining wins, the two ends are
-> the scan, the round trip is a fixed cost, `Reducer` beats `Gpu::sum` — and the host side is
-> uniformly more expensive here, so the ratios that compare device time against host time all move
-> the same way. **One conclusion inverted**: `decisions/DR-0005`'s 9.7% saving from specializing is
-> a 126% *loss* on the 5060 Ti and a 47% loss on the Radeon. That record carries the correction.
+> All sixteen examples were re-run on both current devices that day, five repeats each, and the
+> results are in `notes/FINDINGS.md`. **The card performs like the card it replaced on almost
+> everything**: `Reducer::sum` over 2²⁰ is 275 µs against ~280, one NNUE evaluation waited on is 994
+> µs against ~940, and allocation is 371 µs against ~310 — the same 370 µs the integrated Radeon
+> reports, which is what a cost owned by the driver rather than the hardware looks like.
+>
+> Three things genuinely differ: the round trip is ~1.4× longer, batched NNUE throughput is a third
+> of what it was and peaks earlier, and the working-set cliff moved down. Every conclusion on this
+> page held.
+>
+> **The first draft of that paragraph said the opposite**, and said it from single unrepeated
+> samples: the host side "uniformly more expensive", NNUE at 22 733× behind a CPU thread rather than
+> ~4700×, and DR-0005's specialization saving inverted to a 126% loss. Repeating each measurement
+> five times put every one of them back. `notes/FINDINGS.md` keeps that retraction rather than the
+> deletion, and `runner/examples/` now repeats and marks unsteady figures so the next reader is
+> warned by the table instead of by a later run.
 >
 > Four of the sixteen — `bench`, `nnue`, `sweep`, `bindings` — are written for a 32-wide subgroup
 > and skip on the Radeon. They have only ever run on the discrete card, which means they are the
