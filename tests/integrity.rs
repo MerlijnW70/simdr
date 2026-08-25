@@ -871,3 +871,245 @@ fn the_opcode_scanner_finds_the_numbers_that_are_there() {
         &mentions
     ));
 }
+
+/// Comparisons of a lane count against a subgroup width, and why each is not a copy of the rule.
+///
+/// **This is the check `notes/NEXT.md` asked for and the class `notes/FINDINGS.md` named.** A
+/// relationship decided in two places is not two spellings of one rule. It is two rules that agree
+/// on the inputs anybody draws and diverge on the ones nobody does — and this project has paid for
+/// that exact shape three times:
+///
+/// | where | how it was written | how it diverged |
+/// | --- | --- | --- |
+/// | `interpret::strips_of` | `if lanes > subgroup` | both arms give one at equal widths, so nothing could tell them apart |
+/// | `fuzz::generate` | `lanes < subgroup` | called a whole-subgroup vector clustered, deleting the only `OpPhi` finish's coverage |
+/// | `kernels::reduce` | `LANES > subgroup` | refused a cluster exactly the subgroup's width, which is a whole-subgroup vector |
+///
+/// All three are gone, routed through `Mapping::of`. What no check asserted until now is the
+/// absence of a **fourth**, and the reason that matters is the asymmetry recorded with the class: a
+/// duplicated *branch* has a mutant, so `noha` finds it — both live ones were found that way — but
+/// the coverage guarding the original cannot see the copy, and a copy that never diverges on a
+/// power of two is invisible until somebody draws seven lanes on an eight-wide subgroup.
+///
+/// `Mapping::of` decides by **divisibility**. Every one of the three copies decided by
+/// **comparison**, which is why they agreed with it for months. So what this looks for is a
+/// comparison, and every entry below has to say why it is not a decision.
+///
+/// **A floor rather than a proof**, in the direction that costs coverage rather than truth: it
+/// matches the two spellings this codebase uses for those quantities, so a copy written `n > w`
+/// walks past it. Sharpening that means resolving what a binding *means*, which is a type checker
+/// rather than a grep. What it does buy is that the fourth copy cannot arrive in the vocabulary the
+/// first three arrived in.
+const LANE_WIDTH_COMPARISONS: [(&str, &str, &str); 2] = [
+    (
+        "src/lanes/mapping.rs",
+        "lanes == subgroup",
+        "the rule itself. `Mapping::of`'s first arm, and the one comparison here that is allowed \
+         to be a decision — everything else in this table exists to point at it",
+    ),
+    (
+        "runner/src/fuzz/generate.rs",
+        "lanes > subgroup",
+        "an assertion *about* `Mapping::of`, not a second copy of it: the test asks the rule for a \
+         mapping and then checks that the only refusal it produces is the one a wide vector can \
+         produce. It reads the rule's answer rather than recomputing it, which is the distinction \
+         this whole check is drawing",
+    ),
+];
+
+/// The comparison operators a copy of the mapping rule has ever been written with.
+///
+/// `==` is here beside the orderings because the rule's *first* arm is an equality — a copy that
+/// says `lanes == subgroup` somewhere else is deciding `WholeSubgroup` for itself.
+const COMPARISONS: [&str; 5] = ["<=", ">=", "==", "<", ">"];
+
+/// Rust source with its line comments and string literals removed.
+///
+/// Both have to go, and for opposite reasons. The doc comments on `Mapping::of` and on the two
+/// files above *quote* the copies they replaced — `lanes < subgroup`, `LANES > subgroup` — because
+/// that history is the argument for the rule existing. A check that read them would fire on its own
+/// documentation. And `generate/coverage.rs` carries `lanes == subgroup` inside a panic message,
+/// which is prose that happens to live in quotes.
+///
+/// Block comments are not handled. Nothing in this tree uses them, and a stripper that got them
+/// half right would be a second rule about what a comment is.
+fn code_only(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut previous = '\0';
+
+    for character in line.chars() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_string = false;
+            }
+            previous = character;
+            continue;
+        }
+        if character == '"' {
+            in_string = true;
+            previous = character;
+            continue;
+        }
+        if character == '/' && previous == '/' {
+            out.pop();
+            break;
+        }
+        out.push(character);
+        previous = character;
+    }
+
+    out
+}
+
+/// The last identifier in `text`, ignoring trailing space and punctuation.
+fn last_word(text: &str) -> String {
+    text.trim_end()
+        .rsplit(|character: char| !character.is_alphanumeric() && character != '_')
+        .next()
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// The first identifier in `text`, ignoring leading space.
+fn first_word(text: &str) -> String {
+    text.trim_start()
+        .split(|character: char| !character.is_alphanumeric() && character != '_')
+        .next()
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// Every lane-against-width comparison in the workspace, as `(file, the comparison)`.
+fn lane_width_comparisons() -> Vec<(String, String)> {
+    const LANES: [&str; 2] = ["lanes", "LANES"];
+    const WIDTHS: [&str; 3] = ["subgroup", "width", "WIDTH"];
+
+    let mut found = Vec::new();
+    for path in workspace_files() {
+        // This file is skipped: the table above quotes the very comparisons it excuses, so a check
+        // that read itself would report its own excuses as findings.
+        if path == "tests/integrity.rs" {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(root().join(&path)) else {
+            continue;
+        };
+
+        for line in text.lines() {
+            let code = code_only(line);
+            for operator in COMPARISONS {
+                for (index, _) in code.match_indices(operator) {
+                    let (left, rest) = code.split_at(index);
+                    let right = &rest[operator.len()..];
+                    // `<=` and `>=` contain `<` and `>`, so a bare-operator match whose next
+                    // character is `=` is the same comparison counted a second time.
+                    if operator.len() == 1 && right.starts_with('=') {
+                        continue;
+                    }
+
+                    let left_word = last_word(left);
+                    let right_word = first_word(right);
+                    let lane_then_width = LANES.contains(&left_word.as_str())
+                        && WIDTHS.contains(&right_word.as_str());
+                    let width_then_lane = WIDTHS.contains(&left_word.as_str())
+                        && LANES.contains(&right_word.as_str());
+
+                    if lane_then_width || width_then_lane {
+                        found.push((path.clone(), format!("{left_word} {operator} {right_word}")));
+                    }
+                }
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn no_second_copy_of_the_mapping_rule() {
+    for (path, comparison) in lane_width_comparisons() {
+        let excused = LANE_WIDTH_COMPARISONS
+            .iter()
+            .any(|(file, text, _)| *file == path && *text == comparison);
+
+        assert!(
+            excused,
+            "{path} decides `{comparison}` for itself.\n\n\
+             `simdr::lanes::Mapping::of(lanes, subgroup)` is where that relationship is decided, \
+             and it decides it by divisibility rather than by comparison — so this line and the \
+             rule agree on every power of two and disagree on, say, seven lanes over eight. Three \
+             copies of exactly this shape have been found and removed; the table on \
+             LANE_WIDTH_COMPARISONS says what each one cost.\n\n\
+             Call `Mapping::of` and match on what it returns. If this really is an assertion about \
+             the rule rather than a copy of it, add it to that table with the reason."
+        );
+    }
+}
+
+#[test]
+fn every_excused_lane_width_comparison_still_exists() {
+    // The direction that keeps the table honest rather than growing, the same way
+    // `nothing_is_excused_from_needing_a_consumer_and_has_one` does for the other list. An excuse
+    // whose line has since been rewritten reads as a live exception and guards nothing.
+    let found = lane_width_comparisons();
+
+    for (path, comparison, reason) in LANE_WIDTH_COMPARISONS {
+        assert!(
+            found
+                .iter()
+                .any(|(file, text)| file == path && text == comparison),
+            "{path} no longer contains `{comparison}`, so this excuse has expired and should be \
+             deleted: {reason}"
+        );
+    }
+}
+
+#[test]
+fn the_scanner_can_tell_a_comparison_from_a_comment_about_one() {
+    // The blind spot this check would have had, asserted rather than assumed. The first two lines
+    // are what it must find; the next three are its own documentation and a panic message, which it
+    // must not.
+    assert_eq!(
+        code_only("        if lanes == subgroup {").trim(),
+        "if lanes == subgroup {"
+    );
+    assert_eq!(
+        code_only("    let clustered = lanes < subgroup;").trim(),
+        "let clustered = lanes < subgroup;"
+    );
+
+    assert_eq!(
+        code_only("/// `lanes < subgroup`, and `kernels::reduce` with `LANES > subgroup`").trim(),
+        ""
+    );
+    assert_eq!(
+        code_only("        // No `lanes < subgroup` here, though that is what this arm means.")
+            .trim(),
+        ""
+    );
+    assert_eq!(
+        code_only("        \"the pool for `lanes == subgroup` is empty\",").trim(),
+        ","
+    );
+
+    // A comparison with a comment after it: the code survives, the comment does not.
+    assert_eq!(
+        code_only("    if lanes > subgroup { // a wide vector").trim(),
+        "if lanes > subgroup {"
+    );
+
+    // And the scanner reads what the stripper leaves. `>=` must not also be counted as `>`.
+    let doubled = COMPARISONS
+        .iter()
+        .filter(|operator| "lanes >= subgroup".contains(**operator))
+        .count();
+    assert_eq!(
+        doubled, 2,
+        "`>=` contains `>`, which the scanner has to allow for"
+    );
+}

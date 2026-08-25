@@ -17,7 +17,7 @@ Stated first because the gap is only visible against it.
 | every **branch** in the source | mutation gate | 94 targets, 651 mutants over 93 of them, **100%** |
 | every emitted module's **legality** | `spirv-val` | the kernel library at 5 widths, plus 232 generated programs |
 | the zero-dependency boundary, the decision records' presence, the fail-closed sites | `noha gate` | 56 + <!--count:decisions-->9 + 1 checks |
-| every public operation has a consumer; **every opcode is emitted by something**; every pipeline builder bounds its dispatch; the mutation config matches the tree | `tests/integrity.rs` | <!--count:integrity-tests-->17 tests |
+| every public operation has a consumer; **every opcode is emitted by something**; every pipeline builder bounds its dispatch; the mutation config matches the tree; **no second copy of the mapping rule** | `tests/integrity.rs` | <!--count:integrity-tests-->20 tests |
 | **the numbers these documents state**; **every file and every member they name**; every decision record naming what enforces it | `tests/documented.rs` | <!--count:documented-tests-->11 tests |
 | formatting, lints, **doc links**, the MSRV, the skip counts per width; **a long differential sweep and every example, nightly** | CI | <!--count:ci-jobs-->5 jobs across two workflows, two of them a matrix |
 | behaviour | two GPUs and lavapipe | widths 4, 8, 16, 32, 64 |
