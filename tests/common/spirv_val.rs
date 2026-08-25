@@ -48,8 +48,23 @@ pub fn validator() -> Option<PathBuf> {
         return Some(path);
     }
 
-    let fallback = PathBuf::from(r"H:\tools\spirv-tools\install\bin\spirv-val.exe");
-    fallback.is_file().then_some(fallback)
+    // **The fallback was one absolute path on one machine, and that machine had changed.** It read
+    // `H:\tools\spirv-tools\install\bin\spirv-val.exe` — a drive that is not mounted here any
+    // more — so "look in the usual place" had quietly meant "find nothing" for as long as the
+    // letter had been wrong. That is the failure the paragraph above is about, arriving two lines
+    // under it: every validation in *both* test trees skipped, and a skip is invisible.
+    //
+    // `PATH` is the usual place. It is what a machine with the tools installed already answers, it
+    // costs the same lookup, and it cannot go stale when a drive is remounted or a checkout moves.
+    // `SPIRV_VAL` still wins where it is set, because CI names the path it installed to.
+    let name = if cfg!(windows) {
+        "spirv-val.exe"
+    } else {
+        "spirv-val"
+    };
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|directory| directory.join(name))
+        .find(|candidate| candidate.is_file())
 }
 
 /// Write `module` out and hand it to `spirv-val`, returning the tool's complaint if it had one.
