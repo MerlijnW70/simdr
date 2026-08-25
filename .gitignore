@@ -3,10 +3,23 @@
 
 # The mutation gate's configuration and state are **not** here, and not by accident.
 #
-# This machine's global gitignore (`~/.config/git/ignore`) excludes `noha.yaml` and `.noha/` from
-# every repository on it, under the heading "local verification toolchain — never commit, in any
-# repository on this machine". That is policy, and a `!noha.yaml` negation in this file would
-# outrank it — which is exactly why there is not one.
+# The intent is that this machine's global gitignore (`~/.config/git/ignore`) excludes
+# `noha.yaml`, `.noha/` and `AGENTS.md` from every repository on it, under the heading "local
+# verification toolchain — never commit, in any repository on this machine". That is policy, and a
+# `!noha.yaml` negation in this file would outrank it — which is exactly why there is not one.
+#
+# **Checked 2026-08-25: the policy was described here and was not in that file.** It held two
+# `.claude/settings.local.json` lines and nothing else, `core.excludesfile` was unset, and all
+# three paths came back from `git check-ignore` as NOT IGNORED — one `git add -A` from being
+# committed, with this comment standing over them saying they could not be. A comment that
+# asserts a safety net is not a safety net.
+#
+# So: `git check-ignore -v noha.yaml .noha/ AGENTS.md` before believing this paragraph. It costs
+# nothing and it is the only thing here that is evidence rather than intent.
+#
+# `AGENTS.md` belongs on that list for a second reason. `noha init` writes it, and it links to
+# `.noha/INTEGRITY_PROMPT.md` — so committing it would publish a document pointing at a file no
+# clone has, which is the mistake `git log` records as "a public doc linking to a private item".
 #
 # **The price, stated rather than worked around:** `tests/integrity.rs` reads `noha.yaml`, so a
 # fresh clone cannot run it, and the mutation gate's source list cannot be reviewed from the
