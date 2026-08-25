@@ -3960,3 +3960,158 @@ coordinates is uploaded, and the whole world comes out of the dispatch's own geo
 That is worth knowing about this API and is written down nowhere else — a splat of a *uniform*
 constant and a splat of a *per-invocation* built-in are the same call, and they are the difference
 between a flat field and a world.
+
+## Four instruments that had stopped touching their subject — 2026-08-25
+
+An audit rather than a feature, and what it found was not four bugs. It was four *checks* reporting
+green over nothing, which is the failure this project has written more about than any other and had
+not turned on its own instruments.
+
+Listed worst first by how long each had been silent.
+
+### The front page had been mojibake for nine days
+
+`README.md` — 840 lines, 55 measured numbers, the first thing anybody reads — went through a
+Windows-1252 round trip on 2026-08-16 and nobody noticed until now. **174 damaged sequences over
+134 lines**: every em dash arrived as three characters, and every micro sign, every ratio's
+multiplication sign and every superscript as two or three of their own.
+
+**The examples are described rather than shown, and that is not squeamishness.** This file is one
+the check below reads, so writing the damage down would *be* damage — the same rule
+`tests/documented.rs` follows one level up when it builds its test input out of bytes instead of
+typing it, and the same rule again that keeps `OPENS` split in half so a file explaining marker
+syntax does not contain a marker. Three times now, in three kinds of markup.
+
+The commit that did it is `f28e29b`, whose message is about the fuzzer's three gating axes and whose
+README diff is **136 insertions and 136 deletions**. That number is the whole tell: a documentation
+edit does not rewrite every line in a file, and a whole-file re-encode rewrites exactly the lines
+with a non-ASCII character on them. Nothing in the diff review asked why an unrelated change touched
+136 lines.
+
+**The repair had a wrinkle worth recording**, because the obvious method fails. Decoding the whole
+file back through Windows-1252 dies on the first character that was never damaged — nineteen em
+dashes had survived, added by later edits, so the file was **mixed**. What works is undoing the round
+trip one run at a time: take each character back to the byte Windows-1252 would have decoded it from,
+and accept the run only when those bytes form a character. Ten distinct mappings covered all 174.
+
+The proof the repair changed nothing but encoding: 840 lines before and after, 135 lines differing,
+and on every one of them the ASCII skeleton byte-identical. Non-ASCII characters went 467 → 175,
+which is exactly the arithmetic of collapsing each run to the character it was.
+
+**Why no check could see it is the finding.** `tests/documented.rs` reads two things: the digits after
+a `count:` marker, and the names inside backticks. Both are ASCII. So a document may rot in every
+character those two do not read and pass the suite whose entire purpose is keeping documents honest —
+`notes/CLAIMS.md`'s subject arriving inside the file that implements it.
+
+It is a fourth claim in that file now, and it detects the *cause* rather than a list of known-bad
+sequences, so damage this repository has not met yet is covered too. It reads `.rs` as readily as
+`.md`: the editor that did this has no opinion about extensions.
+
+### The validator was not installed on the machine with the GPUs, and the fallback pointed at a drive that is gone
+
+One `cargo test -p runner` printed **631 skips**, every one `spirv-val not found (set SPIRV_VAL)`.
+The workstation — two GPUs, the only place widths 32 and 64 run at all — had never validated a
+module. `decisions/DR-0010` says so about itself, in a *What is not verified here* section written
+five days earlier and read by nobody since.
+
+`tests/common/spirv_val.rs` fell back to `H:\tools\spirv-tools\install\bin\spirv-val.exe`. There is
+no `H:` on this machine. So "look in the usual place" had meant "find nothing" for however long the
+letter had been wrong.
+
+**Two lines above that fallback is a doc comment about exactly this failure.** It explains at length
+that a `SPIRV_VAL` pointing at nothing used to return `None`, that every caller reads `None` as "not
+installed", and that a typo therefore turned off validation in both test trees while leaving a green
+run behind — which is why a set-and-wrong path is now a panic. The file had learnt the lesson for the
+environment variable and kept a hard-coded absolute path immediately underneath it.
+
+It searches `PATH` now. That is the usual place, it costs the same lookup, and it does not have an
+opinion about which drive a toolchain lives on.
+
+With the validator present: **482 emitter tests and 395 runner tests, with no skips at all**, and all
+631 modules legal. That they were legal is the answer and not the point. The point is that nothing
+had asked, on the machine where widths 32 and 64 are the only thing anybody can ask on.
+
+### Five instructions and two loops that had never run
+
+`f_sub`, `f_div`, `f_negate`, `i_sub` and `u_div` were added on 2026-08-18 for an activation and for
+the arithmetic that says which of a batch a lane is working on. A week later they had **one consumer
+between them**: `tests/instructions.rs`, which builds one module and hands it to `spirv-val`.
+`Kernel::repeat_rolled` and `repeat_rolled_many`, added the next day, had their unit tests and
+`tests/control_flow.rs` and no dispatch anywhere.
+
+Both passed `every_public_operation_has_a_consumer_outside_its_own_file`, because a test *is* a
+consumer — deliberately, and for a good reason stated where the check is written. The gap is one the
+check was never asked to close: an operation whose only consumer is the test written to satisfy it.
+
+**And the validator is a weaker witness here than anywhere else in this tree.** `decisions/DR-0001`
+already says why: an opcode number read wrong assembles into a *different well-formed instruction*.
+`OpFNegate` at the wrong number produces a module `spirv-val` accepts. The only thing that can tell
+a negation from something else is an answer.
+
+`runner/src/kernels/unrun.rs` — the module named for precisely this category — has four now. Each was
+built so its reference is exact rather than approximate, which is the bar `notes/NEXT.md` sets when it
+refuses to fuzz `sqrt` and `exp` for want of one:
+
+* **centre and scale** — `-((x - 8) / 4)`, an integer centre and a power-of-two divisor, so every
+  step is representable and the comparison is on bits with no epsilon.
+* **remainder** — `x - (x / 7) * 7`. Seven and not eight, so `OpUDiv` is a division rather than a
+  shift the driver folds away.
+* **a rolled loop that reaches a buffer** — `DR-0010`'s kernel, reading block `counter * 64` each
+  trip. A loop that re-read block zero every trip emits a valid module and returns a plausible
+  number.
+* **two running totals from one pass** — the workload `repeat_rolled_many`'s own doc comment names.
+  It stores the *difference* of the two, so a second phi wired to the first collapses the answer to
+  zero rather than passing.
+
+All four were **checked by breaking them**: an `f_sub` written as `f_add`, an `i_sub` as `i_add`, a
+loop whose every trip reads block zero, a second phi reading the first. Four mutations, four red
+tests, each for its own reason.
+
+They declare no subgroup capability and go through `whole_subgroup!`, so they run at every width and
+the per-width skip counts in `ci.yml` did not move. That was designed in rather than lucky: a test
+that skips at 4, 8 and 16 would have changed three numbers in a matrix and taught nobody anything.
+
+### The mutation gate had no configuration here, and four commits had not been through it
+
+`noha.yaml` is excluded by this machine's global gitignore — policy, deliberate, and the reason
+`tests/integrity.rs` skips four checks rather than panicking on a clone. What the policy says is that
+the file is never *committed*. It does not say the file should be *missing*, and it was.
+
+So the strongest instrument this repository has — `notes/CLAIMS.md` rates it first, at 100% over 651
+mutants — could not run, and had not run over the four commits between 2026-08-16 and 2026-08-19.
+
+Rebuilt by **generating the source list from the tree minus `NOT_MUTATED`**, which is the only honest
+way to do it: a hand-typed list that nothing compares against reality is the exact drift those tests
+exist to catch, and `noha.yaml` listing 33 of 38 sources is the failure `tests/integrity.rs` was
+written after. 94 targets, 15 excused FFI files, all 17 integrity checks running with no skips.
+
+One thing was easy to get wrong and is worth stating: `test:` has to be the **whole workspace**. A
+mutant in `runner/src` is killed only by the device suite, and a root `cargo test` runs the emitter
+alone — so every runner mutant would survive, and the emitter's real score would be buried under
+them. A gate that reds for the wrong reason teaches everyone to ignore red, which is the argument
+`ci.yml` already makes about `session.rs` and a shared runner's wall clock.
+
+The diff-scoped run over all four commits and the audit's own work: **10 viable mutants, 10 killed,
+no survivors**.
+
+### What the four have in common, which is the actual finding
+
+None of them was a claim without an instrument. Every one was an instrument that had stopped
+reaching its subject:
+
+| instrument | still ran | had stopped touching |
+| --- | --- | --- |
+| `tests/documented.rs` | every push | any character outside ASCII |
+| `spirv-val` | in CI | this machine, for 631 modules |
+| `every_public_operation_has_a_consumer` | every push | whether the consumer runs |
+| the mutation gate | in principle | this checkout, for four commits |
+
+This project is unusually good at asking whether a claim has something behind it. What it had not
+asked is whether the things behind its claims still touch what they are supposed to — a different
+question, and on this evidence the one with more in it.
+
+**And a candidate the audit could not close.** Nothing here checks that a test which is supposed to
+run actually ran. `ci.yml`'s lavapipe job asserts a skip count per width and is the only place in the
+tree that does; it is also why the CI numbers are trustworthy and the workstation's were not. 631
+skips on a workstation looked exactly like a clean run, and a `--nocapture` flag added months ago for
+this precise reason was not enough, because nobody reads 631 lines of a passing run.

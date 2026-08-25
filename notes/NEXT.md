@@ -1596,3 +1596,132 @@ needed splitting and the other eight named as candidates did not.
    changes mid-program, which is the first step that does not fit the generator's single-accumulator
    line.
 4. **The batch API still has no caller**, and the sandbox that was one was deleted on purpose.
+## Where the work goes now — 2026-08-25, after an audit rather than a feature
+
+Nine days without a list, and four commits of feature work in them: the five arithmetic
+instructions on 2026-08-18, `Kernel::repeat_rolled` and its many-carry form on 2026-08-19, and
+`decisions/DR-0010` recording the second. None of that reached this file, which is the smallest of
+the five things the audit found and the one that hid the other four — a list that stops being
+written is a list that stops being read against.
+
+**Four of the five were an instrument that had quietly stopped reaching its subject.** That is the
+same shape `notes/CLAIMS.md` is about, four times over, and it is worth stating as the finding
+rather than as four repairs.
+
+### Tier 1 — found and closed, 2026-08-25
+
+**1. `README.md` had been mojibake for nine days, and nothing here could see it.** One edit on
+2026-08-16 round-tripped the file through Windows-1252: 174 sequences over 134 of its 840 lines, so
+every em dash arrived as three characters and every micro sign as two, on the front page. The
+damage is described rather than quoted here for the reason `notes/FINDINGS.md` gives at length:
+this file is one the new check reads, and an example would be an instance.
+
+The commit that did it shows **136 insertions and 136 deletions** in a diff whose message is about
+the fuzzer's gating, which is what a whole-file re-encode looks like when nobody is looking for one.
+It survived eight commits.
+
+The repair was mechanical and is worth writing down as a method rather than an outcome, because the
+file was **mixed** — nineteen em dashes had survived, added by later edits — so decoding the whole
+thing again fails on the first character that was never damaged. What works is undoing the round
+trip *per run*: take each character back to the byte Windows-1252 would have decoded it from, and
+accept the run only when those bytes form a character. 840 lines before and after, and the ASCII
+skeleton of every changed line identical — which is the proof that only the encoding moved.
+
+**Why nothing caught it is the part worth keeping.** `tests/documented.rs` checks the numbers a
+document states and the backticked names it uses. Both are ASCII. A document can therefore rot in
+every character those two do not read and pass the suite written to keep it honest.
+`every_document_is_the_text_it_was_written_as` is the fourth claim in that file now, and it reaches
+`.rs` as well as `.md`: the editor that did this has no opinion about extensions, and a doc comment
+carries the same punctuation as a paragraph.
+
+**2. `spirv-val` was not installed on the machine with the GPUs, and the fallback pointed at a
+drive that is not mounted.** One runner sweep printed **631 skips**, every one of them
+`spirv-val not found`. So the workstation — the only place widths 32 and 64 run at all — had never
+validated a module, and `decisions/DR-0010` says so about itself in its *What is not verified here*
+section.
+
+`tests/common/spirv_val.rs` read `H:\tools\spirv-tools\install\bin\spirv-val.exe` when `SPIRV_VAL`
+was unset. There is no `H:` here. So "look in the usual place" had meant "find nothing" for as long
+as the letter had been wrong, two lines under a doc comment about exactly that failure — the file
+already knew a set-and-wrong path is worse than an unset one, and had a hard-coded one of its own.
+The fallback searches `PATH` now, which is the usual place and cannot go stale when a drive is
+remounted or a checkout moves.
+
+With the validator present the two suites come to **395 and 482 with no skips at all**, and every
+one of those 631 modules is legal — which is the answer rather than the point. The point is that
+nothing had asked, on the machine where it mattered most.
+
+**3. The five arithmetic instructions and the two rolled loops had never run.** `f_sub`, `f_div`,
+`f_negate`, `i_sub` and `u_div` had **one consumer between them** — `tests/instructions.rs`, which
+builds one module and hands it to `spirv-val`. `Kernel::repeat_rolled` and `repeat_rolled_many` had
+their own unit tests and `tests/control_flow.rs`, and no dispatch.
+
+Both passed `every_public_operation_has_a_consumer_outside_its_own_file`, because a test is a
+consumer. That is the check doing exactly what it says, and the gap is one it was never asked to
+close: an operation whose only consumer is the test written to satisfy it. `decisions/DR-0009`'s
+territory, and the record `notes/CLAIMS.md` lists as backed by nothing.
+
+The validator is a weaker witness for these than for anything else in the tree, and `DR-0001` says
+why: an opcode number read wrong assembles into a **different well-formed instruction**. `OpFNegate`
+at the wrong number is still a valid module. Four kernels in `runner/src/kernels/unrun.rs` run them
+now — a centre-and-scale whose every step is exact so the comparison is on bits, a remainder written
+as the divide, multiply and subtract it actually is, a rolled loop reading a different block of a
+buffer each trip, and two running totals out of one pass whose difference is stored so that both
+phis are load-bearing. Each was **checked by breaking it**: an `f_sub` written as an `f_add`, an
+`i_sub` as an `i_add`, a loop whose every trip reads block zero, a second phi wired to the first.
+Four mutations, four red tests, each for its own reason.
+
+They declare no subgroup capability and are built through `whole_subgroup!`, so they run at every
+width and the per-width skip counts in `ci.yml` are unchanged. That was a design constraint rather
+than a happy result: a test that skips at 4, 8 and 16 would have moved three numbers in a matrix and
+taught nobody anything.
+
+**4. The mutation gate could not run from this checkout, and the four commits above had not been
+through it.** `noha.yaml` is excluded by this machine's global gitignore — policy, deliberate, and
+the reason `tests/integrity.rs` skips four checks rather than panicking. What the policy does not
+say is that the file should be *absent*, only that it is never committed, and it was absent.
+
+Rebuilt from the tree: the source list is generated as everything under `src/`, `runner/src/` and
+`cli/src/` minus `NOT_MUTATED`, so the two agree by construction rather than by hand — 94 targets
+over 15 excused FFI files. Generating one list from the other is the only honest way to rebuild it,
+because a hand-typed list that nothing compares against reality is the drift those tests exist to
+catch. All 17 integrity checks run here now, with no skips.
+
+`test:` is the **whole workspace** and not the root, which is the one thing easy to get wrong: a
+mutant in `runner/src` is only killed by the device suite, and a root `cargo test` runs the emitter
+alone — so every runner mutant would survive and bury the emitter's real score underneath them.
+
+**5. This file was nine days stale**, which is the entry you are reading.
+
+### Tier 2 — carried over, unchanged and still right
+
+None of the four the audit inherited was closed by it, and none was made easier.
+
+**6. The examples still run nowhere but a workstation.** `notes/CLAIMS.md` item 3: seventeen
+programs that compile in CI and are never run there, sixteen of which need a device. The nightly
+liveness job runs them; a push does not. What stops it being one step is unchanged — nobody has
+measured what those sixteen cost on a software rasteriser at four lanes.
+
+**7. The mapping relationship is still only half mechanised.** `Mapping::of` is the single runtime
+rule and the fuzzer asserts it takes its mapping from there. What no check asserts is the *absence*
+of a fourth copy, and this file has paid for that three times.
+
+**8. The dot products have no generated coverage.** `runner/tests/mappings.rs` holds the twelve
+combinations; no generated program has ever put a rotate and a rolled loop around one. The blocker
+is unchanged and real: the input is four bytes in a word and the accumulator's type changes
+mid-program, which is the first step that does not fit the generator's single-accumulator line.
+
+**9. The batch API still has no caller**, and the sandbox that was one was deleted on purpose.
+
+### What this list is asking the next one
+
+Every one of the four instruments that had failed was **reporting green while reaching nothing**: a
+skip nobody counted, a path on a drive that had gone, a check whose alphabet excluded the damage, a
+config whose absence was a shrug. This repository is unusually good at noticing that a *claim* has
+no instrument. What it had not done is ask, of the instruments it already has, **whether each one
+still touches its subject** — which is a different question and, on this evidence, the one with more
+in it.
+
+A candidate for the next sitting, in that spirit: nothing here checks that a test which is *supposed*
+to run actually ran. The lavapipe job asserts a skip count per width and is the only place in the
+tree that does. The workstation asserts nothing of the kind, which is how 631 of them went unnoticed.
