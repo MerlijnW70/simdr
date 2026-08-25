@@ -73,6 +73,32 @@ pipelines.
 The premise was wrong in a way worth stating plainly: one module per parameter value is **cheap**.
 One *pipeline* per parameter value is not, and no specialization constant makes it less so.
 
+> **Re-measured 2026-08-25, on two devices, and the 9.7% is now a loss on both.** The RTX 4080 the
+> table above was taken on is no longer in the machine. Re-run on what is:
+>
+> | device | fourteen modules → fourteen pipelines | one module → fourteen pipelines | specializing gives |
+> | --- | --- | --- | --- |
+> | RTX 4080 (above, kept for the record) | 809.6 µs | 793.0 µs | **+9.7%** |
+> | RTX 5060 Ti (width 32) | 1313.4 µs | 2974.3 µs | **−126.5%** |
+> | integrated Radeon (width 64) | 1271.4 µs | 1872.1 µs | **−47.2%** |
+>
+> Two independent drivers, the same sign, and one of them more than doubles the setup it was
+> supposed to shave. Specializing a module is not free to *compile*: the driver sees a new constant
+> and re-specializes the shader per pipeline, and on these two it re-specializes for more than the
+> module emission it saves — 20.1 µs and 17.6 µs a fold, against hundreds.
+>
+> **The decision does not move, and it is worth being clear that it never rested on this number.**
+> The argument is that a specialization constant is fixed *at* pipeline creation, so fourteen
+> values need fourteen pipelines however few modules they came from. That is structural and holds
+> at any sign. What changed is that the measurement underneath it stopped being a small win and
+> became a large loss — so the sentence "specializing removes 9.7% of the setup" is now true of one
+> device that is gone and false of both that are here.
+>
+> The 9.7% row is kept rather than replaced, because a decision record that quietly restates its
+> evidence teaches nobody that evidence moves under it. `runner/examples/specialize.rs` prints
+> today's number on whatever runs it; it needs no edit, and it reported the loss as
+> `removes -126.5%` without being asked to.
+
 > **Corrected 2026-08-12, later the same day.** This table first read 485.5 µs per pipeline and
 > "saves 1.0%". Both numbers were wrong. The probe took one module and allocated two buffers *per
 > call*, so what it reported was pipeline creation plus two allocations — and allocation is the

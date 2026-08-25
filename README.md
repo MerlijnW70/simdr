@@ -85,7 +85,7 @@ emitted. `Lanes::new` therefore takes the width, and the caller reads it off the
 
 That reason is narrower than the one this file used to give. `ClusterSize` *can* be deferred to
 pipeline creation â€” a specialization constant is a constant instruction, the validator accepts one
-there and an RTX 4080 runs it at 4, 8 and 16 from a single module. What cannot be deferred is the
+there and the discrete card ran it at 4, 8 and 16 from a single module. What cannot be deferred is the
 choice of *shape*. `decisions/DR-0005` records the experiment; DR-0002 carries the correction.
 
 | `N` vs width | mapping | a reduction | a scan | a shuffle |
@@ -519,10 +519,26 @@ page: a list beside a directory, and only the directory kept growing.
 To run any of it against a different device:
 
 ```powershell
-simdr list                      # NVIDIA GeForce RTX 4080 / AMD Radeon(TM) Graphics
+simdr list                      # NVIDIA GeForce RTX 5060 Ti / AMD Radeon(TM) Graphics
 $env:SIMDR_DEVICE = "radeon"    # substring, case-insensitive
 cargo test --workspace          # the whole suite, now on a 64-wide subgroup
 ```
+
+> **The discrete card changed on 2026-08-25, and every number on this page predates it.** It was an
+> RTX 4080; it is an RTX 5060 Ti. Nothing on this page has been rewritten to match, because the
+> measurements *were* taken on a 4080 and relabelling them would make them lies rather than
+> history. Read every "on an RTX 4080" here as "on the card that used to be in this machine".
+>
+> All sixteen examples were re-run on both current devices that day and the results are in
+> `notes/FINDINGS.md`. The shape of every conclusion survived — strip mining wins, the two ends are
+> the scan, the round trip is a fixed cost, `Reducer` beats `Gpu::sum` — and the host side is
+> uniformly more expensive here, so the ratios that compare device time against host time all move
+> the same way. **One conclusion inverted**: `decisions/DR-0005`'s 9.7% saving from specializing is
+> a 126% *loss* on the 5060 Ti and a 47% loss on the Radeon. That record carries the correction.
+>
+> Four of the sixteen — `bench`, `nnue`, `sweep`, `bindings` — are written for a 32-wide subgroup
+> and skip on the Radeon. They have only ever run on the discrete card, which means they are the
+> four with no second device to check them against, and the card under them was swapped.
 
 **A name nothing here answers to fails the run**, and prints the names it could have matched. That
 is not the tidy-message change it sounds like: a mismatch used to be indistinguishable from having

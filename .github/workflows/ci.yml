@@ -6,7 +6,9 @@
 #
 # What does NOT run here, and is stated rather than implied:
 #
-#   * widths 32 and 64, which need the RTX 4080 and the integrated Radeon;
+#   * widths 32 and 64, which need the author's discrete NVIDIA card and the integrated Radeon
+#     (the discrete one was an RTX 4080 and is an RTX 5060 Ti since 2026-08-25 — named this way
+#     round because what CI cannot do is have *a* 32-wide device, not have that one);
 #   * the mutation gate, whose configuration is deliberately not in this repository — see
 #     `tests/integrity.rs`, whose config-dependent checks skip loudly when it is absent;
 #   * every measurement, none of which means anything on a shared runner.

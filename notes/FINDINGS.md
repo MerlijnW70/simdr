@@ -3960,3 +3960,122 @@ coordinates is uploaded, and the whole world comes out of the dispatch's own geo
 That is worth knowing about this API and is written down nowhere else — a splat of a *uniform*
 constant and a splat of a *per-invocation* built-in are the same call, and they are the difference
 between a flat field and a world.
+
+## The card changed and almost nothing else did — 2026-08-25
+
+`simdr list` reports an **RTX 5060 Ti**. Every measurement in this file, in `README.md`, in the
+decision records and in the source comments was taken on an **RTX 4080**, which is no longer in the
+machine. Nothing asserts against it — the suite is green and always was — so this was invisible
+until someone ran the examples and read the device line at the top of them.
+
+All sixteen examples re-run on both current devices, release, exit 0 on every one. Twelve of the
+sixteen run on the Radeon; four skip themselves, which is its own finding and is below.
+
+### What the numbers say, against what was written down
+
+| | RTX 4080 (recorded) | RTX 5060 Ti | integrated Radeon |
+| --- | --- | --- | --- |
+| round trip, 256 B, `Gpu::run` | ~807 µs | **1218 µs** | 2596 µs |
+| the same dispatch, amortised | 0.8 µs | 2.0 µs | 0.2 µs |
+| allocate + free, one buffer | ~310 µs | 1332 µs | 2923 µs |
+| `Reducer::sum` over 2²⁰ | ~280 µs | **733 µs** | 773 µs |
+| `Reducer::sum` against `Gpu::sum`, 2²⁰ | 2.2× (older code) | 16.3× | 4.9× |
+| NNUE, one evaluation waited on | ~940 µs | **4547 µs** | — skipped |
+| NNUE, batched peak | 766 M/s at 8192 | 248 M/s at 1024 | — skipped |
+| `i8` × 4 strips against `i32` | 6.45× | **7.12×** | 4.09× |
+| `OpSDot`, arithmetic-bound | — | 2.35× | **9.34×** |
+| scan: five middle passes / two ends | ~10 / 21 µs | 10.3 / 31.1 µs | 36.9 / 1048.3 µs |
+
+**Every conclusion in this file survived the swap except one.** Strip mining still wins and wins
+harder; the two ends are still the scan and the depth is still nearly free; the round trip is still
+a fixed cost that no kernel change touches; holding pipelines still beats rebuilding them by more
+than any algorithm here has ever bought. The shapes are intact.
+
+What moved is the *host* side, uniformly and by a lot. A submission and its fence priced at 56 µs
+on the 4080 prices at **1285 µs** here — and because so many ratios in this file are device time
+against host time, they all move the same way. That is why NNUE-in-search went from ~4700× behind
+one CPU thread to **22 733×**: the same answer, one digit worse, for a reason that is not the
+kernel.
+
+### The one that inverted: specializing is now a loss on both devices
+
+| device | 14 modules → 14 pipelines | 1 module → 14 pipelines | specializing gives |
+| --- | --- | --- | --- |
+| RTX 4080 (recorded) | 809.6 µs | 793.0 µs | **+9.7%** |
+| RTX 5060 Ti | 1313.4 µs | 2974.3 µs | **−126.5%** |
+| integrated Radeon | 1271.4 µs | 1872.1 µs | **−47.2%** |
+
+Two independent drivers, the same sign, and one of them more than doubles the setup the technique
+was supposed to shave. `decisions/DR-0005` carries the correction and keeps its old row rather than
+overwriting it. The *decision* does not move — a specialization constant is fixed at pipeline
+creation, so fourteen values need fourteen pipelines however few modules they came from, and that
+is structural at any sign — but the number under it is now true of a card that is gone and false of
+both that are here.
+
+`runner/examples/specialize.rs` needed no edit. It printed `Specializing removes -126.5% of the
+setup` on its own, because it was written to compute the difference rather than to report a saving.
+
+### The working-set cliff moved down, and the tempting explanation is one that was already refuted
+
+Four strips: 1024 GB/s at 8 MB, 1167 at 16 MB, **401 at 32 MB**. On the 4080 the collapse was past
+48 MB. The 5060 Ti has a 32 MB L2 and the cliff sits exactly there, which is the kind of tidy
+coincidence this file has been burned by before: the 4080's 64 MB L2 was offered as the explanation
+for *its* cliff and **refuted**, by running two kernels over the same working sets and watching them
+break in different places. So this is recorded as a cliff that moved, not as a cache that explains
+it. `sweep` flags four of its rows `!` on this device, and an unsteady row is not evidence of where
+a cliff is.
+
+### A diagnostic that outlived the code it was arguing about
+
+`runner/examples/memtypes.rs` printed "staging asks for `HOST_VISIBLE | HOST_COHERENT` and takes the
+first match — it gets type 2 (cached: false)". `Buffer::staging` stopped doing that when the ~370
+MB/s transfer rate was chased down: it calls `Buffer::preferring` with `HOST_CACHED` as a preferred
+flag and takes type 3. The example had reimplemented the *old* rule in its own `find` and gone on
+attributing it to the runner.
+
+`simdr probe` had the right answer the whole time, one command away, and the two disagreed in print
+on both devices. The example that motivates a fix is exactly the one nobody re-reads after the fix
+lands — it has no test, its output is prose, and prose does not fail a gate. Corrected, and it now
+states what it can and cannot see: `memory_type` also filters by the buffer's own
+`memory_type_bits`, which needs a buffer this example does not build, so its line is what the crate
+*asks for* and not a promise about where the allocation landed.
+
+### Four examples have only ever run on one device, and that device was swapped
+
+`bench`, `nnue`, `sweep` and `bindings` print "written for a 32-wide subgroup; skipping" on the
+Radeon. They skip loudly, which is the design and is right. The consequence is not: those four are
+the ones with no second device to check them against, and they are the ones whose hardware changed
+underneath them. Nothing was found wrong with them. It is worth knowing that nothing *could* have
+been.
+
+### And a 12% finding that was one unrepeated sample
+
+Reading the first Radeon `occupancy` run off the screen produced this claim: `WORKGROUP_SIZE` is 64,
+that is exactly one subgroup on a 64-wide device, one subgroup is the worst column in all six rows,
+and the reduction leaves 12-20% on the table. It was written down and reported as a finding.
+
+It is wrong. This file already had the sweep, at line 1259, saying the Radeon's best is **1
+subgroup** with a spread of 1.07× — and five repeats agree with the file and not with the claim:
+
+| repeat | 1 | 2 | 4 | 8 | 16 |
+| --- | --- | --- | --- | --- | --- |
+| elementwise | 57.11 | 58.47 | 59.51 | 59.72 | 61.64 |
+| | 59.11 | 60.20 | 60.75 | 61.74 | 63.85 |
+| | 58.50 | 59.52 | 60.31 | 61.98 | 62.92 |
+| | 58.65 | 60.04 | 60.22 | 60.52 | 63.49 |
+| | 62.78 | 63.67 | 60.25 | 66.23 | 74.68 |
+
+One subgroup is the best column in four of the five, and the reduction row wanders by more than any
+difference between its columns. The constant does not move, for the reason `decisions` and this file
+both already gave: the two devices want opposite things and within a device the answer depends on
+whether the kernel is memory-bound.
+
+**The fix is not to the constant. It is to the example.** `occupancy.rs` was the only measurement
+here that ran each cell **once** and printed it bare. `sweep`, `nnue` and `reducer` all repeat and
+all mark rows whose repeats disagree, and none of them could have produced this mistake. It now
+takes the median of five and marks unsteady cells with `!` — and the first cell it marks is the
+reduction at one subgroup, the exact number that was quoted.
+
+A table without spreads is an invitation, and the person it misled had written the sentence "a
+survivor is only a finding if it reproduces" into `noha.yaml` four lines from where they were
+working.

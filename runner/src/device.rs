@@ -17,8 +17,8 @@ use std::ffi::{CStr, c_char};
 ///
 /// `subgroup_size` is the number the whole project turns on: it is how many lanes a `Simd<T, N>`
 /// can map onto, it is decided by the implementation rather than by us, and it is only knowable at
-/// runtime. Measured here: 32 on an NVIDIA RTX 4080, 64 on an integrated AMD Radeon, and 8 on
-/// Mesa's lavapipe, which runs on the CPU.
+/// runtime. Measured here: 32 on an NVIDIA RTX 4080 and again on the RTX 5060 Ti that replaced it,
+/// 64 on an integrated AMD Radeon, and 8 on Mesa's lavapipe, which runs on the CPU.
 #[derive(Debug, Clone)]
 pub struct Limits {
     /// The device's own name, as the driver spells it.
