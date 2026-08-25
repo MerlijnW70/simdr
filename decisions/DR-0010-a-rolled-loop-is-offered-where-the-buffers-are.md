@@ -50,19 +50,29 @@ workgroup count.
 
 ## What enforces this
 
-**A unit test, and only for the shape.** `src/kernel/mod.rs` builds a rolled loop whose body loads
-from a buffer and asserts the decoded module has one merge, two phis and *one* body — which is what
-says the loop rolled rather than unrolled, and that the body reached a binding at all. The existing
-tests in `src/lanes/loops.rs` assert the lane version's words instruction for instruction, so a
-change that made the generic routine emit something different would fail there.
+**A unit test for the shape, and — since 2026-08-25 — the validator and a device.**
+`src/kernel/mod.rs` builds a rolled loop whose body loads from a buffer and asserts the decoded
+module has one merge, two phis and *one* body, which is what says the loop rolled rather than
+unrolled and that the body reached a binding at all. The existing tests in `src/lanes/loops.rs`
+assert the lane version's words instruction for instruction, so a change that made the generic
+routine emit something different would fail there.
+
+`runner/tests/validated.rs` hands `rolled_block_sum` and `rolled_weighted_totals` to `spirv-val` at
+all five widths, and `runner/tests/unrun.rs` dispatches both. That matters more here than for most
+kernels: a block order this record calls exacting is the arrangement the validator has the
+strongest opinion about, and an `OpPhi` naming the wrong predecessor is *valid* and then reads from
+an edge that never carried it. The device test was checked by breaking it in both ways — a body
+whose every trip reads block zero, and a second phi wired to the first.
 
 Nothing enforces that the two hosts stay in step, because there is nothing to enforce: they are one
 routine, which is the point of the record.
 
-## What is not verified here
+## What was not verified here, and now is
 
-That the emitted loop is valid SPIR-V, on this machine. `spirv-val` is not installed on it, so
-`tests/control_flow.rs` skips — the two tests added there assert the module builds, and the unit test
-in `src/kernel/mod.rs` decodes it and asserts one body, one merge and two phis. The validator and a
-real dispatch are what would settle it, and the downstream engine's device tests are where that
-happens first.
+**This section used to say the loop had never met a validator, and it was right for five days.**
+`spirv-val` was not installed on this machine, so `tests/control_flow.rs` skipped — one of 631 skips
+in a single runner sweep, none of which anybody counted. The record was honest about its own gap and
+the gap outlived the record's readers, which is the argument for writing these sections at all.
+
+The validator is installed now and the fallback that pointed at an unmounted drive searches `PATH`
+instead. `notes/FINDINGS.md`, 2026-08-25, has what that turned up.

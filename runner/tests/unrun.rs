@@ -6,6 +6,13 @@
 //! A unit test here decodes the emitted module and agrees that the emitter emitted what the test
 //! expected. That is a check on one author's understanding against itself. `reduce_min` passed
 //! seven of them while folding its strips with a maximum.
+//!
+//! **And four more, from a sweep that asked the question of the tree rather than of the lane API.**
+//! The five arithmetic instructions added on 2026-08-18 and the two rolled loops added on 2026-08-19
+//! reached a device nowhere: their only consumers were tests in the emitter, which build a module
+//! and hand it to `spirv-val`. Every one of the four tests below was checked by breaking the kernel
+//! it covers — an `f_sub` written as an `f_add`, an `i_sub` as an `i_add`, a loop whose every trip
+//! reads block zero, a second phi wired to the first — and each one goes red for its own reason.
 
 mod common;
 
@@ -538,4 +545,193 @@ fn a_rotate_wraps_inside_its_own_vector_where_a_shift_would_not() {
             "a rotate of {delta} inside every {cluster}-lane vector"
         );
     }
+}
+
+/// How many blocks the two rolled-loop kernels below read.
+///
+/// Four rather than two: a loop that runs once too few or once too many is off by a whole block,
+/// and at two trips that is half the answer and hard to tell from a wrong initial value.
+const BLOCKS: u32 = 4;
+
+/// `blocks * 64` values where a block's contribution and a lane's are separable.
+///
+/// Element `block * 64 + lane` is `(block + 1) * 1000 + lane`, so a sum that dropped a block is a
+/// round number away from the right one and a sum that read the wrong lane is not. A ramp would
+/// have neither property: every block would look like every other, shifted.
+fn blocks(count: u32) -> Vec<u32> {
+    (0..count)
+        .flat_map(|block| (0..WORKGROUP_SIZE).map(move |lane| (block + 1) * 1000 + lane))
+        .collect()
+}
+
+#[test]
+fn the_activation_arithmetic_agrees_with_the_host_bit_for_bit() {
+    // `f_sub`, `f_div` and `f_negate` had one consumer between them for a week — a test in the
+    // emitter that hands one module to `spirv-val`. That says the words are legal. It cannot say
+    // that `OpFNegate` negates, because a wrong opcode number is a *different well-formed
+    // instruction* and the validator accepts it.
+    let Some(gpu) = device("centre-and-scale") else {
+        return;
+    };
+    let width = gpu.limits().subgroup_size;
+
+    // An integer centre and a power-of-two scale, so every step is exact and the comparison can be
+    // on bits rather than within a tolerance.
+    let centre = 8.0_f32;
+    let scale = 4.0_f32;
+
+    let spirv = kernels::centre_and_scale(width, centre, scale).expect("built");
+    if !runnable(&gpu, "centre-and-scale", &[&spirv]) {
+        return;
+    }
+
+    let input: Vec<f32> = (0..WORKGROUP_SIZE).map(|index| index as f32).collect();
+    let output = gpu.run(&spirv, &input, 1).expect("dispatched");
+
+    let expected: Vec<f32> = input
+        .iter()
+        .map(|value| -((value - centre) / scale))
+        .collect();
+
+    let bits = |values: &[f32]| {
+        values
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<u32>>()
+    };
+    assert_eq!(
+        bits(&output),
+        bits(&expected),
+        "the three instructions do not compose into the expression they were added for"
+    );
+
+    // And the discriminators, so a failure says which of the three went wrong rather than that the
+    // vector differs. Each names a lane whose answer only one instruction can produce.
+    assert_eq!(output.first(), Some(&2.0), "in[0] = 0: -((0 - 8) / 4) = 2");
+    assert_eq!(
+        output.get(8),
+        Some(&-0.0),
+        "in[8] is the centre, so the subtraction is zero and the negation is what makes it -0.0"
+    );
+    assert_eq!(output.get(12), Some(&-1.0), "in[12]: -((12 - 8) / 4) = -1");
+}
+
+#[test]
+fn a_remainder_written_as_divide_multiply_subtract_is_a_remainder() {
+    // This crate emits no `OpUMod`. `u_div` and `i_sub` were added for the arithmetic that says
+    // which of a batch a lane is working on, and this is that arithmetic run.
+    let Some(gpu) = device("remainder") else {
+        return;
+    };
+    let width = gpu.limits().subgroup_size;
+
+    // Seven: not a power of two, so the division cannot be folded into a shift and what runs is
+    // `OpUDiv` itself.
+    let divisor = 7;
+
+    let spirv = kernels::remainder(width, divisor).expect("built");
+    if !runnable(&gpu, "remainder", &[&spirv]) {
+        return;
+    }
+
+    let input: Vec<u32> = (0..WORKGROUP_SIZE).collect();
+    let output = gpu.run_u32(&spirv, &input, 1).expect("dispatched");
+
+    let expected: Vec<u32> = input.iter().map(|value| value % divisor).collect();
+    assert_eq!(
+        output, expected,
+        "x - (x / d) * d is not x % d on this device"
+    );
+
+    // The identity is exact for every input, so the interesting lanes are the ones where the
+    // division is not the whole story: a multiple of seven must come back zero, and the value
+    // before it must come back six.
+    assert_eq!(output.get(21), Some(&0), "21 is three sevens exactly");
+    assert_eq!(output.get(20), Some(&6));
+}
+
+#[test]
+fn a_rolled_loop_reads_a_different_block_each_trip() {
+    // `decisions/DR-0010`'s kernel, and the thing that record says is not verified: *"That the
+    // emitted loop is valid SPIR-V, on this machine... The validator and a real dispatch are what
+    // would settle it."* This is the dispatch.
+    let Some(gpu) = device("rolled-block-sum") else {
+        return;
+    };
+    let width = gpu.limits().subgroup_size;
+
+    let spirv = kernels::rolled_block_sum(width, BLOCKS).expect("built");
+    if !runnable(&gpu, "rolled-block-sum", &[&spirv]) {
+        return;
+    }
+
+    let input = blocks(BLOCKS);
+    let output = gpu.run_u32(&spirv, &input, 1).expect("dispatched");
+
+    // One value per invocation, so only the first workgroup's worth of the output is this kernel's
+    // — the rest of the buffer is whatever the device's memory held. `Gpu::run` says so.
+    let lanes = WORKGROUP_SIZE as usize;
+    let expected: Vec<u32> = (0..WORKGROUP_SIZE)
+        .map(|lane| {
+            (0..BLOCKS)
+                .map(|block| input[(block * WORKGROUP_SIZE + lane) as usize])
+                .sum()
+        })
+        .collect();
+
+    assert_eq!(
+        output.get(..lanes),
+        Some(expected.as_slice()),
+        "the loop did not read a different block on each trip"
+    );
+
+    // The two ways this fails while validating, named apart. A body that re-read block zero every
+    // trip returns four times the first block; a counter stepped in the header rather than the
+    // continue block skips block zero and reads one past the end.
+    let first_block: u32 = input.first().copied().expect("the input is not empty");
+    assert_ne!(
+        output.first(),
+        Some(&(BLOCKS * first_block)),
+        "every trip read block zero — the counter phi is not reaching the address"
+    );
+}
+
+#[test]
+fn two_running_totals_come_out_of_one_pass() {
+    // `Kernel::repeat_rolled_many`, whose only consumers were its own unit tests. Those assert the
+    // decoded module holds two `OpPhi` instructions, which is true of a loop that carries the wrong
+    // value on either back edge.
+    let Some(gpu) = device("rolled-weighted-totals") else {
+        return;
+    };
+    let width = gpu.limits().subgroup_size;
+
+    let spirv = kernels::rolled_weighted_totals(width, BLOCKS).expect("built");
+    if !runnable(&gpu, "rolled-weighted-totals", &[&spirv]) {
+        return;
+    }
+
+    let input = blocks(BLOCKS);
+    let output = gpu.run_u32(&spirv, &input, 1).expect("dispatched");
+
+    // The kernel keeps a plain total and one weighted by `block + 1` and stores the difference,
+    // which is the plain total weighted by `block`.
+    let lanes = WORKGROUP_SIZE as usize;
+    let expected: Vec<u32> = (0..WORKGROUP_SIZE)
+        .map(|lane| {
+            (0..BLOCKS)
+                .map(|block| block * input[(block * WORKGROUP_SIZE + lane) as usize])
+                .sum()
+        })
+        .collect();
+
+    assert_eq!(
+        output.get(..lanes),
+        Some(expected.as_slice()),
+        "the two carried totals did not both survive the loop"
+    );
+
+    // A second phi wired to the first would make the difference zero, which is the failure the
+    // subtraction exists to expose and the one a single-total kernel could not have.
+    assert_ne!(output.first(), Some(&0), "the two totals came out equal");
 }

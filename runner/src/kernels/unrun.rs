@@ -10,6 +10,23 @@
 //! seven passing unit tests, and only a differential run against a CPU reference noticed.
 //!
 //! Everything here exists to be executed and compared.
+//!
+//! # It stopped being only the lane API, and the reason is the same one
+//!
+//! A second sweep on 2026-08-25 asked the question of the whole tree rather than of `src/lanes/`,
+//! and found the shape one layer down and one layer up. `f_sub`, `f_div`, `f_negate`, `i_sub` and
+//! `u_div` — added a week earlier for an activation and for the arithmetic that says which of a
+//! batch a lane is working on — had **one consumer between them**, a test in the emitter that
+//! hands one module to `spirv-val`. `Kernel::repeat_rolled` and `repeat_rolled_many` had their own
+//! unit tests and `tests/control_flow.rs`, and nothing that ran.
+//!
+//! Both passed `tests/integrity.rs`'s check that every public operation is named outside its own
+//! file, because a test is a consumer. That is the check doing what it says; it is also exactly the
+//! gap this module is named after, so the answer was to widen the module rather than the check.
+//!
+//! The validator is a weaker witness here than anywhere else in this tree, and `decisions/DR-0001`
+//! says why: an opcode number read wrong assembles into a *different well-formed instruction*.
+//! `spirv-val` accepts it. Only an answer compared against a host reference does not.
 
 use super::{shape, whole_subgroup, whole_subgroup_of};
 use simdr::kernel::Kernel;
@@ -402,4 +419,219 @@ pub fn shift_down<T: Element>(subgroup: u32, delta: u32) -> Result<Vec<u32>, Lan
 /// [`LaneError`] if the module cannot be built, or the width is neither 32 nor 64.
 pub fn shift_up<T: Element>(subgroup: u32, delta: u32) -> Result<Vec<u32>, LaneError> {
     whole_subgroup_of!(T, subgroup, shift_up_at, delta)
+}
+
+/// `out[i] = -((in[i] - centre) / scale)` — the three instructions an activation needs.
+///
+/// `f_sub`, `f_div` and `f_negate` arrived together on 2026-08-18 because a layer that centres its
+/// input, scales it and flips the sign needs all three, and for a week afterwards the only thing
+/// that named any of them was `tests/instructions.rs`. That is one module handed to `spirv-val`:
+/// evidence that the words are legal, and none at all that `OpFNegate` negates. A wrong opcode
+/// number here assembles into a *different well-formed instruction* — which is the failure
+/// `decisions/DR-0001` is about, and the validator cannot see it.
+///
+/// **Exact by construction rather than by tolerance.** `centre` is an integer and `scale` a power
+/// of two, so every step is representable: the subtraction of small integers is exact, a division
+/// by a power of two moves the exponent and nothing else, and a negation flips one bit. The host
+/// computes the same expression and the two are compared for equality — no epsilon, which is the
+/// bar `notes/NEXT.md` sets when it refuses to fuzz `sqrt` and `exp` for want of one.
+///
+/// # Errors
+///
+/// [`LaneError`] if the module cannot be built.
+fn centre_and_scale_at<const LANES: u32>(
+    subgroup: u32,
+    centre: f32,
+    scale: f32,
+) -> Result<Vec<u32>, LaneError> {
+    use simdr::lanes::F32;
+
+    let mut kernel = Kernel::<F32>::new(shape(subgroup))?;
+    let element = kernel.element();
+    let value = kernel.load::<LANES>(0)?.id();
+
+    let middle = F32::constant_from_bits(kernel.module(), centre.to_bits())?;
+    let divisor = F32::constant_from_bits(kernel.module(), scale.to_bits())?;
+
+    let centred = kernel.module().f_sub(element, value, middle)?;
+    let scaled = kernel.module().f_div(element, centred, divisor)?;
+    let flipped = kernel.module().f_negate(element, scaled)?;
+
+    kernel.store_scalar(1, flipped)?;
+    kernel.finish()
+}
+
+/// `out[i] = in[i] % divisor`, spelled as the divide, multiply and subtract it actually is.
+///
+/// SPIR-V has `OpUMod`, and this crate does not emit it. `u_div` and `i_sub` were added for the
+/// arithmetic that says *which of a batch* a lane is working on, and a remainder written out of
+/// them is the shape that arithmetic takes: `x - (x / d) * d`.
+///
+/// **`divisor` is deliberately not a power of two.** Seven makes `OpUDiv` a real division rather
+/// than a shift the driver folds, so what runs is the instruction under test.
+///
+/// The identity holds exactly in integers for every input, which is what makes the host reference
+/// a `%` rather than an approximation of one.
+///
+/// # Errors
+///
+/// [`LaneError`] if the module cannot be built.
+fn remainder_at<const LANES: u32>(subgroup: u32, divisor: u32) -> Result<Vec<u32>, LaneError> {
+    use simdr::lanes::U32;
+
+    let mut kernel = Kernel::<U32>::new(shape(subgroup))?;
+    let element = kernel.element();
+    let value = kernel.load::<LANES>(0)?.id();
+
+    let by = kernel.module().constant_u32(divisor)?;
+    let whole = kernel.module().u_div(element, value, by)?;
+    let back = kernel.module().i_mul(element, whole, by)?;
+    let left = kernel.module().i_sub(element, value, back)?;
+
+    kernel.store_scalar(1, left)?;
+    kernel.finish()
+}
+
+/// `out[i] = Σ over `times` blocks of `in[block * 64 + i]` — a rolled loop that **reaches a buffer**.
+///
+/// The kernel `decisions/DR-0010` was written for, and the one that could not be built before it.
+/// `Lanes::repeat_rolled` hands its body a `Lanes`, which holds a module and a width and no
+/// bindings — so a rolled body could compute and could not *fetch*, and every kernel here unrolled
+/// its strips instead. `Kernel::repeat_rolled` hands the body the kernel, and this is the shape
+/// that difference exists for: one body, `times` trips, a different block of the buffer each time.
+///
+/// **What makes it a test rather than a demonstration.** The body is built once, so the offset it
+/// loads from is `counter * 64` where `counter` is the loop's own phi. A phi naming the wrong
+/// predecessor satisfies `spirv-val` and then reads from an edge that never carried it — so a loop
+/// that re-read block zero every trip, or stepped its counter in the header rather than the
+/// continue block, emits a valid module and returns `times * block[0]`. Only running it says which
+/// happened.
+///
+/// # Errors
+///
+/// [`LaneError`] if the module cannot be built.
+fn rolled_block_sum_at<const LANES: u32>(subgroup: u32, times: u32) -> Result<Vec<u32>, LaneError> {
+    use simdr::lanes::U32;
+
+    let mut kernel = Kernel::<U32>::new(shape(subgroup))?;
+    let element = kernel.element();
+    let uint = kernel.index_type();
+    let span = kernel.module().constant_u32(super::WORKGROUP_SIZE)?;
+    let nought = kernel.module().constant_u32(0)?;
+
+    let total = kernel.repeat_rolled(times, element, nought, |kernel, carried, counter| {
+        let offset = kernel.module().i_mul(uint, counter, span)?;
+        let block = kernel.load_offset_by::<LANES>(0, offset)?.id();
+        Ok(kernel.module().i_add(element, carried, block)?)
+    })?;
+
+    kernel.store_scalar(1, total)?;
+    kernel.finish()
+}
+
+/// `out[i] = Σ block * in[block * 64 + i]`, from two running totals in **one** pass over the input.
+///
+/// [`Kernel::repeat_rolled_many`]'s own documentation names this workload: *"a weighted sum over
+/// sixteen vectors reads its input sixteen times, which is a bandwidth problem rather than an
+/// arithmetic one"*. Carrying one value forces one loop per total; carrying two reads each block
+/// once and updates both.
+///
+/// The loop keeps a plain sum and a sum weighted by `block + 1`, and the answer stored is the
+/// difference — which reduces to a sum weighted by `block`, and is why the reference is one line.
+///
+/// **Both phis are load-bearing, and that is the point of subtracting them.** Storing the weighted
+/// total alone would pass with the plain one wired to anything at all; a wrong value on either back
+/// edge moves the difference. The emitter's own test for this shape asserts *two* `OpPhi`
+/// instructions and cannot say what either of them carries.
+///
+/// # Errors
+///
+/// [`LaneError::BadCarry`] if the body is handed a number of values it was not built for, which
+/// cannot happen here and is stated rather than unwrapped. [`LaneError`] otherwise.
+fn rolled_weighted_totals_at<const LANES: u32>(
+    subgroup: u32,
+    times: u32,
+) -> Result<Vec<u32>, LaneError> {
+    use simdr::lanes::U32;
+
+    let mut kernel = Kernel::<U32>::new(shape(subgroup))?;
+    let element = kernel.element();
+    let uint = kernel.index_type();
+    let span = kernel.module().constant_u32(super::WORKGROUP_SIZE)?;
+    let one = kernel.module().constant_u32(1)?;
+    let nought = kernel.module().constant_u32(0)?;
+
+    let totals = kernel.repeat_rolled_many(
+        times,
+        element,
+        &[nought, nought],
+        |kernel, carried, counter| {
+            let [plain, weighted] = *carried else {
+                return Err(LaneError::BadCarry {
+                    given: carried.len(),
+                    wanted: 2,
+                });
+            };
+
+            let offset = kernel.module().i_mul(uint, counter, span)?;
+            let block = kernel.load_offset_by::<LANES>(0, offset)?.id();
+
+            // `counter + 1` rather than `counter`, so the first trip contributes to the weighted
+            // total as well. A weight of zero on trip zero would hide a body that never ran.
+            let weight = kernel.module().i_add(uint, counter, one)?;
+            let scaled = kernel.module().i_mul(element, block, weight)?;
+
+            Ok(vec![
+                kernel.module().i_add(element, plain, block)?,
+                kernel.module().i_add(element, weighted, scaled)?,
+            ])
+        },
+    )?;
+
+    let [plain, weighted] = totals[..] else {
+        return Err(LaneError::BadCarry {
+            given: totals.len(),
+            wanted: 2,
+        });
+    };
+    let answer = kernel.module().i_sub(element, weighted, plain)?;
+
+    kernel.store_scalar(1, answer)?;
+    kernel.finish()
+}
+
+/// `centre_and_scale_at` over a vector as wide as this device's subgroup.
+///
+/// # Errors
+///
+/// [`LaneError`] if the module cannot be built, or the width is not one this crate knows.
+pub fn centre_and_scale(subgroup: u32, centre: f32, scale: f32) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup!(subgroup, centre_and_scale_at, centre, scale)
+}
+
+/// `remainder_at` over a vector as wide as this device's subgroup.
+///
+/// # Errors
+///
+/// [`LaneError`] if the module cannot be built, or the width is not one this crate knows.
+pub fn remainder(subgroup: u32, divisor: u32) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup!(subgroup, remainder_at, divisor)
+}
+
+/// `rolled_block_sum_at` over a vector as wide as this device's subgroup.
+///
+/// # Errors
+///
+/// [`LaneError`] if the module cannot be built, or the width is not one this crate knows.
+pub fn rolled_block_sum(subgroup: u32, times: u32) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup!(subgroup, rolled_block_sum_at, times)
+}
+
+/// `rolled_weighted_totals_at` over a vector as wide as this device's subgroup.
+///
+/// # Errors
+///
+/// [`LaneError`] if the module cannot be built, or the width is not one this crate knows.
+pub fn rolled_weighted_totals(subgroup: u32, times: u32) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup!(subgroup, rolled_weighted_totals_at, times)
 }

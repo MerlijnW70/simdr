@@ -47,8 +47,9 @@ pub use specialized::{
     specialized_add, specialized_affine, specialized_cluster, specialized_derived,
 };
 pub use unrun::{
-    all_above, ballot_above, broadcast, broadcast_in_cluster, equals, lane_min, prefix_sum,
-    rotate_in_cluster, shift_down, shift_up, subgroup_agrees, subgroup_agrees_wide,
+    all_above, ballot_above, broadcast, broadcast_in_cluster, centre_and_scale, equals, lane_min,
+    prefix_sum, remainder, rolled_block_sum, rolled_weighted_totals, rotate_in_cluster, shift_down,
+    shift_up, subgroup_agrees, subgroup_agrees_wide,
 };
 
 use simdr::kernel::{Kernel, Shape};

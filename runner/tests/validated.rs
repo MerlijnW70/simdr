@@ -431,6 +431,35 @@ fn the_atomic_kernels_are_valid_at_every_width() {
                 width,
             );
         }
+
+        // The four added on 2026-08-25 for operations that had never reached a device. They declare
+        // no subgroup capability at all — the arithmetic is elementwise and the loops are control
+        // flow — so unlike everything above them the width does not change which instructions come
+        // out. They are here anyway, at all five, because *"every kernel the library exposes"* is
+        // this file's first line and a kernel exempt from it by an argument is the drift the file
+        // exists against.
+        valid_at(
+            kernels::unrun::centre_and_scale(width, 8.0, 4.0),
+            "centre_and_scale",
+            width,
+        );
+        valid_at(kernels::unrun::remainder(width, 7), "remainder", width);
+        // The two rolled loops, and the reason they are the most valuable rows here.
+        // `decisions/DR-0010` closes with what is *not* verified about them: that the emitted loop
+        // is valid SPIR-V, because `spirv-val` was not installed on the machine that wrote it. A
+        // loop's block order is the arrangement this validator has the strongest opinion about —
+        // the phis first, the merge second-to-last, the branch immediately after — and every one of
+        // those has been got wrong here once.
+        valid_at(
+            kernels::unrun::rolled_block_sum(width, 4),
+            "rolled_block_sum",
+            width,
+        );
+        valid_at(
+            kernels::unrun::rolled_weighted_totals(width, 4),
+            "rolled_weighted_totals",
+            width,
+        );
     }
 }
 
