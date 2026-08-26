@@ -1,24 +1,29 @@
 //! What "one module per parameter value" actually costs, and what deferring the value saves.
 //!
 //! `notes/NEXT.md` put specialization constants on the list on the grounds that `Gpu::sum` builds
-//! ten modules for ten fold sizes, and that modules are cheap in bytes but not in *pipeline
-//! creation*. That is an argument. This is the measurement, and it separates the three costs a
-//! reduction pays before it dispatches anything:
+//! one module per fold size, and that modules are cheap in bytes but not in *pipeline creation*.
+//! That is an argument. This is the measurement, and it separates the three costs a reduction pays
+//! before it dispatches anything:
 //!
 //! - **Emitting** a module — pure computation, no device involved.
 //! - **Creating a pipeline** from it — `vkCreateShaderModule` plus `vkCreateComputePipeline`,
 //!   which is where the driver compiles the shader.
-//! - The same, from **one** module specialized ten different ways.
+//! - The same, from **one** module specialized as many different ways.
 //!
 //! The third is the one the argument rests on. A specialization constant is fixed when the
-//! pipeline is created, so ten values still need ten pipelines — what it removes is ten *modules*,
-//! not ten compilations. Whether that is most of the cost or a rounding error is the question.
+//! pipeline is created, so *n* values still need *n* pipelines — what it removes is *n* modules,
+//! not *n* compilations. Whether that is most of the cost or a rounding error is the question.
+//!
+//! **Read the spread before the ratio.** The same four builds measure at 0.6 ms from this example
+//! and at 21 ms from a test binary doing the identical calls, in debug and in release alike, and no
+//! cause for that has been found. `decisions/DR-0005` records it as unexplained.
 
 use runner::kernels::{self, FOLD_HALF_SPEC_ID};
 use runner::{Gpu, Specialization};
 use std::time::{Duration, Instant};
 
-/// A buffer of a million elements folds fifteen times, which is the shape `Gpu::sum` runs.
+/// The buffer size the shape is measured at. How many folds it takes is computed, not assumed:
+/// `reduction::folds` decides, and every label below is built from its length.
 const ELEMENTS: usize = 1 << 20;
 
 /// How many times to repeat each measurement.
@@ -66,7 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     gpu.probe_pipelines(&per_module_builds)?;
     let per_module = repeat_result(|| gpu.probe_pipelines(&per_module_builds))?;
 
-    // 3. One module, fourteen specializations. The same number of pipelines, one module.
+    // 3. One module, one specialization per fold. The same number of pipelines, one module.
     let open = kernels::fold_halves_open(width)?;
     let specializations: Vec<Specialization> = folds
         .iter()
@@ -90,9 +95,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // The comparison that means something is between the two *strategies*, each paying for what it
-    // actually does: fourteen modules and fourteen pipelines, against one module and fourteen
-    // pipelines. Comparing the pipeline columns alone would leave out the thing specialization
-    // removes.
+    // actually does: one module per fold and a pipeline each, against one module and a pipeline per
+    // fold. Comparing the pipeline columns alone would leave out the thing specialization removes.
+    let n = folds.len();
     let one_emission = emitting / folds.len() as u32;
     let today = emitting + per_module;
     let deferred = one_emission + specialized;
@@ -101,18 +106,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n{:>34} {:>12}", "", "setup per call");
     println!(
         "{:>34} {:>12}",
-        "fourteen modules, fourteen pipelines",
+        &format!("{} modules, {} pipelines", folds.len(), folds.len()),
         micros(today)
     );
     println!(
         "{:>34} {:>12}",
-        "one module, fourteen pipelines",
+        &format!("one module, {} pipelines", folds.len()),
         micros(deferred)
     );
     println!(
         "\nSpecializing removes {:.1}% of the setup — {}. Emission is {:.1}% of what building the\n\
          pipelines costs, and a specialization constant is fixed *at* pipeline creation, so\n\
-         fourteen values still need fourteen pipelines however few modules they came from.",
+         {n} values still need {n} pipelines however few modules they came from.",
         saved / today.as_secs_f64() * 100.0,
         micros(Duration::from_secs_f64(saved.abs())),
         emitting.as_secs_f64() / per_module.as_secs_f64() * 100.0

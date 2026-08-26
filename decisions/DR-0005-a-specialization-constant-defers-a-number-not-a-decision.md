@@ -10,41 +10,49 @@ status: prose-only
 is an `OpSpecConstant` — `tests/deferred.rs`, in
 `a_cluster_size_that_is_a_specialization_constant_is_valid_spirv` — and `runner/tests/specialized.rs`
 runs one such module at 4, 8 and 16 on an RTX 4080 with the default of 32 still reducing the whole
-subgroup. So the size **can** be deferred.
+subgroup. The size **can** be deferred.
 
-`runner/examples/specialize.rs` on that card on 2026-08-26, a reduction over 1 048 576 elements,
-buffers allocated once so that what is timed is pipelines: emitting the modules 55.9 µs; a pipeline
-each from one module per fold **20 770.9 µs**; a pipeline each from one specialized module
-**10 658.5 µs**. Specializing removes 48.8% of the setup, and emission is 0.3% of what building the
-pipelines costs. `runner/examples/reducer.rs` on the same run holds its pipelines instead and
-measures **11.4×** over 8 192 elements at 3 folds and **9.2×** over 1 048 576 at 5.
+`runner/examples/specialize.rs` on that card, a reduction over 1 048 576 elements, which
+`reduction::folds` resolves to four folds. Five standalone runs on 2026-08-26: emitting the four
+modules 53.8–55.1 µs; a pipeline per fold from one module each **571.6–708.7 µs**; a pipeline per
+fold from one specialized module **6 168.3–7 306.2 µs**. Specializing costs between 8.7 and 11.5
+times what building a module per fold costs, and the example now reports it as removing −766% of
+the setup.
+
+Pipeline creation does not vary with the shape being compiled: at fold factors 2, 4, 8, 16 and 32 —
+modules of 258 to 1 278 words — a single-build call measures 565.5–611.4 µs, of which the two
+256-byte buffers `probe_pipelines` allocates and frees account for about 566 µs on their own.
 
 ## The Decision
 
 A specialization constant may carry any value a kernel needs at pipeline creation and nothing the
 emitter has to reason about while building the module. `Lanes::new` still takes the subgroup width,
-because the three mappings differ in which instructions are emitted — a value arriving at pipeline
+because the three mappings differ in which instructions are emitted and a value arriving at pipeline
 time cannot add instructions that were never written. The cluster size can be deferred; the mapping
 cannot.
 
 ## The Rejected Route
 
-Deferring constants to cut setup was rejected at 10 658.5 µs against 20 770.9, because fourteen
-values still need fourteen pipelines however few modules they came from, while holding the
-pipelines removes the setup entirely at 11.4× and 9.2×. `kernels::fold_halves_open` and
-`Kernel::load_offset_by` are kept at one `OpIAdd` per strip against the baked-in form, because they
-are what made the comparison possible.
+Deferring constants to cut setup was rejected at 6 168.3–7 306.2 µs against 571.6–708.7 for building
+one module per fold: on this driver it costs roughly ten times more rather than less, and a
+specialization constant is fixed *at* pipeline creation, so *n* values need *n* pipelines however
+few modules they came from. Holding the pipelines instead removes the setup rather than moving it,
+at 11.4× over 8 192 elements and 9.2× over 1 048 576 — `runner/examples/reducer.rs`, same day.
 
 ## The Limit
 
-**The figures this record carried before do not reproduce, and the discrepancy is unexplained.** It
-reported a pipeline each from fourteen modules at 809.6 µs and specializing as removing 9.7%; the
-run above puts the same column at 20 770.9 µs and 48.8%, a factor of 25.7 on the first number and a
-reversed conclusion on the second. No cause was established, no intermediate revision was
-bisected, and the example's own output labels its rows "fourteen modules" while stating four folds
-for this size — so which count the second table timed is **NOT ESTABLISHED**. The decision above
-rests on the ordering of the two strategies, which both runs agree on; the size of the gap between
-them does not have one figure.
+**The instrument does not reproduce between harnesses, and no cause has been found.** The same four
+builds measure 571.6–708.7 µs from this example and 21 242–23 316 µs from a test binary issuing the
+identical `probe_pipelines` calls — thirty times apart, stable to within 10% inside each, in a debug
+build and a release build alike. Ruled out by measurement: the fold factor, the module size, drift
+across ten rounds in one process, and the build profile. Not ruled out: anything else.
+
+So the *ratio* between the two strategies is what this record rests on, because it is taken inside
+one process in one run, and the absolute microseconds are **NOT PORTABLE**. An earlier version of
+this record reported the specialized column at 793.0 µs and specializing as removing 9.7% of setup;
+five runs today put that column at 6 168.3–7 306.2 µs and the sign the other way. Which of the two
+machines-and-days is anomalous is not established, and a figure quoted from either should be
+re-taken rather than cited.
 
 Nothing tests what a specialization constant must not do. `Module::spec_constant` returns an `Id`
 like any other, so an emitter branching on a default and shipping a module that only appears to
