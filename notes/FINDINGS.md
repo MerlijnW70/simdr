@@ -352,7 +352,7 @@ this into `len / 4 + 1` so the even case needs no branch.
 ## Mutation coverage
 
 **`noha prober` reports 100% over a much smaller surface than the code.** As of 2026-08-11 it
-generates mutants for `encode.rs` and a little of `module/`, and **none at all** for `spec.rs`,
+generates mutants for `encode.rs` and a little of `module/`, and **none at all** for `src/spec/`,
 whose bodies are `match self { X => 1 }` with no predicate to flip. Check `.noha/tia.tsv` for the
 per-file counts before quoting a score. What guards those numbers is DR-0001's recipe and the
 validator, not the prober.
@@ -987,7 +987,15 @@ measured this fold as buying no time. A defined behaviour traded for an undefine
 instruction that does not show up in a timing, is the wrong side of the trade.
 
 
-## Specialization constants save 1% — 2026-08-12
+## Superseded: specialization constants save 1% — 2026-08-12
+
+> **Every figure in this section is wrong, twice over, and it is kept for what it cost.** The
+> probe behind it allocated two buffers on every call, so the pipeline column below is pipeline
+> creation plus two allocations — *A probe that measured the wrong thing*, later the same day,
+> has the corrected 57.8 µs and 809.6 µs and the revised conclusion of 9.7%. Five standalone runs
+> on 2026-08-26 then put the specialized column an order of magnitude *above* the un-specialized
+> one, inverting the sign as well; `decisions/DR-0005` carries those and records that the
+> instrument does not reproduce between harnesses.
 
 `notes/NEXT.md` ranked "make `Gpu::sum` use a specialization constant" first, on the grounds that
 fourteen modules for fourteen fold sizes is expensive in pipeline creation.
@@ -1098,7 +1106,13 @@ The conclusion did not move: a specialization constant removes the emission and 
 so it is worth single digits where holding the pipelines is worth 5×. Only the size of the claim
 was wrong, and it was wrong by a factor of eight.
 
-## Holding a reduction's pipelines is worth 5× — 2026-08-12
+## Superseded: holding a reduction's pipelines is worth 5× — 2026-08-12
+
+> **The ratios and the fold counts below both moved, and a code change is why.** The chain folded
+> by two when this was taken — eight folds at 8 192 elements and fifteen at 2²⁰ — and folds by
+> sixteen now, which is three and five. `runner/examples/reducer.rs` on 2026-08-26 measures the
+> same comparison at **11.4×** and **9.2×** against the 5.0× and 1.6× here. The finding this
+> section is kept for is the one in its last paragraph, about ownership, which did not change.
 
 `Gpu::sum` builds a pipeline per fold on every call and destroys them all. `Gpu::reducer(elements)`
 builds them once and keeps them, along with the three buffers they are bound to.
