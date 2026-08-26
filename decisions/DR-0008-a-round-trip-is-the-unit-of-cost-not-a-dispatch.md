@@ -40,4 +40,8 @@ best of three runs of 200 round trips rather than reporting a spread — so no v
 here and none should be read into the third decimal. The break-even table is arithmetic over a CPU
 cost the example is told rather than one it measures. Nothing runs this: CI runs none of the
 <!--count:examples-->17 examples, by design, because a shared runner's wall clock is not evidence
-about a round trip. The engine's figures are that project's and were not re-taken here.
+about a round trip. The engine's figures are that project's, were not re-taken here, and **cannot
+be**: `SPEED.md`, `NNUE.md` and `TUNING.md` sit on a drive this machine no longer mounts, which is
+the same drive the validator's fallback pointed at until 2026-08-25. The arithmetic above stands on
+this repository's own two numbers — 63 ns an answer on the device against the 78 the engine
+reported — and the second of those is now a quotation with no source to check it against.

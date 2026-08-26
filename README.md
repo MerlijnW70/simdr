@@ -40,7 +40,8 @@ NVIDIA GeForce RTX 4080          subgroup width 32, up to 32 subgroups per workg
 AMD Radeon(TM) Graphics          subgroup width 64, up to 16 subgroups per workgroup
 ```
 
-Both report every subgroup feature the lane API can ask for and all six narrow element types.
+Both report every subgroup feature the lane API can ask for and all six narrow features, which
+resolve to five element types usable end to end: `i8`, `u8`, `i16`, `u16` and `f16`.
 `simdr probe` also prints which features are missing, which is what tells you a kernel will be
 refused at pipeline creation rather than at validation. `simdr list` names every device — this
 machine turned out to have two at two different widths, and for a month only one had been built for.
