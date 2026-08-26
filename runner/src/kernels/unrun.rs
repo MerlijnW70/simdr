@@ -382,8 +382,16 @@ pub fn broadcast<T: Element>(subgroup: u32, source: u32) -> Result<Vec<u32>, Lan
 /// # Errors
 ///
 /// [`LaneError::NoMapping`] if `cluster` is not a power of two that divides the subgroup,
-/// [`LaneError::NoSuchForm`] if `source` is outside the vector, otherwise if the module cannot be
-/// built.
+/// [`LaneError::LaneOutOfRange`] if `source` is outside the vector, otherwise if the module cannot
+/// be built.
+///
+/// **It said `NoSuchForm` until somebody called it with a `source` outside the vector.**
+/// `Lanes::broadcast` holds every mapping to `Lanes::within_group`, whose refusal names the
+/// operand and the width it exceeded; `NoSuchForm` is what a *shape* with no lowering gets, and
+/// this operation has one at every mapping. Nothing could have caught the difference: matching
+/// the variant against this body finds neither, because the body delegates and the refusal is
+/// two layers down. Counting the sites that *produce* each variant and reading them against the
+/// docs that claim it is what found it, and this was the only one of seven that had no producer.
 pub fn broadcast_in_cluster<T: Element>(
     subgroup: u32,
     cluster: u32,

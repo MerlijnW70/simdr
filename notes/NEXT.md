@@ -1797,9 +1797,20 @@ Three things were looked at and not finished, stated so they are not mistaken fo
 
 - `notes/FINDINGS.md` — 4 117 lines, and by `notes/CLAIMS.md`'s own count 222 measured numbers —
   was not audited at all.
-- Of the seventy-nine `# Errors` blocks naming a concrete variant, exactly one was found to promise
-  a *condition* its body contradicts, and it was found by reading. Matching on variant names finds
-  nothing, because almost everything delegates and produces the variant deeper. There is no
-  instrument for this class and no obvious one.
+- Of the `# Errors` blocks naming a concrete variant, two are now known to promise a *condition*
+  the body contradicts. **The second was found by a method rather than by reading everything, and
+  the method is the part worth keeping**: enumerate the sites that *produce* a variant, list the
+  docs that *claim* it, and compare. Matching a variant name against the body finds nothing,
+  because almost everything delegates and the refusal is two layers down — but a variant with few
+  producers can be read against its claimants by hand in minutes.
+
+  `LaneError::NoSuchForm` has six producing sites and seven docs claiming it. Six matched.
+  `kernels::broadcast_in_cluster` was the odd one: it promised that variant for a `source`
+  outside the vector and emits `LaneOutOfRange`, because `Lanes::broadcast` refuses through
+  `Lanes::within_group`, which names the operand and the width it passed. Corrected, and pinned
+  by a test that goes red when `within_group` is made to name the other variant.
+
+  It is still not an instrument. Doing it for every variant means a call graph, and the six
+  variants with many producers would need one. What it is, is a pass somebody can repeat.
 - Branch reachability was sampled, not exhausted: the `ok_or` and `unwrap_or` sites were read, the
   thirty-odd `saturating_*` calls and the match arms were not.

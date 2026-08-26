@@ -19,7 +19,7 @@ mod common;
 use common::{device, runnable};
 use runner::Gpu;
 use runner::kernels::{self, WORKGROUP_SIZE};
-use simdr::lanes::U32;
+use simdr::lanes::{LaneError, U32};
 
 /// A device with the subgroup surface these need, or `None` with a reason printed.
 fn ready(label: &'static str) -> Option<(Gpu, u32)> {
@@ -734,4 +734,38 @@ fn two_running_totals_come_out_of_one_pass() {
     // A second phi wired to the first would make the difference zero, which is the failure the
     // subtraction exists to expose and the one a single-total kernel could not have.
     assert_ne!(output.first(), Some(&0), "the two totals came out equal");
+}
+
+#[test]
+fn a_broadcast_of_a_lane_outside_the_vector_is_refused_by_the_name_its_doc_gives() {
+    // **The claim that had no producer.** `broadcast_in_cluster` documented `NoSuchForm` for this
+    // input and cannot emit one: `Lanes::broadcast` refuses through `Lanes::within_group`, which
+    // names the operand and the width it passed. Needs no device — the refusal happens while the
+    // module is being built, which is why this sits beside the dispatches rather than among them.
+    let outside = kernels::broadcast_in_cluster::<U32>(32, 8, 9);
+
+    assert!(
+        matches!(
+            outside,
+            Err(LaneError::LaneOutOfRange {
+                operand: 9,
+                lanes: 8,
+                ..
+            })
+        ),
+        "a source outside the vector: {outside:?}"
+    );
+
+    // The other half of the same sentence, which was right and stays checked beside it.
+    let unmappable = kernels::broadcast_in_cluster::<U32>(32, 3, 0);
+    assert!(
+        matches!(
+            unmappable,
+            Err(LaneError::NoMapping {
+                lanes: 3,
+                width: 32
+            })
+        ),
+        "a cluster that is not a power of two: {unmappable:?}"
+    );
 }
