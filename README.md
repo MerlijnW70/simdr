@@ -123,14 +123,15 @@ All on this machine, 2026-08-26, each from the example named beside it.
 | `Reducer` against rebuilding, 8 192 elements | 11.4× | — | `examples/reducer.rs` |
 | the same over 1 048 576 | 9.2× | — | `examples/reducer.rs` |
 | `Simd<i8, 128>` against `Simd<i32, 32>`, 16 777 216 elements | 6.46× | — | `examples/narrow.rs` |
-| `OpSDot` against the fifteen instructions it replaces, 32 per element | 1.20× | **9.17×** | `examples/dot.rs` |
+| `OpSDot` against the nineteen instructions it replaces, 32 per element | 1.20× | **9.17×** | `examples/dot.rs` |
 | a map fused into a scan, against three host crossings | 2.1–3.1× | — | `examples/scanner.rs` |
 | a second dispatch axis, 131 072 invocations | 3.36 µs against 3.34 | — | `examples/plane.rs` |
 
-Fifteen is counted rather than asserted: the written-out spelling emits four shifts left, four
-arithmetic shifts right, four multiplies and three adds where the packed one emits a single
-`OpSDot`, and eighteen more instructions over the whole module once the shift constants are
-included. The headline on this table read *eleven* before it was counted.
+Nineteen is counted rather than asserted. Decoding both modules and differencing every opcode: the
+written-out spelling emits four `OpBitcast`, four `OpShiftLeftLogical`, four
+`OpShiftRightArithmetic`, four `OpIMul` and three `OpIAdd` where the packed one emits a single
+`OpSDot` — eighteen more instructions over the whole module, once three shift constants are added
+and a capability and an extension are dropped.
 
 Two of these are worth reading as a "no". The second dispatch axis buys **no speed** — what it buys
 is that a caller with a matrix stops linearising by hand. And the packed dot product is worth 20% on

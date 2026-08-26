@@ -53,7 +53,7 @@ The class splits three ways and the honest answer differs for each:
   markdown file in this repository is one of them. A marker naming no
   counter fails rather than rendering as an ordinary number, and a counter no document states fails
   too — which is the rule that emptied `NO_EMITTER`, one level up.
-* **Timings and multiples** — `11.2×`, `52×`, `~100 µs`, `376 ns`. CI *cannot* check these and says
+* **Timings and multiples** — `11.4×`, `17×`, `~100 µs`, `937.5 µs`. CI *cannot* check these and says
   so: a shared runner's wall clock is not evidence, which is why `session.rs` prints its ratio there
   rather than asserting it. What can be checked is that the example which produces the number still
   runs and still prints one. All <!--count:examples-->17 do today — measured while writing this,

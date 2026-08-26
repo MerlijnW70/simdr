@@ -1,6 +1,7 @@
 //! The packed integer dot product, on a real device.
 //!
-//! `OpSDot` replaces four shifts, four sign-extensions, four multiplies and three adds with one
+//! `OpSDot` replaces four bitcasts, four shifts up, four arithmetic shifts down, four multiplies and
+//! three adds — nineteen instructions, counted by differencing the two modules — with one
 //! instruction. The strongest thing that can be said about it is that both spellings agree, so
 //! every test here runs the pair and compares — the same discipline `loops.rs` uses for the
 //! butterfly tree against the built-in reduction.

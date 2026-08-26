@@ -1,4 +1,4 @@
-//! Is one dot-product instruction faster than the eleven it replaces?
+//! Is one dot-product instruction faster than the nineteen it replaces?
 //!
 //! `OpSDot` computes four 8-bit products and their sum in one instruction. Written out, that is
 //! four shifts up, four bitcasts, four shifts down, four multiplies and three adds. Both devices

@@ -1151,7 +1151,7 @@ against a host reference.
 
 Both devices report `integerDotProduct4x8BitPackedSignedAccelerated`. **The flag says the hardware
 has the instruction; it does not say anyone will notice.** The discrete part has enough integer
-throughput that eleven instructions cost nearly what one does, and at one dot product per element
+throughput that nineteen instructions cost nearly what one does, and at one dot product per element
 it is memory-bound anyway.
 
 Two things worth carrying:

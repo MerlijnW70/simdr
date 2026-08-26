@@ -194,7 +194,7 @@ in safe-looking code. One type owns both and drops the pipelines first.
 `OpSDot`, `OpUDot`, `OpSUDot` and `OpSDotAccSat`, over four 8-bit components packed into a 32-bit
 integer. Both devices here support it and both report the packed signed form as accelerated.
 
-One instruction against the eleven it replaces — four shifts up, four bitcasts, four shifts down,
+One instruction against the nineteen it replaces — four shifts up, four bitcasts, four shifts down,
 four multiplies and three adds. `runner/examples/dot.rs`:
 
 | kernel | RTX 4080 | integrated Radeon |
@@ -203,7 +203,7 @@ four multiplies and three adds. `runner/examples/dot.rs`:
 | thirty-two per element, 262 144 invocations | 1.18× | **9.08×** |
 
 The first row is memory-bound and the second is not, which is why both are there. The discrete part
-has enough integer throughput that eleven instructions cost nearly what one does; the integrated
+has enough integer throughput that nineteen instructions cost nearly what one does; the integrated
 part does not, and the difference is nine times.
 
 **It does not overturn `decisions/DR-0004`.** The packing is in the instruction's operands, not in
@@ -1345,8 +1345,11 @@ before it was deleted — see `notes/FINDINGS.md`, which is where that coverage 
 rather than as a runnable check.
 
 **2. The reduction and scan chains are the shape DR-0008 rules in** — one question over a whole
-buffer, one submission. `Gpu::sum` at 11.2× over 8 192 elements, `Gpu::scanner_of` at 2.0–3.0×,
-`Reducer` at 52× per dispatch against rebuilding. Nothing here needs re-argued; it needs keeping.
+buffer, one submission. `Reducer::sum` at 11.4× over 8 192 elements and 9.2× over 2²⁰, a map fused into a scan at
+2.1–3.1×, and a held `Session` at 17× per dispatch against rebuilding on the RTX 4080 and 6× on the
+integrated part — all re-measured 2026-08-26. The 52× this line used to give was a `Session` figure
+attributed to `Reducer`, and it was three times what the same test reports today. Nothing here needs
+re-arguing; it needs keeping, and re-measuring before it is quoted.
 
 **3. The emitter is the part with no round trip at all.** It takes no dependencies, forbids
 `unsafe`, and produces SPIR-V on stable Rust — and the boundary above does not touch it, because
