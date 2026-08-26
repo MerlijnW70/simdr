@@ -2111,7 +2111,24 @@ where one subgroup fills the workgroup and the two reductions cover the same lan
 says which relationship it expects at which width, which is what it should have said in the first
 place.
 
-## A second binding costs about 330 µs, and the submission is a fifth of it
+## Superseded: a second binding costs about 330 µs, and the submission is a fifth of it
+
+> **The instrument cannot resolve the quantity this section is about.** Four runs of
+> `runner/examples/bindings.rs` on 2026-08-26 put the difference at +877.9, −824.8, +277.0 and
+> −88.3 µs at 512 operands, and at +663.1, −1069.7, +181.4 and −235.9 at 4 096 — it changes sign,
+> against a recorded +367 and +329. The columns it is subtracted from read 9 000–10 850 µs today
+> where they read ~815 and ~1181 here, so the effect being measured is under a tenth of the noise
+> on the totals.
+>
+> No cause is offered. `runner/examples/overhead.rs` puts allocating and freeing a 256-byte buffer
+> at 282.9 µs today against the ~310 recorded, so allocation is not eleven times slower; what is,
+> is **NOT ESTABLISHED**. This is the second instrument here found unable to reproduce its own
+> reading — `decisions/DR-0005` has the first — and both are timings around per-call buffer
+> allocation, which is an observation and not a conclusion.
+>
+> The conclusion below — that item 9 is not worth doing — is unaffected: it turns on the cost
+> being fixed setup rather than transfer, and a difference this instrument cannot see is not a
+> difference worth chasing either.
 
 `Gpu::run_bound` uploads each input through the shared staging buffer in turn, and each of those is
 a `Gpu::copy` — a whole command buffer, submission and fence. So `k` inputs cost `k + 2`
