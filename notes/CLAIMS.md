@@ -63,7 +63,7 @@ The class splits three ways and the honest answer differs for each:
 
 ## 2. Every decision record says of itself that it is unchecked
 
-`noha gate` prints, on every run, eight lines ending `prose-only: recorded, not machine-checked`.
+`noha gate` prints, on every run, <!--count:decisions-->10 lines ending `prose-only: recorded, not machine-checked`.
 That is honest and it is also too blunt, because several of those decisions **are** structurally
 enforced and simply not marked as such:
 
@@ -94,10 +94,10 @@ no audited source imports `require_capability` (the restriction holds vacuously)
 ```
 
 which is the tool being better than the attempt. A vacuous invariant reads as enforcement and checks
-nothing — the precise failure this whole document is about — so the eight stay `prose-only`, and the
+nothing — the precise failure this whole document is about — so all <!--count:decisions-->10 stay `prose-only`, and the
 blanket turns out to have been accurate.
 
-What was missing was not a status field. It was that a reader could not tell **which** of the eight
+What was missing was not a status field. It was that a reader could not tell **which** of the <!--count:decisions-->10
 had something behind it. Each record now ends with a `## What enforces this` section naming the
 artefact and its kind:
 

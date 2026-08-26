@@ -4,117 +4,48 @@ title: A specialization constant defers a number, not a decision
 status: prose-only
 ---
 
-## The decision
+## The Measurement
 
-A specialization constant may carry any *value* a kernel needs at pipeline creation — an addend, a
-scale, a fold size, a cluster size. It may not carry anything the **emitter** has to reason about
-while it is building the module.
+`spirv-val --target-env vulkan1.1` accepts a clustered `OpGroupNonUniformIAdd` whose `ClusterSize`
+is an `OpSpecConstant` — `tests/deferred.rs`, in
+`a_cluster_size_that_is_a_specialization_constant_is_valid_spirv` — and `runner/tests/specialized.rs`
+runs one such module at 4, 8 and 16 on an RTX 4080 with the default of 32 still reducing the whole
+subgroup. So the size **can** be deferred.
 
-`Lanes::new` still takes the subgroup width, and `decisions/DR-0002` still holds.
+`runner/examples/specialize.rs` on that card on 2026-08-26, a reduction over 1 048 576 elements,
+buffers allocated once so that what is timed is pipelines: emitting the modules 55.9 µs; a pipeline
+each from one module per fold **20 770.9 µs**; a pipeline each from one specialized module
+**10 658.5 µs**. Specializing removes 48.8% of the setup, and emission is 0.3% of what building the
+pipelines costs. `runner/examples/reducer.rs` on the same run holds its pipelines instead and
+measures **11.4×** over 8 192 elements at 3 folds and **9.2×** over 1 048 576 at 5.
 
-## The experiment that could have overturned it
+## The Decision
 
-`notes/NEXT.md` asked whether `ClusterSize` could be a specialization constant. The specification
-says it "must come from a constant instruction", and `OpSpecConstant` **is** a constant
-instruction, so the answer looked like it might be yes and the case for DR-0002 rested on it being
-no.
+A specialization constant may carry any value a kernel needs at pipeline creation and nothing the
+emitter has to reason about while building the module. `Lanes::new` still takes the subgroup width,
+because the three mappings differ in which instructions are emitted — a value arriving at pipeline
+time cannot add instructions that were never written. The cluster size can be deferred; the mapping
+cannot.
 
-It is yes. Both authorities agree:
+## The Rejected Route
 
-- `spirv-val --target-env vulkan1.1` accepts a clustered `OpGroupNonUniformIAdd` whose
-  `ClusterSize` operand is an `OpSpecConstant` — `tests/kernels.rs`.
-- An RTX 4080 runs it and produces the right per-cluster sums at 4, 8 and 16, from **one module**,
-  with the default of 32 still giving a whole-subgroup reduction —
-  `runner/tests/specialized.rs`.
+Deferring constants to cut setup was rejected at 10 658.5 µs against 20 770.9, because fourteen
+values still need fourteen pipelines however few modules they came from, while holding the
+pipelines removes the setup entirely at 11.4× and 9.2×. `kernels::fold_halves_open` and
+`Kernel::load_offset_by` are kept at one `OpIAdd` per strip against the baked-in form, because they
+are what made the comparison possible.
 
-So the sentence in DR-0002 that reads "`ClusterSize` is a compile-time operand, so the choice
-cannot be deferred to the device" is **wrong as stated**, and this record exists partly to say so.
+## The Limit
 
-## Why DR-0002 survives anyway
+**The figures this record carried before do not reproduce, and the discrepancy is unexplained.** It
+reported a pipeline each from fourteen modules at 809.6 µs and specializing as removing 9.7%; the
+run above puts the same column at 20 770.9 µs and 48.8%, a factor of 25.7 on the first number and a
+reversed conclusion on the second. No cause was established, no intermediate revision was
+bisected, and the example's own output labels its rows "fourteen modules" while stating four folds
+for this size — so which count the second table timed is **NOT ESTABLISHED**. The decision above
+rests on the ordering of the two strategies, which both runs agree on; the size of the gap between
+them does not have one figure.
 
-Because the choice was never the cluster size. It is *which instruction to emit*.
-
-A `Simd<T, N>` on a subgroup of width `W` reaches one of three different instruction sequences:
-`OpGroupNonUniformIAdd` with `Reduce` when `N == W`; the same opcode with `ClusteredReduce` and a
-size operand when `N < W`; and a fold of `N / W` scalar operations followed by a reduction when
-`N > W`. Those are not one instruction with a parameter. They are three shapes, with different
-operand counts, different capability requirements, and — in the strip-mined case — a different
-number of instructions in the function body.
-
-A specialization constant arrives long after that is decided. It can change the *operand* of the
-clustered form; it cannot turn the clustered form into the strip-mined one, because the strip-mined
-one has instructions in it that were never emitted.
-
-The corrected sentence, then: **the cluster size can be deferred, and the mapping cannot.** The
-lane API's front door takes a width because it picks a shape, not because the number is needed
-early.
-
-## What is deferred today, and why the obvious caller did not happen
-
-Nothing, in the kernels this repository ships. The mechanism exists, is tested end to end, and the
-one place it was expected to pay off turned out not to.
-
-`notes/NEXT.md` argued that `Gpu::sum` building fourteen modules for fourteen fold sizes is
-expensive in *pipeline creation*. `runner/examples/specialize.rs` measured it — RTX 4080, a
-reduction over 2²⁰ elements, buffers allocated once so that what is timed is pipelines:
-
-| | all fourteen folds | per fold |
-| --- | --- | --- |
-| emitting the modules | 74.2 µs | 5.3 µs |
-| a pipeline each, from fourteen modules | 809.6 µs | 57.8 µs |
-| a pipeline each, from **one** specialized module | 793.0 µs | 56.6 µs |
-
-Setting the two *strategies* against each other — fourteen modules and fourteen pipelines, against
-one module and fourteen pipelines — specializing removes **9.7%** of the setup, 85.6 µs of 883.9.
-Emission is 9.2% of what building the pipelines costs and that is what a specialization constant
-can remove, because it is fixed *at* pipeline creation and fourteen values still need fourteen
-pipelines.
-
-The premise was wrong in a way worth stating plainly: one module per parameter value is **cheap**.
-One *pipeline* per parameter value is not, and no specialization constant makes it less so.
-
-> **Corrected 2026-08-12, later the same day.** This table first read 485.5 µs per pipeline and
-> "saves 1.0%". Both numbers were wrong. The probe took one module and allocated two buffers *per
-> call*, so what it reported was pipeline creation plus two allocations — and allocation is the
-> larger half. The error surfaced when `runner/examples/reducer.rs` timed a whole fourteen-fold
-> reduction at 3.1 ms, which is less than fourteen pipelines at 485 µs would have cost on their
-> own. [`Gpu::probe_pipelines`] takes a batch now and allocates once. The conclusion did not
-> change; the size of it did, from 1.0% to 9.7%.
-
-What the measurement does say is that setup is ~884 µs against a dispatch's 0.8 µs, and that the
-reduction chain's real saving is to **hold its pipelines** across calls rather than defer its
-constants. That is `Reducer`, and it is built: `runner/examples/reducer.rs` measures **5.0×** on a
-reduction over 8 192 elements and **2.2×** over 2²⁰, where the setup is a smaller share of a larger
-call.
-
-> That last clause said "where the arithmetic starts to dominate", and the arithmetic does not.
-> The same example was later made to break the remaining time down, and it is the host round trip
-> and the chained dispatches — not the sums. The ratio also moved from 1.6× once the reduction
-> stopped copying its whole output buffer home to read one number out of it.
-
-`kernels::fold_halves_open` and `Kernel::load_offset_by` are kept rather than deleted: they are
-what made the comparison possible, they cost one `OpIAdd` per strip against the baked-in form, and
-`runner/tests/specialized.rs` checks that an offset arriving at pipeline time reads the same
-elements as one baked in.
-
-## Consequences
-
-- `Module::spec_constant`, `spec_constant_bool` and `spec_constant_op` emit the constants;
-  `Specialization` in `runner` supplies the values at `vkCreateComputePipeline`.
-- Specialization constants are **not deduplicated**, unlike every other constant this crate emits.
-  Two with the same default are two different values as soon as a pipeline sets one of them.
-- A `VkSpecializationInfo` entry naming an id no constant carries is ignored rather than refused.
-  That is Vulkan's rule and it is pinned by a test, because code that sets a superset of what a
-  module declares is easy to write and the alternative would make it a crash.
-- `OpSpecConstantOp` carries its opcode as a **literal**, in the word where an operand would
-  normally go. An instruction one word short of that decodes cleanly and computes something else.
-
-## What enforces this
-
-**Weakly — this is the loosest of the eight.** `Module::spec_constant` returns an `Id`, a value like
-any other, so a specialization constant can be added, multiplied and stored and cannot change which
-instructions a module contains: the emitter has finished by the time anyone picks its value.
-
-That is structural rather than checked. An `Id` is an `Id`, and nothing here would stop an emitter
-branching on the *default* and shipping a module that only appears to defer the decision.
-`runner/examples/specialize.rs` measures what deferring is worth; nothing tests what it must not be.
+Nothing tests what a specialization constant must not do. `Module::spec_constant` returns an `Id`
+like any other, so an emitter branching on a default and shipping a module that only appears to
+defer the decision would pass every check here.

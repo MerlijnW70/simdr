@@ -4,111 +4,40 @@ title: A narrow element is one element per lane, not several packed into one
 status: prose-only
 ---
 
-## The decision
+## The Measurement
 
-`Simd<i8, 32>` is **32 lanes each holding one `i8`**, exactly as `Simd<i32, 32>` is 32 lanes each
-holding one `i32`. The element's width changes the SPIR-V type and the buffer's `ArrayStride`, and
-changes nothing else — not the mapping, not the lane count, not which instruction a reduction
-reaches.
+`runner/examples/narrow.rs` on an RTX 4080 at subgroup 32, a clamp over 16 777 216 elements on
+2026-08-26: `Simd<i8, 32>` at 126 µs and 265.7 GB/s, 1.68× the `i32` kernel; `Simd<i8, 128>` — four
+strips — at 33 µs and 1023.3 GB/s, **6.46×**; `Simd<i16, 32>` at 127 µs and 530.2 GB/s, 1.67×;
+`Simd<i16, 64>` at 66 µs and 1012.3 GB/s, 3.20×; `Simd<i32, 32>` at 212 µs and 633.5 GB/s. Over
+1 048 576 elements the three unstripped kernels take **9 µs each** whatever the element width, and
+the stripped ones 3 µs and 5 µs. `runner/examples/dot.rs` on the same run puts `OpSDot` against the
+written-out form at 1.01× and 1.20× on the RTX 4080 for one and thirty-two products per element at
+262 144 invocations, and at 1.50× and **9.17×** on the integrated Radeon at subgroup 64. Both
+devices report `integerDotProduct4x8BitPackedSignedAccelerated`, and `simdr probe` reports all six
+narrow features on both.
 
-The alternative was to pack four `i8` into each 32-bit lane and call that `Simd<i8, 128>`. That is
-not offered.
+## The Decision
 
-## Why
+`Simd<i8, 32>` is 32 lanes each holding one `i8`. The element width changes the SPIR-V type and the
+buffer's `ArrayStride` through `Element::STRIDE`, and changes nothing else — not the mapping, not
+the lane count, not which instruction a reduction reaches. Four `i8` per lane is not offered, and
+`OpSDot` reading a `u32` as four bytes is an operation on an operand rather than a fourth mapping.
 
-**The win is memory traffic, and packing is not what buys it.** A buffer of `i8` is a quarter the
-size of a buffer of `i32` because the *stride* is one byte, which is true whatever the lanes hold.
-Declaring `StorageBuffer8BitAccess` and a stride of 1 is the whole of it.
+## The Rejected Route
 
-**Packing would be a fourth mapping.** `decisions/DR-0002` already has three — whole subgroup,
-clusters, strips — chosen by comparing `N` against the subgroup width. A packed mapping would be
-chosen by comparing the *element width* against the lane width, an orthogonal axis, and every rule
-in the lane API would then have to say which of the two it meant. `Simd<i8, 128>` would be four
-strips under one reading and one packed subgroup under the other.
+Packing four `i8` into a lane was rejected at 33 µs against 126, because `Simd<i8, 128>` reaches the
+same four bytes per lane as four strips at one instruction each, with no masking and no carry
+between elements — a mapping this crate already had. It was rejected a second time on shape: the
+three mappings are chosen by `N` against the subgroup width, and a packed one would be chosen by
+element width against lane width, so `Simd<i8, 128>` would name two different things.
 
-**Packed arithmetic is not elementwise arithmetic.** Four `i8` in a lane added with one `OpIAdd`
-carry between the elements. Getting that right means either masking after every operation — which
-is the four instructions per element that the narrow types exist to avoid — or the integer
-dot-product extension, which is a different instruction set with its own device feature.
+## The Limit
 
-## What it costs, measured
-
-One element per lane leaves throughput on the table, and the measurement says how much.
-`runner/examples/narrow.rs`, RTX 4080, a clamp over 16 777 216 elements:
-
-| kernel | per pass | GB/s | against `i32` |
-| --- | --- | --- | --- |
-| `Simd<i8, 32>` — one element per lane | 127 µs | 264 | 1.67× |
-| `Simd<i8, 128>` — four strips | 33 µs | 1016 | 6.45× |
-| `Simd<i16, 32>` — one element per lane | 127 µs | 527 | 1.67× |
-| `Simd<i16, 64>` — two strips | 65 µs | 1038 | 3.29× |
-| `Simd<i32, 32>` | 213 µs | 630 | 1.00× |
-
-An invocation that loads one byte and one that loads one word cost the same, so a byte-per-lane
-kernel runs at a quarter of the achievable rate. **Strip mining is what recovers it** — and strip
-mining is a mapping this crate already had, expressed in the lane count rather than in the element
-type.
-
-So the packed mapping's benefit is available without the packed mapping: ask for `Simd<i8, 128>`
-and each lane holds four elements *as four strips*, one instruction each, no masking, no carry
-between them, and the same four bytes move per lane. That is the argument this record rests on,
-and it is the reason the measurement is in it.
-
-Two honest qualifications. The 6.45× is not a pure bandwidth ratio: at this size the `i32` buffers
-are 64 MB each and land in the regime `notes/NEXT.md` records as unsteady past ~50 MB, while the
-`i8` ones do not — some of that factor is cache residency rather than bytes. And at 1 048 576
-elements every unstripped row takes the same 9 µs whatever its width, because at that size the
-dispatch is not bandwidth-bound at all and the narrow types buy nothing.
-
-## The dot product does not overturn this — 2026-08-12
-
-`VK_KHR_shader_integer_dot_product` is built now, and `OpSDot` reads a 32-bit integer as four
-packed `i8`. That looks like the packed mapping this record declines, and it is not one.
-
-**The packing is in the instruction's operands, not in the vector.** A `Simd<u32, N>` is still `N`
-lanes each holding one `u32`; `OpSDot` is an operation that reads each of those `u32`s as four
-bytes. Nothing about the lane count, the mapping or the buffer changes, and a caller who wants
-`i8` *arithmetic* still reaches for `Simd<i8, N>` and gets one element per lane.
-
-So the two coexist: `runner/tests/dot_product.rs` runs the dot product over the same bytes that
-`runner/tests/narrow.rs` runs `i8` arithmetic over, and neither knows about the other.
-
-**What the measurement says about when it is worth using**, from `runner/examples/dot.rs`:
-
-| kernel | RTX 4080 | integrated Radeon |
-| --- | --- | --- |
-| one dot product per element, 262 144 invocations | 1.00× | 1.52× |
-| thirty-two per element, 262 144 invocations | 1.18× | **9.08×** |
-
-One instruction against the eleven it replaces. On the discrete part that is worth 18% when the
-arithmetic is the bottleneck and nothing at all when it is not — it has enough integer throughput
-that eleven instructions cost nearly what one does. On the integrated part it is worth **nine
-times**.
-
-Both devices report `integerDotProduct4x8BitPackedSignedAccelerated`. That flag says the hardware
-has the instruction, not that anyone will notice.
-
-## Consequences
-
-- `Element::STRIDE` is the only new number in the type table, and `kernel/binding.rs` decorates
-  with it instead of the 4 it used to hard-code.
-- Six device features gate this and are reported separately by `simdr probe`, because a device may
-  hold any subset. For the 8-bit types: `shaderInt8` for the arithmetic and
-  `storageBuffer8BitAccess` for the buffer. For the 16-bit ones: `shaderInt16`, `shaderFloat16` and
-  `storageBuffer16BitAccess`. And over all of them, `shaderSubgroupExtendedTypes` for the subgroup
-  operations. Both devices in this machine offer all six.
-- **The third one leaves no trace in the module.** There is no SPIR-V capability for
-  `shaderSubgroupExtendedTypes`, so a module reducing over `i8` is byte-identical to one that
-  would run anywhere, validates cleanly, and is refused at pipeline creation on a device without
-  it. `runner/tests/narrow.rs` is the only layer that can tell.
-- A packed mapping remains possible later. It would be a new `Mapping` variant and a new decision
-  record, not a reinterpretation of this one.
-
-## What enforces this
-
-**Absence.** There is no packing path to take: `Element::STRIDE` gives a buffer its element size and
-every lane holds exactly one, so a caller cannot ask for four `i8` in a lane because nothing offers
-it. Enforced the way `decisions/DR-0006` is — by the thing not existing.
-
-What is *not* enforced is the reasoning. Nothing stops the packed path being added; the measurement
-saying it would not pay is in `notes/FINDINGS.md`, and it is prose.
+The 6.46× is not a bandwidth ratio alone: at 16 777 216 elements the `i32` buffers are 64 MB each
+and the `i8` ones are not, so some of the factor is residency rather than bytes, and no run
+separated the two. At 1 048 576 elements the dispatch is not bandwidth-bound and the narrow types
+buy nothing on the unstripped rows. `shaderSubgroupExtendedTypes` leaves no trace in the module, so
+a module reducing over `i8` validates and is refused at pipeline creation on a device lacking it;
+only `runner/tests/narrow.rs` can see that, and it was not run on a device that lacks it because
+neither device here does.

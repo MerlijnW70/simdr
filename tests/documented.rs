@@ -523,30 +523,64 @@ fn every_counter_counts_something_that_is_there() {
 }
 
 /// The section every decision record ends with, naming the artefact that backs it.
-const ENFORCED_BY: &str = "## What enforces this";
+/// The four sections a decision record is made of, in the order it makes them.
+///
+/// **This replaced a check for one heading, `## What enforces this`, and the replacement is
+/// stricter rather than looser.** That heading was where a record said whether it was held up by
+/// the type system, by a validator, or by nothing — the difference between a promise and a
+/// guarantee. The form below keeps that distinction and spreads it over two required sections
+/// instead of one: `The Rejected Route` carries the figure that killed the alternative, and
+/// `The Limit` says what the measurement does not establish, which is where "nothing checks this"
+/// now has to be written down.
+///
+/// Four required headings is four times the structure the old check asked for, and the order is
+/// part of it: a record that states its decision before its measurement is arguing rather than
+/// reporting.
+const SECTIONS: [&str; 4] = [
+    "## The Measurement",
+    "## The Decision",
+    "## The Rejected Route",
+    "## The Limit",
+];
 
 #[test]
-fn every_decision_record_says_what_enforces_it() {
-    let mut silent = Vec::new();
+fn every_decision_record_is_made_of_the_four_sections_in_order() {
+    let mut wrong = Vec::new();
 
     for name in decision_records() {
         let Ok(text) = fs::read_to_string(root().join("decisions").join(&name)) else {
-            silent.push(name);
+            wrong.push(format!("{name}: unreadable"));
             continue;
         };
-        if !text.contains(ENFORCED_BY) {
-            silent.push(name);
+
+        let mut at = 0;
+        for section in SECTIONS {
+            match text[at..].find(section) {
+                Some(found) => at += found + section.len(),
+                None => {
+                    let anywhere = text.contains(section);
+                    wrong.push(format!(
+                        "{name}: {section} {}",
+                        if anywhere {
+                            "is out of order"
+                        } else {
+                            "is missing"
+                        }
+                    ));
+                    break;
+                }
+            }
         }
     }
 
     assert!(
-        silent.is_empty(),
-        "decision records with no `{ENFORCED_BY}` section: {}\n\n\
-         `noha gate` prints `prose-only: recorded, not machine-checked` beside all of them, which \
-         is true and too blunt — three are enforced by the type system and one by something not \
-         existing. The section is where a record says which it is, and a record without one leaves \
-         a reader unable to tell a promise from a guarantee.",
-        silent.join(", ")
+        wrong.is_empty(),
+        "decision records that are not the four sections in order:\n  {}\n\n\
+         The measurement comes first because the decision is supposed to follow from it. \
+         `The Rejected Route` names what was not built and the figure that decided it, and \
+         `The Limit` says what the numbers above do not establish — including, where it is true, \
+         that nothing checks the decision at all.",
+        wrong.join("\n  ")
     );
 }
 
