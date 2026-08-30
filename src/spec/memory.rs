@@ -43,15 +43,12 @@ impl MemorySemantics {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Decoration {
     Block,
-    BufferBlock,
     ArrayStride,
     SpecId,
     Offset,
     Binding,
     DescriptorSet,
     BuiltIn,
-    NonWritable,
-    NonReadable,
 }
 
 impl Decoration {
@@ -60,11 +57,8 @@ impl Decoration {
         match self {
             Self::SpecId => 1,
             Self::Block => 2,
-            Self::BufferBlock => 3,
             Self::ArrayStride => 6,
             Self::BuiltIn => 11,
-            Self::NonWritable => 24,
-            Self::NonReadable => 25,
             Self::Binding => 33,
             Self::DescriptorSet => 34,
             Self::Offset => 35,
@@ -116,11 +110,8 @@ mod tests {
     fn every_decoration_matches_the_khronos_grammar() {
         assert_eq!(Decoration::SpecId.word(), 1);
         assert_eq!(Decoration::Block.word(), 2);
-        assert_eq!(Decoration::BufferBlock.word(), 3);
         assert_eq!(Decoration::ArrayStride.word(), 6);
         assert_eq!(Decoration::BuiltIn.word(), 11);
-        assert_eq!(Decoration::NonWritable.word(), 24);
-        assert_eq!(Decoration::NonReadable.word(), 25);
         assert_eq!(Decoration::Binding.word(), 33);
         assert_eq!(Decoration::DescriptorSet.word(), 34);
         assert_eq!(Decoration::Offset.word(), 35);

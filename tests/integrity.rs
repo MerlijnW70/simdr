@@ -716,3 +716,92 @@ fn the_tour_knows_every_running_fold_this_crate_can_do() {
         "`Running` names folds that `src/lanes/scan.rs` does not declare: {invented:?}"
     );
 }
+
+const DECORATIONS: &str = "src/spec/memory.rs";
+
+/// The variants of the `Decoration` enum, which is the only place this crate
+/// writes those numbers down.
+fn declared_decorations() -> Vec<String> {
+    let Ok(text) = fs::read_to_string(root().join(DECORATIONS)) else {
+        return Vec::new();
+    };
+    let Some(body) = text.split("pub enum Decoration {").nth(1) else {
+        return Vec::new();
+    };
+    let Some(body) = body.split('}').next() else {
+        return Vec::new();
+    };
+
+    body.lines()
+        .map(str::trim)
+        .filter_map(|line| line.strip_suffix(','))
+        .filter(|name| !name.is_empty() && name.chars().all(char::is_alphanumeric))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Whether anything outside `DECORATIONS` writes `Decoration::<name>`.
+///
+/// The bare name will not do here the way it does for an opcode. `BITWISE_AND`
+/// is a word nothing else says, but a decoration is called `Block`, `Offset` or
+/// `Binding`, and this tree says all three about other things -- so a dead one
+/// would look emitted. The qualified form is the one that only appears where
+/// the decoration is actually used.
+fn decoration_is_written(name: &str) -> bool {
+    let qualified = format!("Decoration::{name}");
+
+    workspace_files()
+        .into_iter()
+        .filter(|path| path != DECORATIONS)
+        .filter_map(|path| fs::read_to_string(root().join(&path)).ok())
+        .any(|text| text.contains(&qualified))
+}
+
+#[test]
+fn every_decoration_is_emitted_by_something() {
+    let declared = declared_decorations();
+
+    assert!(
+        !declared.is_empty(),
+        "no decoration was found in {DECORATIONS}, so this test is checking nothing"
+    );
+
+    let unemitted: Vec<String> = declared
+        .into_iter()
+        .filter(|name| !decoration_is_written(name))
+        .collect();
+
+    assert!(
+        unemitted.is_empty(),
+        "these decorations are declared in {DECORATIONS} and emitted by nothing, so no module \
+         carries them and `spirv-val` has never checked the number -- the same hole \
+         `every_opcode_is_emitted_by_something` watches for on the opcode side. Emit them, or \
+         delete them and read the number out of the grammar again when it is wanted:\n{unemitted:#?}"
+    );
+}
+
+#[test]
+fn the_decoration_scanner_looks_for_the_qualified_name_and_not_the_bare_one() {
+    assert!(
+        decoration_is_written("Block"),
+        "the scanner missed a decoration this tree certainly writes"
+    );
+    assert!(
+        !decoration_is_written("Uniform"),
+        "`Uniform` is a type this crate declares and a word it says often, and no decoration by \
+         that name is written anywhere -- a scanner matching bare words would call it emitted, \
+         which is the hole this form closes"
+    );
+}
+
+#[test]
+fn the_decoration_scanner_finds_the_names_that_are_there() {
+    let declared = declared_decorations();
+
+    for expected in ["Block", "ArrayStride", "Offset", "Binding", "BuiltIn"] {
+        assert!(
+            declared.iter().any(|name| name == expected),
+            "the scanner missed {expected}, so it could miss a dead one too"
+        );
+    }
+}

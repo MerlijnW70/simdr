@@ -54,6 +54,13 @@ impl<T: Element> Kernel<T> {
         })
     }
 
+    /// Writes `value` into the slot `slot` names.
+    ///
+    /// The slot is a value rather than a number known here, so unlike
+    /// [`Kernel::load_shared`] this cannot check it against the length. A write
+    /// past the end is what the device makes of it, and in workgroup storage
+    /// that is another allocation rather than a wasted read -- so this is the
+    /// side to keep inside the bounds, not the read.
     pub fn store_shared(&mut self, shared: Shared, slot: Id, value: Id) -> Result<(), LaneError> {
         let pointer =
             self.module()
@@ -61,6 +68,8 @@ impl<T: Element> Kernel<T> {
         Ok(self.module().store(pointer, value)?)
     }
 
+    /// Reads the slot `index` names, which is a number known here and so is
+    /// checked against the length rather than trusted.
     pub fn load_shared(&mut self, shared: Shared, index: u32) -> Result<Id, LaneError> {
         if index >= shared.length {
             return Err(LaneError::NoSuchBuffer {

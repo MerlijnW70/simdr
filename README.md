@@ -42,6 +42,26 @@ rather than one sequence with a parameter. Equal is `WholeSubgroup`; a divisor i
 multiple is `Strips`. Anything else has no mapping and is refused by name as a `LaneError`, as is a
 shuffle operand that reaches outside the lanes the vector occupies.
 
+## Branches
+
+A branch is taken by a whole subgroup or by none of it, and that is enforced by
+the types rather than asked for in prose. `branch_conditional` is reached from
+three places in the lane API, and every one of them carries a `Uniform` or a
+loop counter against a build-time limit. A `Predicate` — what a comparison
+returns, one bool per lane — has no path into a branch at all: it can be
+selected on, voted on, or turned into a `Uniform` by `any_uniform`,
+`all_uniform` or `all_equal_uniform`, and `Uniform` cannot be built anywhere
+else.
+
+Two things follow. Lanes never diverge, so `barrier()` is reached by every
+invocation of the workgroup or by none, which is what makes it defined at all.
+And a subgroup operation is never emitted under a condition that only some of
+its lanes met, which is the error this restriction exists to make unwritable.
+
+The price is that per-lane control flow is not expressible. Where a scalar
+language would branch, this selects: `select` picks per element and emits no
+label.
+
 ## Running it
 
 ```
@@ -62,8 +82,8 @@ fails the build, so nothing here is stated on trust.
 | --- | --- |
 | SPIR-V opcodes declared | <!--count:opcodes-->121 |
 | lane operations | <!--count:lane-operations-->104 |
-| `#[test]` functions | <!--count:test-functions-->980 |
-| checks in `tests/integrity.rs` | <!--count:integrity-tests-->19 |
+| `#[test]` functions | <!--count:test-functions-->983 |
+| checks in `tests/integrity.rs` | <!--count:integrity-tests-->22 |
 | checks in `tests/documented.rs` | <!--count:documented-tests-->12 |
 | counters behind this table | <!--count:counters-->10 |
 | CI jobs | <!--count:ci-jobs-->5 |
