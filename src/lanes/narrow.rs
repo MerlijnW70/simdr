@@ -19,6 +19,7 @@ impl Element for I8 {
     const EQUAL: u16 = op::I_EQUAL;
     const NOT_EQUAL: u16 = op::I_NOT_EQUAL;
     const GROUP_ADD: u16 = op::GROUP_NON_UNIFORM_I_ADD;
+    const GROUP_MUL: u16 = op::GROUP_NON_UNIFORM_I_MUL;
     const GROUP_MAX: u16 = op::GROUP_NON_UNIFORM_S_MAX;
     const GROUP_MIN: u16 = op::GROUP_NON_UNIFORM_S_MIN;
     const MIN: Glsl = Glsl::SMin;
@@ -63,6 +64,7 @@ impl Element for U8 {
     const EQUAL: u16 = op::I_EQUAL;
     const NOT_EQUAL: u16 = op::I_NOT_EQUAL;
     const GROUP_ADD: u16 = op::GROUP_NON_UNIFORM_I_ADD;
+    const GROUP_MUL: u16 = op::GROUP_NON_UNIFORM_I_MUL;
     const GROUP_MAX: u16 = op::GROUP_NON_UNIFORM_U_MAX;
     const GROUP_MIN: u16 = op::GROUP_NON_UNIFORM_U_MIN;
     const MIN: Glsl = Glsl::UMin;
@@ -102,6 +104,7 @@ impl Element for I16 {
     const EQUAL: u16 = op::I_EQUAL;
     const NOT_EQUAL: u16 = op::I_NOT_EQUAL;
     const GROUP_ADD: u16 = op::GROUP_NON_UNIFORM_I_ADD;
+    const GROUP_MUL: u16 = op::GROUP_NON_UNIFORM_I_MUL;
     const GROUP_MAX: u16 = op::GROUP_NON_UNIFORM_S_MAX;
     const GROUP_MIN: u16 = op::GROUP_NON_UNIFORM_S_MIN;
     const MIN: Glsl = Glsl::SMin;
@@ -146,6 +149,7 @@ impl Element for U16 {
     const EQUAL: u16 = op::I_EQUAL;
     const NOT_EQUAL: u16 = op::I_NOT_EQUAL;
     const GROUP_ADD: u16 = op::GROUP_NON_UNIFORM_I_ADD;
+    const GROUP_MUL: u16 = op::GROUP_NON_UNIFORM_I_MUL;
     const GROUP_MAX: u16 = op::GROUP_NON_UNIFORM_U_MAX;
     const GROUP_MIN: u16 = op::GROUP_NON_UNIFORM_U_MIN;
     const MIN: Glsl = Glsl::UMin;
@@ -185,6 +189,7 @@ impl Element for F16 {
     const EQUAL: u16 = op::F_ORD_EQUAL;
     const NOT_EQUAL: u16 = op::F_ORD_NOT_EQUAL;
     const GROUP_ADD: u16 = op::GROUP_NON_UNIFORM_F_ADD;
+    const GROUP_MUL: u16 = op::GROUP_NON_UNIFORM_F_MUL;
     const GROUP_MAX: u16 = op::GROUP_NON_UNIFORM_F_MAX;
     const GROUP_MIN: u16 = op::GROUP_NON_UNIFORM_F_MIN;
     const MIN: Glsl = Glsl::FMin;

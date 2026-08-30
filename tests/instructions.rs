@@ -3,6 +3,7 @@ mod common;
 use common::{VULKAN_1_1, expect_valid, validate, validator};
 use simdr::kernel::{Kernel, Shape};
 use simdr::lanes::{Element, F32, I8, I16, I32, Integer, Lanes, U8, U16, U32};
+use simdr::module::op;
 
 fn shape() -> Shape {
     Shape::new(32, 64, 2)
@@ -705,4 +706,48 @@ fn the_bitwise_family_is_valid_spirv_over_both_integer_families() {
 
     expect_valid(&signed, "kernel-bitwise-i32", VULKAN_1_1);
     expect_valid(&unsigned, "kernel-bitwise-u32", VULKAN_1_1);
+}
+
+#[test]
+fn the_bitwise_reductions_and_the_product_are_valid_spirv() {
+    let unsigned = {
+        let mut kernel = Kernel::<U32>::new(shape()).expect("built");
+        let value = kernel.load::<32>(0).expect("loaded");
+
+        let total = {
+            let mut lanes = kernel.lanes().expect("lanes");
+            let all = lanes.reduce_and(value).expect("and");
+            let any = lanes.reduce_or(value).expect("or");
+            let parity = lanes.reduce_xor(value).expect("xor");
+            let product = lanes.reduce_product(value).expect("product");
+
+            let uint = lanes.type_of::<U32>().expect("u32");
+            let mut running = all;
+            for next in [any, parity, product] {
+                running = lanes
+                    .module()
+                    .binary(op::BITWISE_XOR, uint, running, next)
+                    .expect("combined");
+            }
+            running
+        };
+
+        kernel.store_scalar(1, total).expect("stored");
+        kernel.finish().expect("finished")
+    };
+
+    let float = {
+        let mut kernel = Kernel::<F32>::new(shape()).expect("built");
+        let value = kernel.load::<32>(0).expect("loaded");
+        let product = kernel
+            .lanes()
+            .expect("lanes")
+            .reduce_product(value)
+            .expect("product");
+        kernel.store_scalar(1, product).expect("stored");
+        kernel.finish().expect("finished")
+    };
+
+    expect_valid(&unsigned, "kernel-reduce-bitwise", VULKAN_1_1);
+    expect_valid(&float, "kernel-reduce-product", VULKAN_1_1);
 }

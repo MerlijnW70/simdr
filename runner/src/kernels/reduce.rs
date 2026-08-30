@@ -1,12 +1,44 @@
 use super::{shape, whole_subgroup, whole_subgroup_of};
 use simdr::kernel::Kernel;
-use simdr::lanes::{Element, LaneError, Mapping};
+use simdr::lanes::{Element, Integer, LaneError, Mapping};
 
 pub fn lane_sum<T: Element, const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
     let mut kernel = Kernel::<T>::new(shape(subgroup))?;
     let value = kernel.load::<LANES>(0)?;
     let total = kernel.lanes()?.reduce_sum(value)?;
     kernel.store_scalar(1, total)?;
+    kernel.finish()
+}
+
+pub fn lane_product<T: Element, const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    let mut kernel = Kernel::<T>::new(shape(subgroup))?;
+    let value = kernel.load::<LANES>(0)?;
+    let product = kernel.lanes()?.reduce_product(value)?;
+    kernel.store_scalar(1, product)?;
+    kernel.finish()
+}
+
+pub fn lane_and<T: Integer, const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    let mut kernel = Kernel::<T>::new(shape(subgroup))?;
+    let value = kernel.load::<LANES>(0)?;
+    let all = kernel.lanes()?.reduce_and(value)?;
+    kernel.store_scalar(1, all)?;
+    kernel.finish()
+}
+
+pub fn lane_or<T: Integer, const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    let mut kernel = Kernel::<T>::new(shape(subgroup))?;
+    let value = kernel.load::<LANES>(0)?;
+    let any = kernel.lanes()?.reduce_or(value)?;
+    kernel.store_scalar(1, any)?;
+    kernel.finish()
+}
+
+pub fn lane_xor<T: Integer, const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    let mut kernel = Kernel::<T>::new(shape(subgroup))?;
+    let value = kernel.load::<LANES>(0)?;
+    let parity = kernel.lanes()?.reduce_xor(value)?;
+    kernel.store_scalar(1, parity)?;
     kernel.finish()
 }
 
@@ -203,6 +235,22 @@ fn butterfly_cluster_sum_at<const LANES: u32>(subgroup: u32) -> Result<Vec<u32>,
 
 pub fn lane_sum_whole<T: Element>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
     whole_subgroup_of!(T, subgroup, lane_sum)
+}
+
+pub fn lane_product_whole<T: Element>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup_of!(T, subgroup, lane_product)
+}
+
+pub fn lane_and_whole<T: Integer>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup_of!(T, subgroup, lane_and)
+}
+
+pub fn lane_or_whole<T: Integer>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup_of!(T, subgroup, lane_or)
+}
+
+pub fn lane_xor_whole<T: Integer>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup_of!(T, subgroup, lane_xor)
 }
 
 pub fn lane_max_whole<T: Element>(subgroup: u32) -> Result<Vec<u32>, LaneError> {

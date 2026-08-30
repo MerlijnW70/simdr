@@ -52,6 +52,12 @@ pub fn ramp(count: usize) -> Vec<f32> {
     (0..count).map(|index| index as f32).collect()
 }
 
+pub fn ramp_u32(count: usize) -> Vec<u32> {
+    (0..count as u32)
+        .map(|index| index.wrapping_mul(37) | 1)
+        .collect()
+}
+
 pub fn grouped_sums(count: usize, group: usize) -> Vec<f32> {
     (0..count)
         .map(|lane| {

@@ -1,6 +1,6 @@
 mod common;
 
-use common::{device, grouped_sums, ramp, runnable};
+use common::{device, grouped_sums, ramp, ramp_u32, runnable};
 use runner::kernels::{self, WORKGROUP_SIZE};
 use simdr::lanes::{F32, U32};
 
@@ -521,4 +521,187 @@ fn a_complement_on_a_signed_lane_is_ones_complement_and_not_a_negation() {
             "the complement and the negation differ by one, and this is the complement"
         );
     }
+}
+
+#[test]
+fn the_three_bitwise_reductions_fold_the_lanes_they_are_named_over() {
+    let Some(gpu) = device("bitwise-reduce") else {
+        return;
+    };
+
+    let width = gpu.limits().subgroup_size as usize;
+    let count = WORKGROUP_SIZE as usize;
+
+    // Distinct low bits per lane, so `and` clears where `or` sets and the
+    // parity of each column decides `xor` — no two of the three agree.
+    let input: Vec<u32> = (0..count as u32).map(|index| (index * 7) | 1).collect();
+
+    let modules = [
+        kernels::lane_and_whole::<U32>(gpu.limits().subgroup_size).expect("built"),
+        kernels::lane_or_whole::<U32>(gpu.limits().subgroup_size).expect("built"),
+        kernels::lane_xor_whole::<U32>(gpu.limits().subgroup_size).expect("built"),
+    ];
+    let borrowed: Vec<&[u32]> = modules.iter().map(Vec::as_slice).collect();
+    if !runnable(&gpu, "bitwise-reduce", &borrowed) {
+        return;
+    }
+
+    let folded = |combine: fn(u32, u32) -> u32| -> Vec<u32> {
+        (0..count)
+            .map(|lane| {
+                let first = lane / width * width;
+                input[first..(first + width).min(count)]
+                    .iter()
+                    .copied()
+                    .reduce(combine)
+                    .expect("a subgroup holds at least one lane")
+            })
+            .collect()
+    };
+
+    let outputs: Vec<Vec<u32>> = modules
+        .iter()
+        .map(|spirv| gpu.run_u32(spirv, &input, 1).expect("dispatched"))
+        .collect();
+
+    assert_eq!(outputs[0], folded(|a, b| a & b), "and");
+    assert_eq!(outputs[1], folded(|a, b| a | b), "or");
+    assert_eq!(outputs[2], folded(|a, b| a ^ b), "xor");
+
+    assert_ne!(outputs[0], outputs[1], "and and or must not agree here");
+    assert_ne!(outputs[1], outputs[2], "nor or and xor");
+    assert_ne!(outputs[0], outputs[2], "nor and and xor");
+}
+
+#[test]
+fn a_product_reduction_multiplies_the_lanes_rather_than_adding_them() {
+    let Some(gpu) = device("product-reduce") else {
+        return;
+    };
+
+    let width = gpu.limits().subgroup_size as usize;
+    let count = WORKGROUP_SIZE as usize;
+
+    // Values a wrapping product stays exact over, and never 1, so a dropped
+    // multiply cannot hide in an identity.
+    let input: Vec<u32> = (0..count).map(|index| (index % 3 + 2) as u32).collect();
+
+    let spirv = kernels::lane_product_whole::<U32>(gpu.limits().subgroup_size).expect("built");
+    if !runnable(&gpu, "product-reduce", &[&spirv]) {
+        return;
+    }
+
+    let output = gpu.run_u32(&spirv, &input, 1).expect("dispatched");
+
+    let expected: Vec<u32> = (0..count)
+        .map(|lane| {
+            let first = lane / width * width;
+            input[first..(first + width).min(count)]
+                .iter()
+                .fold(1_u32, |total, value| total.wrapping_mul(*value))
+        })
+        .collect();
+
+    assert_eq!(output, expected);
+
+    let sums: Vec<u32> = (0..count)
+        .map(|lane| {
+            let first = lane / width * width;
+            input[first..(first + width).min(count)].iter().sum()
+        })
+        .collect();
+    assert_ne!(output, sums, "a product is not a sum over this input");
+}
+
+#[test]
+fn the_new_reductions_cluster_and_strip_mine_like_every_other_one() {
+    let Some(gpu) = device("reduce-shapes") else {
+        return;
+    };
+    let limits = gpu.limits().clone();
+
+    let width = limits.subgroup_size as usize;
+    if width < 4 {
+        eprintln!("SKIPPED reduce-shapes: a subgroup of {width} has no cluster of four");
+        return;
+    }
+    let count = WORKGROUP_SIZE as usize;
+    let input: Vec<u32> = (0..count as u32)
+        .map(|index| index.wrapping_mul(37) | 1)
+        .collect();
+
+    let in_clusters = |combine: fn(u32, u32) -> u32, seed: Option<u32>| -> Vec<u32> {
+        (0..count)
+            .map(|lane| {
+                let first = lane / 4 * 4;
+                let cluster = input[first..(first + 4).min(count)].iter().copied();
+                match seed {
+                    Some(start) => cluster.fold(start, combine),
+                    None => cluster.reduce(combine).expect("a cluster is not empty"),
+                }
+            })
+            .collect()
+    };
+
+    let clustered = [
+        (
+            "and",
+            kernels::lane_and::<U32, 4>(limits.subgroup_size).expect("built"),
+            in_clusters(|a, b| a & b, None),
+        ),
+        (
+            "or",
+            kernels::lane_or::<U32, 4>(limits.subgroup_size).expect("built"),
+            in_clusters(|a, b| a | b, None),
+        ),
+        (
+            "product",
+            kernels::lane_product::<U32, 4>(limits.subgroup_size).expect("built"),
+            in_clusters(u32::wrapping_mul, Some(1)),
+        ),
+    ];
+
+    let borrowed: Vec<&[u32]> = clustered
+        .iter()
+        .map(|(_, spirv, _)| spirv.as_slice())
+        .collect();
+    if !runnable(&gpu, "reduce-shapes", &borrowed) {
+        return;
+    }
+
+    for (name, spirv, expected) in &clustered {
+        let output = gpu.run_u32(spirv, &input, 1).expect("dispatched");
+        assert_eq!(output, *expected, "{name} in clusters of four");
+    }
+
+    let strips = 2_usize;
+    let stride = count;
+    let wide = ramp_u32(count * strips);
+    let spirv = match limits.subgroup_size {
+        32 => kernels::lane_xor::<U32, 64>(32).expect("built"),
+        64 => kernels::lane_xor::<U32, 128>(64).expect("built"),
+        other => {
+            eprintln!("SKIPPED reduce-shapes: no strip-mined case written for {other}");
+            return;
+        }
+    };
+
+    let output = gpu.run_u32(&spirv, &wide, 1).expect("dispatched");
+    let expected: Vec<u32> = (0..count)
+        .map(|lane| {
+            let first = lane / width * width;
+            (first..first + width)
+                .flat_map(|other| (0..strips).map(move |strip| other + strip * stride))
+                .fold(0_u32, |total, index| total ^ wide[index])
+        })
+        .collect();
+
+    assert_eq!(&output[..count], &expected[..count], "xor, strip-mined");
+
+    let one_strip_only = (0..width).fold(0_u32, |total, other| total ^ wide[other]);
+    assert_ne!(
+        output.first(),
+        Some(&one_strip_only),
+        "the second strip was not folded in"
+    );
 }
