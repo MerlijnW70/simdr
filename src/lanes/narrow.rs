@@ -9,9 +9,15 @@ impl Element for I8 {
     const NAME: &'static str = "i8";
     const STRIDE: u32 = 1;
     const ADD: u16 = op::I_ADD;
+    const SUB: u16 = op::I_SUB;
     const MUL: u16 = op::I_MUL;
+    const DIV: u16 = op::S_DIV;
     const GREATER_THAN: u16 = op::S_GREATER_THAN;
+    const GREATER_THAN_EQUAL: u16 = op::S_GREATER_THAN_EQUAL;
+    const LESS_THAN: u16 = op::S_LESS_THAN;
+    const LESS_THAN_EQUAL: u16 = op::S_LESS_THAN_EQUAL;
     const EQUAL: u16 = op::I_EQUAL;
+    const NOT_EQUAL: u16 = op::I_NOT_EQUAL;
     const GROUP_ADD: u16 = op::GROUP_NON_UNIFORM_I_ADD;
     const GROUP_MAX: u16 = op::GROUP_NON_UNIFORM_S_MAX;
     const GROUP_MIN: u16 = op::GROUP_NON_UNIFORM_S_MIN;
@@ -37,6 +43,7 @@ impl Element for I8 {
 
 impl Signed for I8 {
     const ABS: Glsl = Glsl::SAbs;
+    const NEGATE: u16 = op::S_NEGATE;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,9 +53,15 @@ impl Element for U8 {
     const NAME: &'static str = "u8";
     const STRIDE: u32 = 1;
     const ADD: u16 = op::I_ADD;
+    const SUB: u16 = op::I_SUB;
     const MUL: u16 = op::I_MUL;
+    const DIV: u16 = op::U_DIV;
     const GREATER_THAN: u16 = op::U_GREATER_THAN;
+    const GREATER_THAN_EQUAL: u16 = op::U_GREATER_THAN_EQUAL;
+    const LESS_THAN: u16 = op::U_LESS_THAN;
+    const LESS_THAN_EQUAL: u16 = op::U_LESS_THAN_EQUAL;
     const EQUAL: u16 = op::I_EQUAL;
+    const NOT_EQUAL: u16 = op::I_NOT_EQUAL;
     const GROUP_ADD: u16 = op::GROUP_NON_UNIFORM_I_ADD;
     const GROUP_MAX: u16 = op::GROUP_NON_UNIFORM_U_MAX;
     const GROUP_MIN: u16 = op::GROUP_NON_UNIFORM_U_MIN;
@@ -79,9 +92,15 @@ impl Element for I16 {
     const NAME: &'static str = "i16";
     const STRIDE: u32 = 2;
     const ADD: u16 = op::I_ADD;
+    const SUB: u16 = op::I_SUB;
     const MUL: u16 = op::I_MUL;
+    const DIV: u16 = op::S_DIV;
     const GREATER_THAN: u16 = op::S_GREATER_THAN;
+    const GREATER_THAN_EQUAL: u16 = op::S_GREATER_THAN_EQUAL;
+    const LESS_THAN: u16 = op::S_LESS_THAN;
+    const LESS_THAN_EQUAL: u16 = op::S_LESS_THAN_EQUAL;
     const EQUAL: u16 = op::I_EQUAL;
+    const NOT_EQUAL: u16 = op::I_NOT_EQUAL;
     const GROUP_ADD: u16 = op::GROUP_NON_UNIFORM_I_ADD;
     const GROUP_MAX: u16 = op::GROUP_NON_UNIFORM_S_MAX;
     const GROUP_MIN: u16 = op::GROUP_NON_UNIFORM_S_MIN;
@@ -107,6 +126,7 @@ impl Element for I16 {
 
 impl Signed for I16 {
     const ABS: Glsl = Glsl::SAbs;
+    const NEGATE: u16 = op::S_NEGATE;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,9 +136,15 @@ impl Element for U16 {
     const NAME: &'static str = "u16";
     const STRIDE: u32 = 2;
     const ADD: u16 = op::I_ADD;
+    const SUB: u16 = op::I_SUB;
     const MUL: u16 = op::I_MUL;
+    const DIV: u16 = op::U_DIV;
     const GREATER_THAN: u16 = op::U_GREATER_THAN;
+    const GREATER_THAN_EQUAL: u16 = op::U_GREATER_THAN_EQUAL;
+    const LESS_THAN: u16 = op::U_LESS_THAN;
+    const LESS_THAN_EQUAL: u16 = op::U_LESS_THAN_EQUAL;
     const EQUAL: u16 = op::I_EQUAL;
+    const NOT_EQUAL: u16 = op::I_NOT_EQUAL;
     const GROUP_ADD: u16 = op::GROUP_NON_UNIFORM_I_ADD;
     const GROUP_MAX: u16 = op::GROUP_NON_UNIFORM_U_MAX;
     const GROUP_MIN: u16 = op::GROUP_NON_UNIFORM_U_MIN;
@@ -149,9 +175,15 @@ impl Element for F16 {
     const NAME: &'static str = "f16";
     const STRIDE: u32 = 2;
     const ADD: u16 = op::F_ADD;
+    const SUB: u16 = op::F_SUB;
     const MUL: u16 = op::F_MUL;
+    const DIV: u16 = op::F_DIV;
     const GREATER_THAN: u16 = op::F_ORD_GREATER_THAN;
+    const GREATER_THAN_EQUAL: u16 = op::F_ORD_GREATER_THAN_EQUAL;
+    const LESS_THAN: u16 = op::F_ORD_LESS_THAN;
+    const LESS_THAN_EQUAL: u16 = op::F_ORD_LESS_THAN_EQUAL;
     const EQUAL: u16 = op::F_ORD_EQUAL;
+    const NOT_EQUAL: u16 = op::F_ORD_NOT_EQUAL;
     const GROUP_ADD: u16 = op::GROUP_NON_UNIFORM_F_ADD;
     const GROUP_MAX: u16 = op::GROUP_NON_UNIFORM_F_MAX;
     const GROUP_MIN: u16 = op::GROUP_NON_UNIFORM_F_MIN;
@@ -177,6 +209,7 @@ impl Element for F16 {
 
 impl Signed for F16 {
     const ABS: Glsl = Glsl::FAbs;
+    const NEGATE: u16 = op::F_NEGATE;
 }
 
 fn sign_extend(bits: u32, width: u32) -> u32 {

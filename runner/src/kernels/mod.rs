@@ -110,6 +110,109 @@ pub fn lane_affine<const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneErro
     kernel.finish()
 }
 
+/// `-((x - 1) / 2)` per element — a subtraction, a division and a negation,
+/// none of which crosses a lane.
+pub fn lane_arithmetic(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup!(subgroup, lane_arithmetic_at)
+}
+
+fn lane_arithmetic_at<const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    use simdr::lanes::F32;
+
+    let mut kernel = Kernel::<F32>::new(shape(subgroup))?;
+    let value = kernel.load::<LANES>(0)?;
+    let result = {
+        let mut lanes = kernel.lanes()?;
+        let one = lanes.splat_bits::<F32, LANES>(1.0_f32.to_bits())?;
+        let two = lanes.splat_bits::<F32, LANES>(2.0_f32.to_bits())?;
+
+        let shifted = lanes.sub(value, one)?;
+        let halved = lanes.div(shifted, two)?;
+        lanes.neg(halved)?
+    };
+    kernel.store(1, result)?;
+    kernel.finish()
+}
+
+/// Each of the six comparisons against `THRESHOLD` contributes its own power of
+/// two, so the one number a lane writes says which of them held and no two
+/// subsets share an answer.
+pub const ORDERING_THRESHOLD: f32 = 4.0;
+
+pub fn lane_ordering(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup!(subgroup, lane_ordering_at)
+}
+
+fn lane_ordering_at<const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    use simdr::lanes::F32;
+
+    let mut kernel = Kernel::<F32>::new(shape(subgroup))?;
+    let value = kernel.load::<LANES>(0)?;
+    let result = {
+        let mut lanes = kernel.lanes()?;
+        let threshold = lanes.splat_bits::<F32, LANES>(ORDERING_THRESHOLD.to_bits())?;
+        let zero = lanes.splat_bits::<F32, LANES>(0.0_f32.to_bits())?;
+
+        let held = [
+            (lanes.less_than(value, threshold)?, 1.0_f32),
+            (lanes.less_equal(value, threshold)?, 2.0),
+            (lanes.greater_than(value, threshold)?, 4.0),
+            (lanes.greater_equal(value, threshold)?, 8.0),
+            (lanes.equal(value, threshold)?, 16.0),
+            (lanes.not_equal(value, threshold)?, 32.0),
+        ];
+
+        let mut total = zero;
+        for (predicate, weight) in held {
+            let bit = lanes.splat_bits::<F32, LANES>(weight.to_bits())?;
+            let contribution = lanes.select(predicate, bit, zero)?;
+            total = lanes.add(total, contribution)?;
+        }
+        total
+    };
+    kernel.store(1, result)?;
+    kernel.finish()
+}
+
+/// The same division over both integer families, so a signed operand that a
+/// `OpUDiv` would read as an enormous positive number is caught.
+pub fn lane_divide_signed(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup!(subgroup, lane_divide_signed_at)
+}
+
+fn lane_divide_signed_at<const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    use simdr::lanes::I32;
+
+    let mut kernel = Kernel::<I32>::new(shape(subgroup))?;
+    let value = kernel.load::<LANES>(0)?;
+    let result = {
+        let mut lanes = kernel.lanes()?;
+        let two = lanes.splat_bits::<I32, LANES>(2)?;
+        let quotient = lanes.div(value, two)?;
+        lanes.neg(quotient)?
+    };
+    kernel.store(1, result)?;
+    kernel.finish()
+}
+
+pub fn lane_divide_unsigned(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup!(subgroup, lane_divide_unsigned_at)
+}
+
+fn lane_divide_unsigned_at<const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    use simdr::lanes::U32;
+
+    let mut kernel = Kernel::<U32>::new(shape(subgroup))?;
+    let value = kernel.load::<LANES>(0)?;
+    let result = {
+        let mut lanes = kernel.lanes()?;
+        let two = lanes.splat_bits::<U32, LANES>(2)?;
+        lanes.div(value, two)?
+    };
+    kernel.store(1, result)?;
+    kernel.finish()
+}
+
 pub fn square(subgroup: u32) -> Result<Vec<u32>, LaneError> {
     whole_subgroup!(subgroup, square_at)
 }

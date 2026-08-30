@@ -7,9 +7,19 @@ pub trait Element: Copy + core::fmt::Debug + 'static {
     const STRIDE: u32;
 
     const ADD: u16;
+    const SUB: u16;
     const MUL: u16;
+    const DIV: u16;
+
+    /// The comparisons are the ordered family throughout: a NaN operand answers
+    /// false to every one of them, `NOT_EQUAL` included, so `not_equal` is not
+    /// the negation of `equal` where NaN reaches it.
     const GREATER_THAN: u16;
+    const GREATER_THAN_EQUAL: u16;
+    const LESS_THAN: u16;
+    const LESS_THAN_EQUAL: u16;
     const EQUAL: u16;
+    const NOT_EQUAL: u16;
 
     const GROUP_ADD: u16;
     const GROUP_MAX: u16;
@@ -33,6 +43,7 @@ pub trait Element: Copy + core::fmt::Debug + 'static {
 
 pub trait Signed: Element {
     const ABS: Glsl;
+    const NEGATE: u16;
 }
 
 pub trait Integer: Element {}
@@ -47,9 +58,15 @@ impl Element for F32 {
     const NAME: &'static str = "f32";
     const STRIDE: u32 = 4;
     const ADD: u16 = op::F_ADD;
+    const SUB: u16 = op::F_SUB;
     const MUL: u16 = op::F_MUL;
+    const DIV: u16 = op::F_DIV;
     const GREATER_THAN: u16 = op::F_ORD_GREATER_THAN;
+    const GREATER_THAN_EQUAL: u16 = op::F_ORD_GREATER_THAN_EQUAL;
+    const LESS_THAN: u16 = op::F_ORD_LESS_THAN;
+    const LESS_THAN_EQUAL: u16 = op::F_ORD_LESS_THAN_EQUAL;
     const EQUAL: u16 = op::F_ORD_EQUAL;
+    const NOT_EQUAL: u16 = op::F_ORD_NOT_EQUAL;
     const GROUP_ADD: u16 = op::GROUP_NON_UNIFORM_F_ADD;
     const GROUP_MAX: u16 = op::GROUP_NON_UNIFORM_F_MAX;
     const GROUP_MIN: u16 = op::GROUP_NON_UNIFORM_F_MIN;
@@ -74,9 +91,15 @@ impl Element for I32 {
     const NAME: &'static str = "i32";
     const STRIDE: u32 = 4;
     const ADD: u16 = op::I_ADD;
+    const SUB: u16 = op::I_SUB;
     const MUL: u16 = op::I_MUL;
+    const DIV: u16 = op::S_DIV;
     const GREATER_THAN: u16 = op::S_GREATER_THAN;
+    const GREATER_THAN_EQUAL: u16 = op::S_GREATER_THAN_EQUAL;
+    const LESS_THAN: u16 = op::S_LESS_THAN;
+    const LESS_THAN_EQUAL: u16 = op::S_LESS_THAN_EQUAL;
     const EQUAL: u16 = op::I_EQUAL;
+    const NOT_EQUAL: u16 = op::I_NOT_EQUAL;
     const GROUP_ADD: u16 = op::GROUP_NON_UNIFORM_I_ADD;
     const GROUP_MAX: u16 = op::GROUP_NON_UNIFORM_S_MAX;
     const GROUP_MIN: u16 = op::GROUP_NON_UNIFORM_S_MIN;
@@ -101,9 +124,15 @@ impl Element for U32 {
     const NAME: &'static str = "u32";
     const STRIDE: u32 = 4;
     const ADD: u16 = op::I_ADD;
+    const SUB: u16 = op::I_SUB;
     const MUL: u16 = op::I_MUL;
+    const DIV: u16 = op::U_DIV;
     const GREATER_THAN: u16 = op::U_GREATER_THAN;
+    const GREATER_THAN_EQUAL: u16 = op::U_GREATER_THAN_EQUAL;
+    const LESS_THAN: u16 = op::U_LESS_THAN;
+    const LESS_THAN_EQUAL: u16 = op::U_LESS_THAN_EQUAL;
     const EQUAL: u16 = op::I_EQUAL;
+    const NOT_EQUAL: u16 = op::I_NOT_EQUAL;
     const GROUP_ADD: u16 = op::GROUP_NON_UNIFORM_I_ADD;
     const GROUP_MAX: u16 = op::GROUP_NON_UNIFORM_U_MAX;
     const GROUP_MIN: u16 = op::GROUP_NON_UNIFORM_U_MIN;
@@ -123,10 +152,12 @@ impl Element for U32 {
 
 impl Signed for F32 {
     const ABS: Glsl = Glsl::FAbs;
+    const NEGATE: u16 = op::F_NEGATE;
 }
 
 impl Signed for I32 {
     const ABS: Glsl = Glsl::SAbs;
+    const NEGATE: u16 = op::S_NEGATE;
 }
 
 #[cfg(test)]

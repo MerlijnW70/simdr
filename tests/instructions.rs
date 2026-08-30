@@ -2,7 +2,7 @@ mod common;
 
 use common::{VULKAN_1_1, expect_valid, validate, validator};
 use simdr::kernel::{Kernel, Shape};
-use simdr::lanes::{Element, F32, I8, I16, I32, Integer, U8, U16, U32};
+use simdr::lanes::{Element, F32, I8, I16, I32, Integer, Lanes, U8, U16, U32};
 
 fn shape() -> Shape {
     Shape::new(32, 64, 2)
@@ -559,4 +559,104 @@ fn integer_subtract_and_divide_are_valid_spirv() {
 
     let words = kernel.finish().expect("finished");
     expect_valid(&words, "integer subtract and divide", VULKAN_1_1);
+}
+
+#[test]
+fn the_elementwise_arithmetic_is_valid_spirv_over_floats() {
+    let mut kernel = Kernel::<F32>::new(shape()).expect("built");
+    let value = kernel.load::<32>(0).expect("loaded");
+
+    let total = {
+        let mut lanes = kernel.lanes().expect("lanes");
+        let two = lanes.splat_bits::<F32, 32>(2.0_f32.to_bits()).expect("two");
+
+        let difference = lanes.sub(value, two).expect("sub");
+        let quotient = lanes.div(difference, two).expect("div");
+        let negated = lanes.neg(quotient).expect("neg");
+
+        lanes.reduce_sum(negated).expect("summed")
+    };
+
+    kernel.store_scalar(1, total).expect("stored");
+    expect_valid(
+        &kernel.finish().expect("finished"),
+        "kernel-arithmetic-f32",
+        VULKAN_1_1,
+    );
+}
+
+#[test]
+fn the_elementwise_arithmetic_is_valid_spirv_over_both_integer_families() {
+    let signed = {
+        let mut kernel = Kernel::<I32>::new(shape()).expect("built");
+        let value = kernel.load::<32>(0).expect("loaded");
+
+        let total = {
+            let mut lanes = kernel.lanes().expect("lanes");
+            let three = lanes.splat_bits::<I32, 32>(3).expect("three");
+
+            let difference = lanes.sub(value, three).expect("sub");
+            let quotient = lanes.div(difference, three).expect("div");
+            let negated = lanes.neg(quotient).expect("neg");
+
+            lanes.reduce_sum(negated).expect("summed")
+        };
+
+        kernel.store_scalar(1, total).expect("stored");
+        kernel.finish().expect("finished")
+    };
+
+    let unsigned = {
+        let mut kernel = Kernel::<U32>::new(shape()).expect("built");
+        let value = kernel.load::<32>(0).expect("loaded");
+
+        let total = {
+            let mut lanes = kernel.lanes().expect("lanes");
+            let three = lanes.splat_bits::<U32, 32>(3).expect("three");
+
+            let difference = lanes.sub(value, three).expect("sub");
+            let quotient = lanes.div(difference, three).expect("div");
+
+            lanes.reduce_sum(quotient).expect("summed")
+        };
+
+        kernel.store_scalar(1, total).expect("stored");
+        kernel.finish().expect("finished")
+    };
+
+    expect_valid(&signed, "kernel-arithmetic-i32", VULKAN_1_1);
+    expect_valid(&unsigned, "kernel-arithmetic-u32", VULKAN_1_1);
+}
+
+#[test]
+fn the_whole_comparison_set_is_valid_spirv_and_selects_on_every_one() {
+    let mut kernel = Kernel::<F32>::new(shape()).expect("built");
+    let value = kernel.load::<32>(0).expect("loaded");
+
+    let picked = {
+        let mut lanes = kernel.lanes().expect("lanes");
+        let one = lanes.splat_bits::<F32, 32>(1.0_f32.to_bits()).expect("one");
+
+        let mut kept = value;
+        for compare in [
+            Lanes::less_than::<F32, 32>,
+            Lanes::less_equal::<F32, 32>,
+            Lanes::greater_than::<F32, 32>,
+            Lanes::greater_equal::<F32, 32>,
+            Lanes::equal::<F32, 32>,
+            Lanes::not_equal::<F32, 32>,
+        ] {
+            let predicate = compare(&mut lanes, kept, one).expect("compared");
+            kept = lanes.select(predicate, kept, one).expect("selected");
+        }
+
+        lanes.reduce_sum(kept).expect("summed")
+    };
+
+    kernel.store_scalar(1, picked).expect("stored");
+    expect_valid(
+        &kernel.finish().expect("finished"),
+        "kernel-comparisons",
+        VULKAN_1_1,
+    );
 }

@@ -319,3 +319,130 @@ fn the_lane_api_refuses_the_lane_counts_that_have_no_mapping() {
         "4096 lanes need more elements per lane than a vector holds inline, at any width"
     );
 }
+
+#[test]
+fn subtraction_division_and_negation_compute_per_element_on_the_device() {
+    let Some(gpu) = device("arithmetic") else {
+        return;
+    };
+
+    let width = gpu.limits().subgroup_size;
+    let count = WORKGROUP_SIZE as usize;
+    let input = ramp(count);
+
+    let output = gpu
+        .run(&kernels::lane_arithmetic(width).expect("built"), &input, 1)
+        .expect("dispatched");
+
+    let expected: Vec<f32> = input.iter().map(|value| -((value - 1.0) / 2.0)).collect();
+    assert_eq!(
+        output, expected,
+        "the three operations run in the order they were written"
+    );
+    assert!(
+        output.iter().any(|value| *value > 0.0),
+        "an input that straddles one leaves both signs behind, so a dropped negation shows"
+    );
+}
+
+#[test]
+fn each_of_the_six_comparisons_holds_exactly_where_it_should() {
+    let Some(gpu) = device("ordering") else {
+        return;
+    };
+
+    let width = gpu.limits().subgroup_size;
+    let count = WORKGROUP_SIZE as usize;
+    let input = ramp(count);
+    assert!(
+        input.contains(&kernels::ORDERING_THRESHOLD),
+        "the equal-to case has to be reached or two of the six go untested"
+    );
+
+    let output = gpu
+        .run(&kernels::lane_ordering(width).expect("built"), &input, 1)
+        .expect("dispatched");
+
+    let expected: Vec<f32> = input
+        .iter()
+        .map(|value| {
+            let threshold = kernels::ORDERING_THRESHOLD;
+            let bits = [
+                (*value < threshold, 1.0),
+                (*value <= threshold, 2.0),
+                (*value > threshold, 4.0),
+                (*value >= threshold, 8.0),
+                ((*value - threshold).abs() < f32::EPSILON, 16.0),
+                ((*value - threshold).abs() >= f32::EPSILON, 32.0),
+            ];
+            bits.iter()
+                .filter(|(held, _)| *held)
+                .map(|(_, weight)| weight)
+                .sum()
+        })
+        .collect();
+
+    assert_eq!(
+        output, expected,
+        "each comparison carries its own bit, so a wrong one names itself"
+    );
+    assert_eq!(output[0], 35.0, "below: less, less-or-equal, not-equal");
+    assert_eq!(
+        output[4], 26.0,
+        "at: less-or-equal, greater-or-equal, equal"
+    );
+    assert_eq!(
+        output[5], 44.0,
+        "above: greater, greater-or-equal, not-equal"
+    );
+}
+
+#[test]
+fn the_two_integer_families_divide_with_their_own_instruction() {
+    let Some(gpu) = device("division") else {
+        return;
+    };
+
+    let width = gpu.limits().subgroup_size;
+    let count = WORKGROUP_SIZE as usize;
+    let signed: Vec<i32> = (0..count as i32).map(|index| index - 32).collect();
+    let words: Vec<u32> = signed
+        .iter()
+        .map(|value| u32::from_ne_bytes(value.to_ne_bytes()))
+        .collect();
+
+    let signed_out = gpu
+        .run_u32(
+            &kernels::lane_divide_signed(width).expect("built"),
+            &words,
+            1,
+        )
+        .expect("dispatched");
+    let signed_out: Vec<i32> = signed_out
+        .iter()
+        .map(|word| i32::from_ne_bytes(word.to_ne_bytes()))
+        .collect();
+
+    let expected: Vec<i32> = signed.iter().map(|value| -(value / 2)).collect();
+    assert_eq!(
+        signed_out, expected,
+        "a signed division truncates toward zero and keeps the sign — OpUDiv would not"
+    );
+    assert!(
+        signed_out.iter().any(|value| *value < 0),
+        "the inputs have to reach past zero or OpUDiv would pass this too"
+    );
+
+    let unsigned_out = gpu
+        .run_u32(
+            &kernels::lane_divide_unsigned(width).expect("built"),
+            &words,
+            1,
+        )
+        .expect("dispatched");
+    let expected: Vec<u32> = words.iter().map(|word| word / 2).collect();
+    assert_eq!(
+        unsigned_out, expected,
+        "the same bits read as unsigned halve as unsigned"
+    );
+}

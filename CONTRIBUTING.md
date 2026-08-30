@@ -59,7 +59,8 @@ out of the grammar again on the day somebody wants it.
 
 ## Every number in a document is counted, not typed
 
-The counters in `README.md` carry markers like `<!--count:opcodes-->`, and `tests/documented.rs`
+The counters in `README.md` carry an HTML comment naming the counter — `count:opcodes` and its
+kin — and `tests/documented.rs`
 asserts each against the tree. Add a lane operation and the count moves; the suite tells you which
 line to change. Do not adjust a number by hand without re-running it.
 
