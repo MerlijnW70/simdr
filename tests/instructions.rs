@@ -806,3 +806,42 @@ fn a_swizzle_is_valid_spirv() {
         VULKAN_1_1,
     );
 }
+
+#[test]
+fn the_rest_of_the_math_set_is_valid_spirv() {
+    let mut kernel = Kernel::<F32>::new(shape()).expect("built");
+    let value = kernel.load::<32>(0).expect("loaded");
+
+    let total = {
+        let mut lanes = kernel.lanes().expect("lanes");
+        let angled = lanes.sin(value).expect("sin");
+        let paired = lanes.cos(angled).expect("cos");
+        let down = lanes.floor(paired).expect("floor");
+        let up = lanes.ceil(down).expect("ceil");
+        let cut = lanes.trunc(up).expect("trunc");
+        let near = lanes.round(cut).expect("round");
+        let raised = lanes.pow(near, near).expect("pow");
+        lanes.reduce_sum(raised).expect("summed")
+    };
+
+    kernel.store_scalar(1, total).expect("stored");
+    expect_valid(
+        &kernel.finish().expect("finished"),
+        "kernel-math-set",
+        VULKAN_1_1,
+    );
+}
+
+#[test]
+fn a_gather_is_valid_spirv() {
+    let mut kernel = Kernel::<U32>::new(shape()).expect("built");
+    let indices = kernel.load::<32>(0).expect("loaded");
+    let gathered = kernel.gather::<32>(0, indices).expect("gathered");
+    kernel.store(1, gathered).expect("stored");
+
+    expect_valid(
+        &kernel.finish().expect("finished"),
+        "kernel-gather",
+        VULKAN_1_1,
+    );
+}

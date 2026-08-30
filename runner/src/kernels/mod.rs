@@ -333,6 +333,67 @@ fn lane_rotate_by_swizzle_at<const LANES: u32>(
     kernel.finish()
 }
 
+/// Each lane reads the slot the second binding names for it, which is the
+/// permutation a scatter would have had to write.
+pub fn lane_gather_whole(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup!(subgroup, lane_gather)
+}
+
+/// Taken at a width of its own, so a strip-mined gather can be asked for: each
+/// strip has to reach the index of that strip and not of the first.
+pub fn lane_gather<const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    use simdr::lanes::{U32, Vector};
+
+    let mut kernel = Kernel::<U32>::new(shape(subgroup))?;
+    let indices: Vector<U32, LANES> = kernel.load::<LANES>(0)?;
+    let gathered = kernel.gather::<LANES>(0, indices)?;
+    kernel.store(1, gathered)?;
+    kernel.finish()
+}
+
+/// Which of the seven functions [`lane_transcendental`] applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transcendental {
+    Sin,
+    Cos,
+    Floor,
+    Ceil,
+    Trunc,
+    Round,
+    SquaredByPow,
+}
+
+pub fn lane_transcendental(subgroup: u32, which: Transcendental) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup!(subgroup, lane_transcendental_at, which)
+}
+
+fn lane_transcendental_at<const LANES: u32>(
+    subgroup: u32,
+    which: Transcendental,
+) -> Result<Vec<u32>, LaneError> {
+    use simdr::lanes::F32;
+
+    let mut kernel = Kernel::<F32>::new(shape(subgroup))?;
+    let value = kernel.load::<LANES>(0)?;
+    let result = {
+        let mut lanes = kernel.lanes()?;
+        match which {
+            Transcendental::Sin => lanes.sin(value)?,
+            Transcendental::Cos => lanes.cos(value)?,
+            Transcendental::Floor => lanes.floor(value)?,
+            Transcendental::Ceil => lanes.ceil(value)?,
+            Transcendental::Trunc => lanes.trunc(value)?,
+            Transcendental::Round => lanes.round(value)?,
+            Transcendental::SquaredByPow => {
+                let two = lanes.splat_bits::<F32, LANES>(2.0_f32.to_bits())?;
+                lanes.pow(value, two)?
+            }
+        }
+    };
+    kernel.store(1, result)?;
+    kernel.finish()
+}
+
 pub fn lane_affine<const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
     use simdr::lanes::F32;
 

@@ -17,7 +17,14 @@ pub enum Glsl {
     InverseSqrt,
     Exp,
     Log,
+    Pow,
     Fma,
+    Round,
+    Trunc,
+    Floor,
+    Ceil,
+    Sin,
+    Cos,
 }
 
 impl Glsl {
@@ -26,7 +33,14 @@ impl Glsl {
     #[must_use]
     pub const fn word(self) -> Word {
         match self {
+            Self::Round => 1,
+            Self::Trunc => 3,
             Self::FAbs => 4,
+            Self::Floor => 8,
+            Self::Ceil => 9,
+            Self::Sin => 13,
+            Self::Cos => 14,
+            Self::Pow => 26,
             Self::SAbs => 5,
             Self::Exp => 27,
             Self::Log => 28,
@@ -48,8 +62,25 @@ impl Glsl {
     #[must_use]
     pub const fn operands(self) -> usize {
         match self {
-            Self::FAbs | Self::SAbs | Self::Sqrt | Self::InverseSqrt | Self::Exp | Self::Log => 1,
-            Self::FMin | Self::UMin | Self::SMin | Self::FMax | Self::UMax | Self::SMax => 2,
+            Self::FAbs
+            | Self::SAbs
+            | Self::Sqrt
+            | Self::InverseSqrt
+            | Self::Exp
+            | Self::Log
+            | Self::Round
+            | Self::Trunc
+            | Self::Floor
+            | Self::Ceil
+            | Self::Sin
+            | Self::Cos => 1,
+            Self::FMin
+            | Self::UMin
+            | Self::SMin
+            | Self::FMax
+            | Self::UMax
+            | Self::SMax
+            | Self::Pow => 2,
             Self::FClamp | Self::UClamp | Self::SClamp | Self::Fma => 3,
         }
     }
@@ -58,6 +89,61 @@ impl Glsl {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_numbers_added_later_match_the_khronos_grammar_too() {
+        assert_eq!(Glsl::Round.word(), 1);
+        assert_eq!(Glsl::Trunc.word(), 3);
+        assert_eq!(Glsl::Floor.word(), 8);
+        assert_eq!(Glsl::Ceil.word(), 9);
+        assert_eq!(Glsl::Sin.word(), 13);
+        assert_eq!(Glsl::Cos.word(), 14);
+        assert_eq!(Glsl::Pow.word(), 26);
+    }
+
+    #[test]
+    fn no_two_instructions_share_a_number_and_each_says_how_many_it_takes() {
+        let every = [
+            Glsl::FAbs,
+            Glsl::SAbs,
+            Glsl::FMin,
+            Glsl::UMin,
+            Glsl::SMin,
+            Glsl::FMax,
+            Glsl::UMax,
+            Glsl::SMax,
+            Glsl::FClamp,
+            Glsl::UClamp,
+            Glsl::SClamp,
+            Glsl::Sqrt,
+            Glsl::InverseSqrt,
+            Glsl::Exp,
+            Glsl::Log,
+            Glsl::Pow,
+            Glsl::Fma,
+            Glsl::Round,
+            Glsl::Trunc,
+            Glsl::Floor,
+            Glsl::Ceil,
+            Glsl::Sin,
+            Glsl::Cos,
+        ];
+
+        let mut seen = std::collections::BTreeMap::new();
+        for instruction in every {
+            assert!(
+                (1..=3).contains(&instruction.operands()),
+                "{instruction:?} takes an operand count the grammar has no form for"
+            );
+            let clash = seen.insert(instruction.word(), instruction);
+            assert!(
+                clash.is_none(),
+                "{instruction:?} and {clash:?} share the number {}",
+                instruction.word()
+            );
+        }
+        assert_eq!(seen.len(), every.len());
+    }
 
     #[test]
     fn every_instruction_matches_the_khronos_grammar() {

@@ -2,9 +2,10 @@ mod common;
 
 type Ordering = (Comparison, fn(f32, f32) -> bool);
 type BitwisePair = (Bitwise, fn(u32, u32) -> u32);
+type Approximated = (Transcendental, fn(f32) -> f32, f32);
 
 use common::{device, grouped_sums, ramp, ramp_u32, runnable};
-use runner::kernels::{self, Bitwise, Comparison, WORKGROUP_SIZE};
+use runner::kernels::{self, Bitwise, Comparison, Transcendental, WORKGROUP_SIZE};
 use simdr::lanes::{F32, I32, U32};
 
 #[test]
@@ -1020,5 +1021,157 @@ fn saturation_is_elementwise_so_it_holds_in_clusters_and_across_strips() {
     assert!(
         output.contains(&0) && output.iter().any(|value| *value > 0),
         "the input has to reach the floor and also stay above it"
+    );
+}
+
+#[test]
+fn a_gather_reads_the_slot_each_lane_named_rather_than_its_own() {
+    let Some(gpu) = device("gather") else {
+        return;
+    };
+
+    let width = gpu.limits().subgroup_size;
+    let count = WORKGROUP_SIZE as usize;
+
+    // Each slot holds the index of another, so the gather's answer is the
+    // permutation itself and a lane reading its own slot would show as a
+    // fixed point.
+    let indices: Vec<u32> = (0..count as u32)
+        .map(|index| (index + 5) % count as u32)
+        .collect();
+
+    let output = gpu
+        .run_u32(
+            &kernels::lane_gather_whole(width).expect("built"),
+            &indices,
+            1,
+        )
+        .expect("dispatched");
+
+    let expected: Vec<u32> = indices.iter().map(|slot| indices[*slot as usize]).collect();
+    assert_eq!(output, expected);
+    assert_ne!(
+        output, indices,
+        "a gather that read its own lane is not one"
+    );
+    assert!(
+        output.iter().zip(&indices).any(|(read, own)| read != own),
+        "and it crossed at least one lane"
+    );
+}
+
+#[test]
+fn the_rest_of_the_math_set_computes_what_it_names() {
+    let Some(gpu) = device("math-set") else {
+        return;
+    };
+
+    let width = gpu.limits().subgroup_size;
+    let count = WORKGROUP_SIZE as usize;
+
+    // Values that straddle zero and land off the integers, so floor, ceil,
+    // trunc and round each answer differently somewhere.
+    let input: Vec<f32> = (0..count)
+        .map(|index| (index as f32 - 32.0) * 0.5 + 0.25)
+        .collect();
+
+    let cases: [Approximated; 5] = [
+        (Transcendental::Floor, f32::floor, 0.0),
+        (Transcendental::Ceil, f32::ceil, 0.0),
+        (Transcendental::Trunc, f32::trunc, 0.0),
+        (Transcendental::SquaredByPow, |value| value * value, 1e-3),
+        (Transcendental::Sin, f32::sin, 1e-5),
+    ];
+
+    let mut answers: Vec<Vec<f32>> = Vec::new();
+    for (which, reference, tolerance) in cases {
+        let spirv = kernels::lane_transcendental(width, which).expect("built");
+        let output = gpu.run(&spirv, &input, 1).expect("dispatched");
+
+        for (index, (got, value)) in output.iter().zip(&input).enumerate() {
+            let want = reference(*value);
+            assert!(
+                (got - want).abs() <= tolerance,
+                "{which:?} at lane {index}: {value} gave {got}, not {want}"
+            );
+        }
+        answers.push(output);
+    }
+
+    // `pow` is checked against a bare multiply, so `SquaredByPow` is excluded
+    // here; the three roundings share a shape and must still differ.
+    assert_ne!(answers[0], answers[1], "floor and ceil agree everywhere");
+    assert_ne!(answers[0], answers[2], "floor and trunc agree everywhere");
+
+    let rounded = gpu
+        .run(
+            &kernels::lane_transcendental(width, Transcendental::Round).expect("built"),
+            &input,
+            1,
+        )
+        .expect("dispatched");
+    for (got, value) in rounded.iter().zip(&input) {
+        assert!(
+            (got - value).abs() <= 0.5 + f32::EPSILON,
+            "{value} rounded to {got}, which is further than a half away"
+        );
+        assert_eq!(*got, got.trunc(), "a rounded value has no fraction left");
+    }
+
+    let cosine = gpu
+        .run(
+            &kernels::lane_transcendental(width, Transcendental::Cos).expect("built"),
+            &input,
+            1,
+        )
+        .expect("dispatched");
+    for (got, value) in cosine.iter().zip(&input) {
+        assert!(
+            (got - value.cos()).abs() <= 1e-5,
+            "cos({value}) gave {got}, not {}",
+            value.cos()
+        );
+    }
+}
+
+#[test]
+fn a_strip_mined_gather_reaches_the_index_of_its_own_strip() {
+    let Some(gpu) = device("gather-strips") else {
+        return;
+    };
+
+    let limits = gpu.limits().clone();
+    if limits.subgroup_size != 32 {
+        eprintln!(
+            "SKIPPED gather-strips: no case written for a subgroup of {}",
+            limits.subgroup_size
+        );
+        return;
+    }
+
+    // Two strips, so the second one has an index of its own. A gather that
+    // reached the first strip's index for both would agree with this on the
+    // first half and nowhere else, which is why one strip cannot show it.
+    let count = WORKGROUP_SIZE as usize * 2;
+    let indices: Vec<u32> = (0..count as u32)
+        .map(|index| (index + 5) % count as u32)
+        .collect();
+
+    let output = gpu
+        .run_u32(&kernels::lane_gather::<64>(32).expect("built"), &indices, 1)
+        .expect("dispatched");
+
+    let expected: Vec<u32> = indices.iter().map(|slot| indices[*slot as usize]).collect();
+    assert_eq!(output, expected);
+
+    let first_strip_only: Vec<u32> = (0..count)
+        .map(|position| {
+            let lane = position % WORKGROUP_SIZE as usize;
+            indices[indices[lane] as usize]
+        })
+        .collect();
+    assert_ne!(
+        output, first_strip_only,
+        "both strips read the first strip's index, which one strip could never show"
     );
 }
