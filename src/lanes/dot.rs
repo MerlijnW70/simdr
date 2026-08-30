@@ -319,6 +319,29 @@ mod tests {
     }
 
     #[test]
+    fn the_top_byte_is_read_by_shifting_down_and_not_up() {
+        let packed = pack([0, 0, 0, -1]);
+
+        assert_eq!(packed >> 24, 0xff, "the top byte is set");
+        assert_eq!(unsigned_bytes(packed), [0, 0, 0, 255]);
+        assert_eq!(signed_bytes(packed), [0, 0, 0, -1]);
+    }
+
+    #[test]
+    fn each_byte_is_read_from_its_own_position_and_no_other() {
+        for (at, wanted) in [
+            (0, [9, 0, 0, 0]),
+            (1, [0, 9, 0, 0]),
+            (2, [0, 0, 9, 0]),
+            (3, [0, 0, 0, 9]),
+        ] {
+            let mut bytes = [0_i32; 4];
+            bytes[at] = 9;
+            assert_eq!(unsigned_bytes(pack(bytes)), wanted, "byte {at}");
+        }
+    }
+
+    #[test]
     fn the_least_significant_byte_is_the_first_component() {
         assert_eq!(pack([1, 0, 0, 0]), 1);
         assert_eq!(pack([0, 1, 0, 0]), 0x100);

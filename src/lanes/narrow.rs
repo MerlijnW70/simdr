@@ -220,6 +220,22 @@ mod tests {
     }
 
     #[test]
+    fn a_narrow_constant_keeps_the_low_bits_and_does_not_set_them() {
+        let mut module = module();
+        U8::constant_from_bits(&mut module, 0x1234).expect("a byte");
+
+        assert_eq!(constant_literal(&module.finish()), 0x34);
+    }
+
+    #[test]
+    fn a_sixteen_bit_constant_keeps_its_low_half_and_does_not_set_it() {
+        let mut module = module();
+        U16::constant_from_bits(&mut module, 0x1234_5678).expect("a half word");
+
+        assert_eq!(constant_literal(&module.finish()), 0x5678);
+    }
+
+    #[test]
     fn sign_extending_by_a_width_no_caller_passes_still_returns_rather_than_panicking() {
         assert_eq!(sign_extend(0xff, 0), 0xffff_ffff, "one bit, all sign");
         assert_eq!(sign_extend(0x7f, 0), 0xffff_ffff, "still just the low bit");

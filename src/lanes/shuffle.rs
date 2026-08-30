@@ -335,6 +335,27 @@ mod tests {
     }
 
     #[test]
+    fn a_rotate_rounds_down_with_the_complement_of_the_width_and_not_the_width() {
+        let mut module = Module::new(Version::V1_3);
+        let mut lanes = Lanes::new(&mut module, 32).expect("built");
+        let value = lanes
+            .splat_bits::<F32, 8>(1.0_f32.to_bits())
+            .expect("splat");
+
+        lanes.rotate_up(value, 3).expect("rotated");
+
+        let words = module.finish();
+        let constants: Vec<u32> = decode::body(&words)
+            .filter(|instruction| instruction.opcode() == op::CONSTANT)
+            .filter_map(|instruction| instruction.operands().get(2).copied())
+            .collect();
+        assert!(
+            constants.contains(&!7_u32),
+            "the rounding mask is not the complement of the width: {constants:?}"
+        );
+    }
+
+    #[test]
     fn a_rotate_by_the_vectors_own_width_emits_nothing() {
         for delta in [0_u32, 8, 16] {
             let mut module = Module::new(Version::V1_3);
