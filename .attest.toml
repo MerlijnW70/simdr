@@ -1,0 +1,39 @@
+# What this repository will let an agent write about itself.
+#
+# What is refused is an assertion nothing settles: a figure nobody measured, a path that is not
+# there, a name the tree does not declare.
+
+comments = "strict"
+tolerance = 0.005
+exempt = ["target/**", ".git/**"]
+
+# The counters in README.md are NOT listed under strict_numbers, and deliberately. A stronger check
+# already holds them: `every_marked_number_is_the_number_that_is_there` in `tests/documented.rs`
+# asserts each `<!--count:-->` against the tree, which is a real count rather than a ledger entry.
+# Listing them here would report them as unbacked while something better already guards them.
+strict_numbers = []
+
+[[benchmarks]]
+name = "suite"
+command = "cargo test --quiet --workspace"
+scope = ["src", "runner/src", "tests"]
+timeout = 1800
+
+[[benchmarks]]
+name = "latency"
+command = "cargo run -p runner --release --example latency"
+scope = ["runner/src", "src/lanes"]
+timeout = 900
+
+# The gate a passing suite cannot supply, delegated to the prober this repository already uses.
+#
+# `proved` is empty until a baseline exists. `.noha/` holds a test-impact matrix and no
+# baseline.tsv, so `noha prober` refuses until `--update` has seeded one -- and that run is the
+# whole workspace at `max: 4000`, which is hours. Seed it in shards, one invocation at a time, and
+# add paths here as each earns a run with no survivors.
+[mutation]
+command = "noha prober --diff"
+pattern = 'killed\s+(?P<killed>[0-9]+)/(?P<total>[0-9]+) viable\s+survivors\s+(?P<survivors>[0-9]+)'
+required = 1.0
+timeout = 3600
+proved = []
