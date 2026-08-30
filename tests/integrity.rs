@@ -625,3 +625,183 @@ fn the_opcode_scanner_finds_the_numbers_that_are_there() {
         &mentions
     ));
 }
+
+/// The operations `prefix_` names, split by whether they leave a lane its own
+/// element out.
+fn scan_operations() -> (BTreeSet<String>, BTreeSet<String>) {
+    let text = fs::read_to_string(root().join("src/lanes/scan.rs")).unwrap_or_default();
+    let mut inclusive = BTreeSet::new();
+    let mut exclusive = BTreeSet::new();
+
+    for line in text.lines().map(str::trim_start) {
+        let Some(rest) = line.strip_prefix("pub fn prefix_") else {
+            continue;
+        };
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        match name.strip_suffix("_exclusive") {
+            Some(stem) => exclusive.insert(stem.to_owned()),
+            None => inclusive.insert(name),
+        };
+    }
+
+    (inclusive, exclusive)
+}
+
+/// The variants of the enum the tour drives its running folds from.
+fn tour_running_folds() -> BTreeSet<String> {
+    let text = fs::read_to_string(root().join("runner/src/kernels/mod.rs")).unwrap_or_default();
+    let Some(body) = text.split("pub enum Running {").nth(1) else {
+        return BTreeSet::new();
+    };
+    let Some(body) = body.split('}').next() else {
+        return BTreeSet::new();
+    };
+
+    body.lines()
+        .map(str::trim)
+        .filter_map(|line| line.strip_suffix(','))
+        .filter(|name| name.chars().all(char::is_alphanumeric) && !name.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+#[test]
+fn every_scan_has_the_exclusive_twin_its_family_promises() {
+    let (inclusive, exclusive) = scan_operations();
+
+    assert!(
+        !inclusive.is_empty(),
+        "no `prefix_` operation was found at all, so this test is checking nothing"
+    );
+
+    let missing: Vec<&String> = inclusive.difference(&exclusive).collect();
+    assert!(
+        missing.is_empty(),
+        "these scans run inclusively and have no exclusive form, so a caller who needs the value \
+         before their own lane has to build it by hand: {missing:?}"
+    );
+
+    let orphaned: Vec<&String> = exclusive.difference(&inclusive).collect();
+    assert!(
+        orphaned.is_empty(),
+        "these exclusive scans have no inclusive form beside them: {orphaned:?}"
+    );
+}
+
+#[test]
+fn the_tour_knows_every_running_fold_this_crate_can_do() {
+    let (inclusive, _) = scan_operations();
+    let shown = tour_running_folds();
+
+    assert!(
+        !shown.is_empty(),
+        "`pub enum Running` was not found in the kernels, so the tour drives its scans some other \
+         way and this test no longer watches anything"
+    );
+
+    let unshown: Vec<&String> = inclusive.difference(&shown).collect();
+    assert!(
+        unshown.is_empty(),
+        "`runner/examples/show.rs` walks `Running` to print one row per running fold, and these \
+         scans have no variant there — so the tour would print a surface smaller than the one \
+         this crate has, and would go on doing it silently: {unshown:?}"
+    );
+
+    let invented: Vec<&String> = shown.difference(&inclusive).collect();
+    assert!(
+        invented.is_empty(),
+        "`Running` names folds that `src/lanes/scan.rs` does not declare: {invented:?}"
+    );
+}
+
+const DECORATIONS: &str = "src/spec/memory.rs";
+
+/// The variants of the `Decoration` enum, which is the only place this crate
+/// writes those numbers down.
+fn declared_decorations() -> Vec<String> {
+    let Ok(text) = fs::read_to_string(root().join(DECORATIONS)) else {
+        return Vec::new();
+    };
+    let Some(body) = text.split("pub enum Decoration {").nth(1) else {
+        return Vec::new();
+    };
+    let Some(body) = body.split('}').next() else {
+        return Vec::new();
+    };
+
+    body.lines()
+        .map(str::trim)
+        .filter_map(|line| line.strip_suffix(','))
+        .filter(|name| !name.is_empty() && name.chars().all(char::is_alphanumeric))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Whether anything outside `DECORATIONS` writes `Decoration::<name>`.
+///
+/// The bare name will not do here the way it does for an opcode. `BITWISE_AND`
+/// is a word nothing else says, but a decoration is called `Block`, `Offset` or
+/// `Binding`, and this tree says all three about other things -- so a dead one
+/// would look emitted. The qualified form is the one that only appears where
+/// the decoration is actually used.
+fn decoration_is_written(name: &str) -> bool {
+    let qualified = format!("Decoration::{name}");
+
+    workspace_files()
+        .into_iter()
+        .filter(|path| path != DECORATIONS)
+        .filter_map(|path| fs::read_to_string(root().join(&path)).ok())
+        .any(|text| text.contains(&qualified))
+}
+
+#[test]
+fn every_decoration_is_emitted_by_something() {
+    let declared = declared_decorations();
+
+    assert!(
+        !declared.is_empty(),
+        "no decoration was found in {DECORATIONS}, so this test is checking nothing"
+    );
+
+    let unemitted: Vec<String> = declared
+        .into_iter()
+        .filter(|name| !decoration_is_written(name))
+        .collect();
+
+    assert!(
+        unemitted.is_empty(),
+        "these decorations are declared in {DECORATIONS} and emitted by nothing, so no module \
+         carries them and `spirv-val` has never checked the number -- the same hole \
+         `every_opcode_is_emitted_by_something` watches for on the opcode side. Emit them, or \
+         delete them and read the number out of the grammar again when it is wanted:\n{unemitted:#?}"
+    );
+}
+
+#[test]
+fn the_decoration_scanner_looks_for_the_qualified_name_and_not_the_bare_one() {
+    assert!(
+        decoration_is_written("Block"),
+        "the scanner missed a decoration this tree certainly writes"
+    );
+    assert!(
+        !decoration_is_written("Uniform"),
+        "`Uniform` is a type this crate declares and a word it says often, and no decoration by \
+         that name is written anywhere -- a scanner matching bare words would call it emitted, \
+         which is the hole this form closes"
+    );
+}
+
+#[test]
+fn the_decoration_scanner_finds_the_names_that_are_there() {
+    let declared = declared_decorations();
+
+    for expected in ["Block", "ArrayStride", "Offset", "Binding", "BuiltIn"] {
+        assert!(
+            declared.iter().any(|name| name == expected),
+            "the scanner missed {expected}, so it could miss a dead one too"
+        );
+    }
+}

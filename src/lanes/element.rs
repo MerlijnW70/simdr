@@ -7,11 +7,22 @@ pub trait Element: Copy + core::fmt::Debug + 'static {
     const STRIDE: u32;
 
     const ADD: u16;
+    const SUB: u16;
     const MUL: u16;
+    const DIV: u16;
+
+    /// The comparisons are the ordered family throughout: a NaN operand answers
+    /// false to every one of them, `NOT_EQUAL` included, so `not_equal` is not
+    /// the negation of `equal` where NaN reaches it.
     const GREATER_THAN: u16;
+    const GREATER_THAN_EQUAL: u16;
+    const LESS_THAN: u16;
+    const LESS_THAN_EQUAL: u16;
     const EQUAL: u16;
+    const NOT_EQUAL: u16;
 
     const GROUP_ADD: u16;
+    const GROUP_MUL: u16;
     const GROUP_MAX: u16;
     const GROUP_MIN: u16;
 
@@ -20,6 +31,13 @@ pub trait Element: Copy + core::fmt::Debug + 'static {
     const CLAMP: Glsl;
 
     const FROM_U32: u16;
+
+    /// The bits of the value a fold starts from when there is nothing before
+    /// it: one for a product, the far end of the range for a minimum or a
+    /// maximum. An exclusive scan hands these to the lane at the edge.
+    const ONE: u32;
+    const LOWEST: u32;
+    const HIGHEST: u32;
 
     fn type_id(module: &mut Module) -> Result<Id, BuildError>;
 
@@ -33,12 +51,26 @@ pub trait Element: Copy + core::fmt::Debug + 'static {
 
 pub trait Signed: Element {
     const ABS: Glsl;
+    const NEGATE: u16;
 }
 
-pub trait Integer: Element {}
+pub trait Integer: Element {
+    /// Whether the top bit is a sign. It decides which sequence saturation
+    /// takes: an unsigned one clamps with a complement, a signed one has to
+    /// know which end it overflowed towards.
+    const SIGNED: bool;
 
-impl Integer for I32 {}
-impl Integer for U32 {}
+    /// The width of the type in bits, from the stride it occupies.
+    const BITS: u32 = Self::STRIDE * 8;
+}
+
+impl Integer for I32 {
+    const SIGNED: bool = true;
+}
+
+impl Integer for U32 {
+    const SIGNED: bool = false;
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct F32;
@@ -47,16 +79,26 @@ impl Element for F32 {
     const NAME: &'static str = "f32";
     const STRIDE: u32 = 4;
     const ADD: u16 = op::F_ADD;
+    const SUB: u16 = op::F_SUB;
     const MUL: u16 = op::F_MUL;
+    const DIV: u16 = op::F_DIV;
     const GREATER_THAN: u16 = op::F_ORD_GREATER_THAN;
+    const GREATER_THAN_EQUAL: u16 = op::F_ORD_GREATER_THAN_EQUAL;
+    const LESS_THAN: u16 = op::F_ORD_LESS_THAN;
+    const LESS_THAN_EQUAL: u16 = op::F_ORD_LESS_THAN_EQUAL;
     const EQUAL: u16 = op::F_ORD_EQUAL;
+    const NOT_EQUAL: u16 = op::F_ORD_NOT_EQUAL;
     const GROUP_ADD: u16 = op::GROUP_NON_UNIFORM_F_ADD;
+    const GROUP_MUL: u16 = op::GROUP_NON_UNIFORM_F_MUL;
     const GROUP_MAX: u16 = op::GROUP_NON_UNIFORM_F_MAX;
     const GROUP_MIN: u16 = op::GROUP_NON_UNIFORM_F_MIN;
     const MIN: Glsl = Glsl::FMin;
     const MAX: Glsl = Glsl::FMax;
     const CLAMP: Glsl = Glsl::FClamp;
     const FROM_U32: u16 = op::CONVERT_U_TO_F;
+    const ONE: u32 = 0x3f80_0000;
+    const LOWEST: u32 = 0xff80_0000;
+    const HIGHEST: u32 = 0x7f80_0000;
 
     fn type_id(module: &mut Module) -> Result<Id, BuildError> {
         module.type_float(32)
@@ -74,16 +116,26 @@ impl Element for I32 {
     const NAME: &'static str = "i32";
     const STRIDE: u32 = 4;
     const ADD: u16 = op::I_ADD;
+    const SUB: u16 = op::I_SUB;
     const MUL: u16 = op::I_MUL;
+    const DIV: u16 = op::S_DIV;
     const GREATER_THAN: u16 = op::S_GREATER_THAN;
+    const GREATER_THAN_EQUAL: u16 = op::S_GREATER_THAN_EQUAL;
+    const LESS_THAN: u16 = op::S_LESS_THAN;
+    const LESS_THAN_EQUAL: u16 = op::S_LESS_THAN_EQUAL;
     const EQUAL: u16 = op::I_EQUAL;
+    const NOT_EQUAL: u16 = op::I_NOT_EQUAL;
     const GROUP_ADD: u16 = op::GROUP_NON_UNIFORM_I_ADD;
+    const GROUP_MUL: u16 = op::GROUP_NON_UNIFORM_I_MUL;
     const GROUP_MAX: u16 = op::GROUP_NON_UNIFORM_S_MAX;
     const GROUP_MIN: u16 = op::GROUP_NON_UNIFORM_S_MIN;
     const MIN: Glsl = Glsl::SMin;
     const MAX: Glsl = Glsl::SMax;
     const CLAMP: Glsl = Glsl::SClamp;
     const FROM_U32: u16 = op::BITCAST;
+    const ONE: u32 = 1;
+    const LOWEST: u32 = 0x8000_0000;
+    const HIGHEST: u32 = 0x7fff_ffff;
 
     fn type_id(module: &mut Module) -> Result<Id, BuildError> {
         module.type_int(32, true)
@@ -101,16 +153,26 @@ impl Element for U32 {
     const NAME: &'static str = "u32";
     const STRIDE: u32 = 4;
     const ADD: u16 = op::I_ADD;
+    const SUB: u16 = op::I_SUB;
     const MUL: u16 = op::I_MUL;
+    const DIV: u16 = op::U_DIV;
     const GREATER_THAN: u16 = op::U_GREATER_THAN;
+    const GREATER_THAN_EQUAL: u16 = op::U_GREATER_THAN_EQUAL;
+    const LESS_THAN: u16 = op::U_LESS_THAN;
+    const LESS_THAN_EQUAL: u16 = op::U_LESS_THAN_EQUAL;
     const EQUAL: u16 = op::I_EQUAL;
+    const NOT_EQUAL: u16 = op::I_NOT_EQUAL;
     const GROUP_ADD: u16 = op::GROUP_NON_UNIFORM_I_ADD;
+    const GROUP_MUL: u16 = op::GROUP_NON_UNIFORM_I_MUL;
     const GROUP_MAX: u16 = op::GROUP_NON_UNIFORM_U_MAX;
     const GROUP_MIN: u16 = op::GROUP_NON_UNIFORM_U_MIN;
     const MIN: Glsl = Glsl::UMin;
     const MAX: Glsl = Glsl::UMax;
     const CLAMP: Glsl = Glsl::UClamp;
     const FROM_U32: u16 = op::COPY_OBJECT;
+    const ONE: u32 = 1;
+    const LOWEST: u32 = 0;
+    const HIGHEST: u32 = 0xffff_ffff;
 
     fn type_id(module: &mut Module) -> Result<Id, BuildError> {
         module.type_int(32, false)
@@ -123,10 +185,12 @@ impl Element for U32 {
 
 impl Signed for F32 {
     const ABS: Glsl = Glsl::FAbs;
+    const NEGATE: u16 = op::F_NEGATE;
 }
 
 impl Signed for I32 {
     const ABS: Glsl = Glsl::SAbs;
+    const NEGATE: u16 = op::S_NEGATE;
 }
 
 #[cfg(test)]

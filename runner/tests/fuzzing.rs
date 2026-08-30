@@ -329,10 +329,25 @@ fn clustered_programs_agree_in_every_domain() {
             let mut program =
                 fuzz::generate(&mut rng, domain, limits.subgroup_size, WORKGROUP_SIZE);
 
-            program.finish = if seed % 2 == 0 {
-                fuzz::Finish::Scan
-            } else {
-                fuzz::Finish::ScanExclusive
+            // The finish is pinned to a scan rather than drawn, because a
+            // cluster is the one mapping whose ladder this crate emulates and
+            // the point of this sweep is to walk it. Every fold the domain can
+            // take is walked, in both forms: the exclusive one is where the
+            // identity reaches the lane at the edge of each cluster, and a
+            // sum-only sweep would never ask what that identity is.
+            let exclusive = seed % 2 == 1;
+            let folds: Vec<fuzz::Fold> = fuzz::Fold::EVERY
+                .into_iter()
+                .filter(|fold| !domain.is_float() || !fold.needs_an_integer())
+                .collect();
+
+            program.finish = match (seed / 2) as usize % (folds.len() + 1) {
+                0 if exclusive => fuzz::Finish::ScanExclusive,
+                0 => fuzz::Finish::Scan,
+                at => fuzz::Finish::ScanBy {
+                    fold: folds[at - 1],
+                    exclusive,
+                },
             };
             program.lanes = (limits.subgroup_size >> (1 + seed % 3)).max(1);
 

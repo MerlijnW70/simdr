@@ -1,6 +1,8 @@
 use super::Kernel;
 use crate::lanes::{Element, LaneError, Vector};
 use crate::module::Id;
+use crate::spec::{Decoration, StorageClass};
+use core::marker::PhantomData;
 
 impl<T: Element> Kernel<T> {
     pub fn strips<const LANES: u32>(&mut self) -> Result<usize, LaneError> {
@@ -28,6 +30,97 @@ impl<T: Element> Kernel<T> {
         }
 
         self.lanes()?.from_strips(&loaded)
+    }
+
+    /// A binding whose elements are `E` rather than the kernel's own type.
+    ///
+    /// The bindings a [`Shape`](super::Shape) asks for all hold what the kernel
+    /// holds, which is what a kernel usually wants and is not what a look-up
+    /// table is: the indices are `u32` and the table is whatever is being
+    /// looked up. This declares one more descriptor beyond those, at the next
+    /// index, holding `E`.
+    pub fn bind<E: Element>(&mut self) -> Result<Binding<E>, LaneError> {
+        let at = self.bound();
+
+        let element = E::type_id(self.module())?;
+        E::require_in_storage_buffer(self.module())?;
+
+        let elements = self.module().type_runtime_array(element)?;
+        let block = self.module().type_struct(&[elements])?;
+        self.module()
+            .decorate(elements, Decoration::ArrayStride, &[E::STRIDE])?;
+        self.module().decorate(block, Decoration::Block, &[])?;
+        self.module()
+            .member_decorate(block, 0, Decoration::Offset, &[0])?;
+
+        let pointer = self
+            .module()
+            .type_pointer(StorageClass::StorageBuffer, block)?;
+        let variable = self
+            .module()
+            .global_variable(pointer, StorageClass::StorageBuffer)?;
+        self.module()
+            .decorate(variable, Decoration::DescriptorSet, &[0])?;
+        self.module()
+            .decorate(variable, Decoration::Binding, &[at])?;
+
+        let element_pointer = self
+            .module()
+            .type_pointer(StorageClass::StorageBuffer, element)?;
+
+        self.remember(variable);
+        Ok(Binding {
+            variable,
+            element,
+            element_pointer,
+            at,
+            held: PhantomData,
+        })
+    }
+
+    /// One element per lane out of a binding that holds `E`, laid out the way
+    /// [`Kernel::load`] lays out the kernel's own.
+    pub fn load_from<E: Element, const LANES: u32>(
+        &mut self,
+        binding: Binding<E>,
+    ) -> Result<Vector<E, LANES>, LaneError> {
+        let strips = self.strips::<LANES>()?;
+        let base = self.run_start(strips)?;
+        let zero = self.zero();
+
+        let mut loaded = Vec::with_capacity(strips);
+        for strip in 0..strips {
+            let at = self.address(base, strip, 0)?;
+            let pointer = self.module().access_chain(
+                binding.element_pointer,
+                binding.variable,
+                &[zero, at],
+            )?;
+            loaded.push(self.module().load(binding.element, pointer)?);
+        }
+
+        self.lanes()?.from_strips(&loaded)
+    }
+
+    pub fn store_into<E: Element, const LANES: u32>(
+        &mut self,
+        binding: Binding<E>,
+        value: Vector<E, LANES>,
+    ) -> Result<(), LaneError> {
+        let strips = value.strip_count();
+        let base = self.run_start(strips)?;
+        let zero = self.zero();
+
+        for (strip, &id) in value.strips().iter().enumerate() {
+            let at = self.address(base, strip, 0)?;
+            let pointer = self.module().access_chain(
+                binding.element_pointer,
+                binding.variable,
+                &[zero, at],
+            )?;
+            self.module().store(pointer, id)?;
+        }
+        Ok(())
     }
 
     pub fn store_scalar(&mut self, index: u32, value: Id) -> Result<(), LaneError> {
@@ -148,7 +241,7 @@ mod tests {
 
     use crate::decode;
     use crate::kernel::{Kernel, Shape};
-    use crate::lanes::{F32, LaneError};
+    use crate::lanes::{F32, LaneError, U8, U32};
     use crate::module::op;
 
     fn count(words: &[u32], opcode: u16) -> usize {
@@ -457,5 +550,94 @@ mod tests {
         kernel.store(1, value).expect("stored");
 
         assert_eq!(count(&kernel.finish().expect("finished"), op::STORE), 2);
+    }
+
+    #[test]
+    fn a_bound_descriptor_lands_after_the_ones_the_shape_asked_for() {
+        let mut kernel = Kernel::<F32>::new(Shape::new(32, 64, 2)).expect("built");
+
+        let first = kernel.bind::<U32>().expect("bound");
+        let second = kernel.bind::<U32>().expect("bound");
+
+        assert_eq!(first.at(), 2, "the shape asked for two, so the next is two");
+        assert_eq!(second.at(), 3, "and one more lands beside it, not on it");
+    }
+
+    #[test]
+    fn a_bound_descriptor_declares_the_stride_of_its_own_element_and_not_the_kernels() {
+        let mut kernel = Kernel::<F32>::new(Shape::new(32, 64, 1)).expect("built");
+        let narrow = kernel.bind::<U8>().expect("bound");
+
+        let held = kernel.load_from::<U8, 32>(narrow).expect("loaded");
+        kernel.store_into(narrow, held).expect("stored");
+
+        let words = kernel.finish().expect("finished");
+        let strides: Vec<u32> = decode::body(&words)
+            .filter(|instruction| instruction.opcode() == op::DECORATE)
+            .filter(|instruction| {
+                instruction.operands().get(1).copied()
+                    == Some(crate::spec::Decoration::ArrayStride.word())
+            })
+            .filter_map(|instruction| instruction.operands().get(2).copied())
+            .collect();
+
+        assert!(
+            strides.contains(&4),
+            "the kernel holds f32, which is four wide"
+        );
+        assert!(
+            strides.contains(&1),
+            "and the binding holds u8, which is one -- a binding taking the kernel's stride would \
+             read every fourth byte"
+        );
+    }
+
+    #[test]
+    fn a_kernel_reads_indices_as_one_type_and_the_table_as_another() {
+        let mut kernel = Kernel::<F32>::new(Shape::new(32, 64, 2)).expect("built");
+        let slots = kernel.bind::<U32>().expect("bound");
+
+        let indices = kernel.load_from::<U32, 32>(slots).expect("loaded");
+        let picked = kernel.gather::<32>(0, indices).expect("gathered");
+        kernel.store(1, picked).expect("stored");
+
+        let words = kernel.finish().expect("finished");
+        let elements: std::collections::BTreeSet<u32> = decode::body(&words)
+            .filter(|instruction| instruction.opcode() == op::TYPE_RUNTIME_ARRAY)
+            .filter_map(|instruction| instruction.operands().get(1).copied())
+            .collect();
+
+        assert_eq!(
+            elements.len(),
+            2,
+            "the arrays behind the three descriptors are of two elements: the table and the              answer hold what the kernel holds, and the indices hold their own type. A binding              that took the kernel's would leave one"
+        );
+    }
+}
+
+/// A descriptor binding holding `E`, which is not the type the kernel that
+/// declared it holds.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Binding<E> {
+    variable: Id,
+    element: Id,
+    element_pointer: Id,
+    at: u32,
+    held: PhantomData<E>,
+}
+
+impl<E> Clone for Binding<E> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<E> Copy for Binding<E> {}
+
+impl<E> Binding<E> {
+    /// Which descriptor this is, counting from the ones the shape asked for.
+    #[must_use]
+    pub const fn at(self) -> u32 {
+        self.at
     }
 }

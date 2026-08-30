@@ -1,5 +1,5 @@
 use super::{Domain, Finish, Rng, generate};
-use crate::fuzz::{ALL_DOMAINS, BitShift, Op};
+use crate::fuzz::{ALL_DOMAINS, BitShift, Fold, Op};
 
 #[test]
 fn a_whole_subgroup_program_reaches_the_finish_that_carries_a_phi() {
@@ -15,6 +15,8 @@ fn a_whole_subgroup_program_reaches_the_finish_that_carries_a_phi() {
     );
 }
 
+/// Draws unsigned programs only, so the float-only operations cannot appear
+/// here; [`the_generator_reaches_the_operations_only_a_float_has`] covers those.
 #[test]
 fn the_generator_reaches_every_operation_it_knows() {
     let mut seen: Vec<&'static str> = Vec::new();
@@ -54,6 +56,16 @@ fn the_generator_reaches_every_operation_it_knows() {
                 Op::Absolute => "abs",
                 Op::FusedMulAdd { .. } => "fma",
                 Op::AddIfAllAbove { .. } => "all-above",
+                Op::SubConstant(_) => "sub",
+                Op::SaturatingAddConstant(_) => "saturating-add",
+                Op::SaturatingSubConstant(_) => "saturating-sub",
+                Op::AndConstant(_) => "and",
+                Op::OrConstant(_) => "or",
+                Op::XorConstant(_) => "xor",
+                Op::NotValue => "not",
+                Op::Floor => "floor",
+                Op::Ceil => "ceil",
+                Op::Trunc => "trunc",
             };
             if !seen.contains(&name) {
                 seen.push(name);
@@ -68,6 +80,7 @@ fn the_generator_reaches_every_operation_it_knows() {
             "add",
             "agree",
             "all-above",
+            "and",
             "bit-left",
             "bit-right-arithmetic",
             "bit-right-logical",
@@ -81,11 +94,17 @@ fn the_generator_reaches_every_operation_it_knows() {
             "max",
             "min",
             "mul",
+            "not",
+            "or",
             "repeat",
             "rolled",
             "rotate",
+            "saturating-add",
+            "saturating-sub",
             "shift",
             "shift-down",
+            "sub",
+            "xor",
         ],
         "the generator never produced some of its own vocabulary in 512 seeds"
     );
@@ -289,6 +308,7 @@ fn the_generator_reaches_every_finish() {
             Finish::SumOrMax { .. } => chosen += 1,
             Finish::Scan => scans += 1,
             Finish::ScanExclusive => exclusive += 1,
+            Finish::ReduceBy(_) | Finish::ScanBy { .. } => {}
         }
     }
 
@@ -466,6 +486,117 @@ fn the_two_right_shifts_disagree_once_the_top_bit_is_set() {
             logical, arithmetic,
             "{domain:?} gives the same answer to both right shifts even with the top bit set, so \
              the corpus can never tell the two instructions apart"
+        );
+    }
+}
+
+#[test]
+fn the_generator_reaches_the_operations_only_a_float_has() {
+    let mut seen: Vec<&'static str> = Vec::new();
+    for seed in 0..512_u64 {
+        let program = generate(&mut Rng::new(seed), Domain::Float, 32, 64);
+        for step in &program.steps {
+            let name = match step {
+                Op::Absolute => "abs",
+                Op::FusedMulAdd { .. } => "fma",
+                Op::Floor => "floor",
+                Op::Ceil => "ceil",
+                Op::Trunc => "trunc",
+                _ => continue,
+            };
+            if !seen.contains(&name) {
+                seen.push(name);
+            }
+        }
+    }
+
+    seen.sort_unstable();
+    assert_eq!(
+        seen,
+        vec!["abs", "ceil", "floor", "fma", "trunc"],
+        "the float pool names operations the generator never draws, so the sweep would never \
+         reach them and nothing else here would say so"
+    );
+}
+
+#[test]
+fn the_generator_reaches_every_fold_in_both_of_the_forms_that_take_one() {
+    let mut reduced: Vec<Fold> = Vec::new();
+    let mut scanned: Vec<(Fold, bool)> = Vec::new();
+
+    for seed in 0..4096_u64 {
+        match generate(&mut Rng::new(seed), Domain::Unsigned, 32, 64).finish {
+            Finish::ReduceBy(fold) => {
+                if !reduced.contains(&fold) {
+                    reduced.push(fold);
+                }
+            }
+            Finish::ScanBy { fold, exclusive } if !scanned.contains(&(fold, exclusive)) => {
+                scanned.push((fold, exclusive));
+            }
+            _ => {}
+        }
+    }
+
+    reduced.sort_unstable();
+    scanned.sort_unstable();
+
+    let wanted: Vec<Fold> = Fold::EVERY
+        .into_iter()
+        .filter(|fold| !fold.reduces_under_another_name())
+        .collect();
+    assert_eq!(
+        reduced, wanted,
+        "the reductions the generator draws are not the folds it is supposed to draw"
+    );
+
+    let wanted: Vec<(Fold, bool)> = Fold::EVERY
+        .into_iter()
+        .flat_map(|fold| [(fold, false), (fold, true)])
+        .collect();
+    let mut wanted = wanted;
+    wanted.sort_unstable();
+    assert_eq!(
+        scanned, wanted,
+        "every fold has to be scanned both inclusively and exclusively, and the exclusive form is \
+         where the identity reaches the lane at the edge"
+    );
+}
+
+#[test]
+fn no_operation_is_reachable_as_a_reduction_under_two_names() {
+    let drawn: Vec<Fold> = (0..4096_u64)
+        .filter_map(
+            |seed| match generate(&mut Rng::new(seed), Domain::Unsigned, 32, 64).finish {
+                Finish::ReduceBy(fold) => Some(fold),
+                _ => None,
+            },
+        )
+        .collect();
+
+    for named in [Fold::Min, Fold::Max] {
+        assert!(
+            !drawn.contains(&named),
+            "{named:?} is reduced by a flat `Finish` variant already, so drawing it here would \
+             fuzz one lane operation under two names and report a vocabulary wider than it is"
+        );
+    }
+}
+
+#[test]
+fn a_float_is_never_asked_for_a_fold_it_would_refuse() {
+    for seed in 0..4096_u64 {
+        let fold = match generate(&mut Rng::new(seed), Domain::Float, 32, 64).finish {
+            Finish::ReduceBy(fold) => fold,
+            Finish::ScanBy { fold, .. } => fold,
+            _ => continue,
+        };
+
+        assert!(
+            !fold.needs_an_integer(),
+            "seed {seed} asked a float domain for {fold:?}, which this reference cannot \
+             hold the device to -- such a program would be compared against an order it \
+             does not share"
         );
     }
 }

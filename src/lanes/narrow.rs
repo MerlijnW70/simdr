@@ -9,16 +9,26 @@ impl Element for I8 {
     const NAME: &'static str = "i8";
     const STRIDE: u32 = 1;
     const ADD: u16 = op::I_ADD;
+    const SUB: u16 = op::I_SUB;
     const MUL: u16 = op::I_MUL;
+    const DIV: u16 = op::S_DIV;
     const GREATER_THAN: u16 = op::S_GREATER_THAN;
+    const GREATER_THAN_EQUAL: u16 = op::S_GREATER_THAN_EQUAL;
+    const LESS_THAN: u16 = op::S_LESS_THAN;
+    const LESS_THAN_EQUAL: u16 = op::S_LESS_THAN_EQUAL;
     const EQUAL: u16 = op::I_EQUAL;
+    const NOT_EQUAL: u16 = op::I_NOT_EQUAL;
     const GROUP_ADD: u16 = op::GROUP_NON_UNIFORM_I_ADD;
+    const GROUP_MUL: u16 = op::GROUP_NON_UNIFORM_I_MUL;
     const GROUP_MAX: u16 = op::GROUP_NON_UNIFORM_S_MAX;
     const GROUP_MIN: u16 = op::GROUP_NON_UNIFORM_S_MIN;
     const MIN: Glsl = Glsl::SMin;
     const MAX: Glsl = Glsl::SMax;
     const CLAMP: Glsl = Glsl::SClamp;
     const FROM_U32: u16 = op::S_CONVERT;
+    const ONE: u32 = 1;
+    const LOWEST: u32 = 0x80;
+    const HIGHEST: u32 = 0x7f;
 
     fn type_id(module: &mut Module) -> Result<Id, BuildError> {
         module.require_capability(Capability::Int8)?;
@@ -37,6 +47,7 @@ impl Element for I8 {
 
 impl Signed for I8 {
     const ABS: Glsl = Glsl::SAbs;
+    const NEGATE: u16 = op::S_NEGATE;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,16 +57,26 @@ impl Element for U8 {
     const NAME: &'static str = "u8";
     const STRIDE: u32 = 1;
     const ADD: u16 = op::I_ADD;
+    const SUB: u16 = op::I_SUB;
     const MUL: u16 = op::I_MUL;
+    const DIV: u16 = op::U_DIV;
     const GREATER_THAN: u16 = op::U_GREATER_THAN;
+    const GREATER_THAN_EQUAL: u16 = op::U_GREATER_THAN_EQUAL;
+    const LESS_THAN: u16 = op::U_LESS_THAN;
+    const LESS_THAN_EQUAL: u16 = op::U_LESS_THAN_EQUAL;
     const EQUAL: u16 = op::I_EQUAL;
+    const NOT_EQUAL: u16 = op::I_NOT_EQUAL;
     const GROUP_ADD: u16 = op::GROUP_NON_UNIFORM_I_ADD;
+    const GROUP_MUL: u16 = op::GROUP_NON_UNIFORM_I_MUL;
     const GROUP_MAX: u16 = op::GROUP_NON_UNIFORM_U_MAX;
     const GROUP_MIN: u16 = op::GROUP_NON_UNIFORM_U_MIN;
     const MIN: Glsl = Glsl::UMin;
     const MAX: Glsl = Glsl::UMax;
     const CLAMP: Glsl = Glsl::UClamp;
     const FROM_U32: u16 = op::U_CONVERT;
+    const ONE: u32 = 1;
+    const LOWEST: u32 = 0;
+    const HIGHEST: u32 = 0xff;
 
     fn type_id(module: &mut Module) -> Result<Id, BuildError> {
         module.require_capability(Capability::Int8)?;
@@ -79,16 +100,26 @@ impl Element for I16 {
     const NAME: &'static str = "i16";
     const STRIDE: u32 = 2;
     const ADD: u16 = op::I_ADD;
+    const SUB: u16 = op::I_SUB;
     const MUL: u16 = op::I_MUL;
+    const DIV: u16 = op::S_DIV;
     const GREATER_THAN: u16 = op::S_GREATER_THAN;
+    const GREATER_THAN_EQUAL: u16 = op::S_GREATER_THAN_EQUAL;
+    const LESS_THAN: u16 = op::S_LESS_THAN;
+    const LESS_THAN_EQUAL: u16 = op::S_LESS_THAN_EQUAL;
     const EQUAL: u16 = op::I_EQUAL;
+    const NOT_EQUAL: u16 = op::I_NOT_EQUAL;
     const GROUP_ADD: u16 = op::GROUP_NON_UNIFORM_I_ADD;
+    const GROUP_MUL: u16 = op::GROUP_NON_UNIFORM_I_MUL;
     const GROUP_MAX: u16 = op::GROUP_NON_UNIFORM_S_MAX;
     const GROUP_MIN: u16 = op::GROUP_NON_UNIFORM_S_MIN;
     const MIN: Glsl = Glsl::SMin;
     const MAX: Glsl = Glsl::SMax;
     const CLAMP: Glsl = Glsl::SClamp;
     const FROM_U32: u16 = op::S_CONVERT;
+    const ONE: u32 = 1;
+    const LOWEST: u32 = 0x8000;
+    const HIGHEST: u32 = 0x7fff;
 
     fn type_id(module: &mut Module) -> Result<Id, BuildError> {
         module.require_capability(Capability::Int16)?;
@@ -107,6 +138,7 @@ impl Element for I16 {
 
 impl Signed for I16 {
     const ABS: Glsl = Glsl::SAbs;
+    const NEGATE: u16 = op::S_NEGATE;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,16 +148,26 @@ impl Element for U16 {
     const NAME: &'static str = "u16";
     const STRIDE: u32 = 2;
     const ADD: u16 = op::I_ADD;
+    const SUB: u16 = op::I_SUB;
     const MUL: u16 = op::I_MUL;
+    const DIV: u16 = op::U_DIV;
     const GREATER_THAN: u16 = op::U_GREATER_THAN;
+    const GREATER_THAN_EQUAL: u16 = op::U_GREATER_THAN_EQUAL;
+    const LESS_THAN: u16 = op::U_LESS_THAN;
+    const LESS_THAN_EQUAL: u16 = op::U_LESS_THAN_EQUAL;
     const EQUAL: u16 = op::I_EQUAL;
+    const NOT_EQUAL: u16 = op::I_NOT_EQUAL;
     const GROUP_ADD: u16 = op::GROUP_NON_UNIFORM_I_ADD;
+    const GROUP_MUL: u16 = op::GROUP_NON_UNIFORM_I_MUL;
     const GROUP_MAX: u16 = op::GROUP_NON_UNIFORM_U_MAX;
     const GROUP_MIN: u16 = op::GROUP_NON_UNIFORM_U_MIN;
     const MIN: Glsl = Glsl::UMin;
     const MAX: Glsl = Glsl::UMax;
     const CLAMP: Glsl = Glsl::UClamp;
     const FROM_U32: u16 = op::U_CONVERT;
+    const ONE: u32 = 1;
+    const LOWEST: u32 = 0;
+    const HIGHEST: u32 = 0xffff;
 
     fn type_id(module: &mut Module) -> Result<Id, BuildError> {
         module.require_capability(Capability::Int16)?;
@@ -149,16 +191,26 @@ impl Element for F16 {
     const NAME: &'static str = "f16";
     const STRIDE: u32 = 2;
     const ADD: u16 = op::F_ADD;
+    const SUB: u16 = op::F_SUB;
     const MUL: u16 = op::F_MUL;
+    const DIV: u16 = op::F_DIV;
     const GREATER_THAN: u16 = op::F_ORD_GREATER_THAN;
+    const GREATER_THAN_EQUAL: u16 = op::F_ORD_GREATER_THAN_EQUAL;
+    const LESS_THAN: u16 = op::F_ORD_LESS_THAN;
+    const LESS_THAN_EQUAL: u16 = op::F_ORD_LESS_THAN_EQUAL;
     const EQUAL: u16 = op::F_ORD_EQUAL;
+    const NOT_EQUAL: u16 = op::F_ORD_NOT_EQUAL;
     const GROUP_ADD: u16 = op::GROUP_NON_UNIFORM_F_ADD;
+    const GROUP_MUL: u16 = op::GROUP_NON_UNIFORM_F_MUL;
     const GROUP_MAX: u16 = op::GROUP_NON_UNIFORM_F_MAX;
     const GROUP_MIN: u16 = op::GROUP_NON_UNIFORM_F_MIN;
     const MIN: Glsl = Glsl::FMin;
     const MAX: Glsl = Glsl::FMax;
     const CLAMP: Glsl = Glsl::FClamp;
     const FROM_U32: u16 = op::CONVERT_U_TO_F;
+    const ONE: u32 = 0x3c00;
+    const LOWEST: u32 = 0xfc00;
+    const HIGHEST: u32 = 0x7c00;
 
     fn type_id(module: &mut Module) -> Result<Id, BuildError> {
         module.require_capability(Capability::Float16)?;
@@ -177,6 +229,7 @@ impl Element for F16 {
 
 impl Signed for F16 {
     const ABS: Glsl = Glsl::FAbs;
+    const NEGATE: u16 = op::F_NEGATE;
 }
 
 fn sign_extend(bits: u32, width: u32) -> u32 {
@@ -184,10 +237,21 @@ fn sign_extend(bits: u32, width: u32) -> u32 {
     (((bits << spare) as i32) >> spare) as u32
 }
 
-impl Integer for I8 {}
-impl Integer for U8 {}
-impl Integer for I16 {}
-impl Integer for U16 {}
+impl Integer for I8 {
+    const SIGNED: bool = true;
+}
+
+impl Integer for U8 {
+    const SIGNED: bool = false;
+}
+
+impl Integer for I16 {
+    const SIGNED: bool = true;
+}
+
+impl Integer for U16 {
+    const SIGNED: bool = false;
+}
 
 #[cfg(test)]
 mod tests {

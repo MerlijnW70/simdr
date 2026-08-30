@@ -2,7 +2,8 @@ mod common;
 
 use common::{VULKAN_1_1, expect_valid, validate, validator};
 use simdr::kernel::{Kernel, Shape};
-use simdr::lanes::{Element, F32, I8, I16, I32, Integer, U8, U16, U32};
+use simdr::lanes::{Element, F32, I8, I16, I32, Integer, Lanes, U8, U16, U32};
+use simdr::module::op;
 
 fn shape() -> Shape {
     Shape::new(32, 64, 2)
@@ -559,4 +560,345 @@ fn integer_subtract_and_divide_are_valid_spirv() {
 
     let words = kernel.finish().expect("finished");
     expect_valid(&words, "integer subtract and divide", VULKAN_1_1);
+}
+
+#[test]
+fn the_elementwise_arithmetic_is_valid_spirv_over_floats() {
+    let mut kernel = Kernel::<F32>::new(shape()).expect("built");
+    let value = kernel.load::<32>(0).expect("loaded");
+
+    let total = {
+        let mut lanes = kernel.lanes().expect("lanes");
+        let two = lanes.splat_bits::<F32, 32>(2.0_f32.to_bits()).expect("two");
+
+        let difference = lanes.sub(value, two).expect("sub");
+        let quotient = lanes.div(difference, two).expect("div");
+        let negated = lanes.neg(quotient).expect("neg");
+
+        lanes.reduce_sum(negated).expect("summed")
+    };
+
+    kernel.store_scalar(1, total).expect("stored");
+    expect_valid(
+        &kernel.finish().expect("finished"),
+        "kernel-arithmetic-f32",
+        VULKAN_1_1,
+    );
+}
+
+#[test]
+fn the_elementwise_arithmetic_is_valid_spirv_over_both_integer_families() {
+    let signed = {
+        let mut kernel = Kernel::<I32>::new(shape()).expect("built");
+        let value = kernel.load::<32>(0).expect("loaded");
+
+        let total = {
+            let mut lanes = kernel.lanes().expect("lanes");
+            let three = lanes.splat_bits::<I32, 32>(3).expect("three");
+
+            let difference = lanes.sub(value, three).expect("sub");
+            let quotient = lanes.div(difference, three).expect("div");
+            let negated = lanes.neg(quotient).expect("neg");
+
+            lanes.reduce_sum(negated).expect("summed")
+        };
+
+        kernel.store_scalar(1, total).expect("stored");
+        kernel.finish().expect("finished")
+    };
+
+    let unsigned = {
+        let mut kernel = Kernel::<U32>::new(shape()).expect("built");
+        let value = kernel.load::<32>(0).expect("loaded");
+
+        let total = {
+            let mut lanes = kernel.lanes().expect("lanes");
+            let three = lanes.splat_bits::<U32, 32>(3).expect("three");
+
+            let difference = lanes.sub(value, three).expect("sub");
+            let quotient = lanes.div(difference, three).expect("div");
+
+            lanes.reduce_sum(quotient).expect("summed")
+        };
+
+        kernel.store_scalar(1, total).expect("stored");
+        kernel.finish().expect("finished")
+    };
+
+    expect_valid(&signed, "kernel-arithmetic-i32", VULKAN_1_1);
+    expect_valid(&unsigned, "kernel-arithmetic-u32", VULKAN_1_1);
+}
+
+#[test]
+fn the_whole_comparison_set_is_valid_spirv_and_selects_on_every_one() {
+    let mut kernel = Kernel::<F32>::new(shape()).expect("built");
+    let value = kernel.load::<32>(0).expect("loaded");
+
+    let picked = {
+        let mut lanes = kernel.lanes().expect("lanes");
+        let one = lanes.splat_bits::<F32, 32>(1.0_f32.to_bits()).expect("one");
+
+        let mut kept = value;
+        for compare in [
+            Lanes::less_than::<F32, 32>,
+            Lanes::less_equal::<F32, 32>,
+            Lanes::greater_than::<F32, 32>,
+            Lanes::greater_equal::<F32, 32>,
+            Lanes::equal::<F32, 32>,
+            Lanes::not_equal::<F32, 32>,
+        ] {
+            let predicate = compare(&mut lanes, kept, one).expect("compared");
+            kept = lanes.select(predicate, kept, one).expect("selected");
+        }
+
+        lanes.reduce_sum(kept).expect("summed")
+    };
+
+    kernel.store_scalar(1, picked).expect("stored");
+    expect_valid(
+        &kernel.finish().expect("finished"),
+        "kernel-comparisons",
+        VULKAN_1_1,
+    );
+}
+
+#[test]
+fn the_bitwise_family_is_valid_spirv_over_both_integer_families() {
+    let signed = {
+        let mut kernel = Kernel::<I32>::new(shape()).expect("built");
+        let value = kernel.load::<32>(0).expect("loaded");
+
+        let total = {
+            let mut lanes = kernel.lanes().expect("lanes");
+            let mask = lanes.splat_bits::<I32, 32>(0b1010).expect("mask");
+
+            let kept = lanes.and(value, mask).expect("and");
+            let joined = lanes.or(kept, mask).expect("or");
+            let flipped = lanes.xor(joined, mask).expect("xor");
+            let complemented = lanes.not(flipped).expect("not");
+
+            lanes.reduce_sum(complemented).expect("summed")
+        };
+
+        kernel.store_scalar(1, total).expect("stored");
+        kernel.finish().expect("finished")
+    };
+
+    let unsigned = {
+        let mut kernel = Kernel::<U32>::new(shape()).expect("built");
+        let value = kernel.load::<32>(0).expect("loaded");
+
+        let total = {
+            let mut lanes = kernel.lanes().expect("lanes");
+            let mask = lanes.splat_bits::<U32, 32>(0b1010).expect("mask");
+
+            let kept = lanes.and(value, mask).expect("and");
+            let joined = lanes.or(kept, mask).expect("or");
+            let flipped = lanes.xor(joined, mask).expect("xor");
+            let complemented = lanes.not(flipped).expect("not");
+
+            lanes.reduce_sum(complemented).expect("summed")
+        };
+
+        kernel.store_scalar(1, total).expect("stored");
+        kernel.finish().expect("finished")
+    };
+
+    expect_valid(&signed, "kernel-bitwise-i32", VULKAN_1_1);
+    expect_valid(&unsigned, "kernel-bitwise-u32", VULKAN_1_1);
+}
+
+#[test]
+fn the_bitwise_reductions_and_the_product_are_valid_spirv() {
+    let unsigned = {
+        let mut kernel = Kernel::<U32>::new(shape()).expect("built");
+        let value = kernel.load::<32>(0).expect("loaded");
+
+        let total = {
+            let mut lanes = kernel.lanes().expect("lanes");
+            let all = lanes.reduce_and(value).expect("and");
+            let any = lanes.reduce_or(value).expect("or");
+            let parity = lanes.reduce_xor(value).expect("xor");
+            let product = lanes.reduce_product(value).expect("product");
+
+            let uint = lanes.type_of::<U32>().expect("u32");
+            let mut running = all;
+            for next in [any, parity, product] {
+                running = lanes
+                    .module()
+                    .binary(op::BITWISE_XOR, uint, running, next)
+                    .expect("combined");
+            }
+            running
+        };
+
+        kernel.store_scalar(1, total).expect("stored");
+        kernel.finish().expect("finished")
+    };
+
+    let float = {
+        let mut kernel = Kernel::<F32>::new(shape()).expect("built");
+        let value = kernel.load::<32>(0).expect("loaded");
+        let product = kernel
+            .lanes()
+            .expect("lanes")
+            .reduce_product(value)
+            .expect("product");
+        kernel.store_scalar(1, product).expect("stored");
+        kernel.finish().expect("finished")
+    };
+
+    expect_valid(&unsigned, "kernel-reduce-bitwise", VULKAN_1_1);
+    expect_valid(&float, "kernel-reduce-product", VULKAN_1_1);
+}
+
+#[test]
+fn the_saturating_arithmetic_is_valid_spirv_for_both_signednesses() {
+    let build = |signed: bool| {
+        if signed {
+            let mut kernel = Kernel::<I32>::new(shape()).expect("built");
+            let value = kernel.load::<32>(0).expect("loaded");
+            let total = {
+                let mut lanes = kernel.lanes().expect("lanes");
+                let step = lanes.splat_bits::<I32, 32>(7).expect("step");
+                let up = lanes.saturating_add(value, step).expect("add");
+                let down = lanes.saturating_sub(up, step).expect("sub");
+                lanes.reduce_sum(down).expect("summed")
+            };
+            kernel.store_scalar(1, total).expect("stored");
+            kernel.finish().expect("finished")
+        } else {
+            let mut kernel = Kernel::<U32>::new(shape()).expect("built");
+            let value = kernel.load::<32>(0).expect("loaded");
+            let total = {
+                let mut lanes = kernel.lanes().expect("lanes");
+                let step = lanes.splat_bits::<U32, 32>(7).expect("step");
+                let up = lanes.saturating_add(value, step).expect("add");
+                let down = lanes.saturating_sub(up, step).expect("sub");
+                lanes.reduce_sum(down).expect("summed")
+            };
+            kernel.store_scalar(1, total).expect("stored");
+            kernel.finish().expect("finished")
+        }
+    };
+
+    expect_valid(&build(true), "kernel-saturating-i32", VULKAN_1_1);
+    expect_valid(&build(false), "kernel-saturating-u32", VULKAN_1_1);
+}
+
+#[test]
+fn a_swizzle_is_valid_spirv() {
+    let mut kernel = Kernel::<F32>::new(shape()).expect("built");
+    let value = kernel.load::<32>(0).expect("loaded");
+
+    let moved = {
+        let mut lanes = kernel.lanes().expect("lanes");
+        let lane = lanes.position::<32>().expect("lane index");
+        let last = lanes.splat_bits::<U32, 32>(31).expect("last");
+        let opposite = lanes.sub(last, lane).expect("opposite");
+        lanes.swizzle(value, opposite).expect("swizzled")
+    };
+
+    kernel.store(1, moved).expect("stored");
+    expect_valid(
+        &kernel.finish().expect("finished"),
+        "kernel-swizzle",
+        VULKAN_1_1,
+    );
+}
+
+#[test]
+fn the_rest_of_the_math_set_is_valid_spirv() {
+    let mut kernel = Kernel::<F32>::new(shape()).expect("built");
+    let value = kernel.load::<32>(0).expect("loaded");
+
+    let total = {
+        let mut lanes = kernel.lanes().expect("lanes");
+        let angled = lanes.sin(value).expect("sin");
+        let paired = lanes.cos(angled).expect("cos");
+        let down = lanes.floor(paired).expect("floor");
+        let up = lanes.ceil(down).expect("ceil");
+        let cut = lanes.trunc(up).expect("trunc");
+        let near = lanes.round(cut).expect("round");
+        let raised = lanes.pow(near, near).expect("pow");
+        lanes.reduce_sum(raised).expect("summed")
+    };
+
+    kernel.store_scalar(1, total).expect("stored");
+    expect_valid(
+        &kernel.finish().expect("finished"),
+        "kernel-math-set",
+        VULKAN_1_1,
+    );
+}
+
+#[test]
+fn a_gather_is_valid_spirv() {
+    let mut kernel = Kernel::<U32>::new(shape()).expect("built");
+    let indices = kernel.load::<32>(0).expect("loaded");
+    let gathered = kernel.gather::<32>(0, indices).expect("gathered");
+    kernel.store(1, gathered).expect("stored");
+
+    expect_valid(
+        &kernel.finish().expect("finished"),
+        "kernel-gather",
+        VULKAN_1_1,
+    );
+}
+
+#[test]
+fn every_scan_beyond_the_sum_is_valid_spirv() {
+    let mut kernel = Kernel::<U32>::new(shape()).expect("built");
+    let value = kernel.load::<32>(0).expect("loaded");
+
+    let combined = {
+        let mut lanes = kernel.lanes().expect("lanes");
+        let running = [
+            lanes.prefix_product(value).expect("product"),
+            lanes.prefix_min(value).expect("min"),
+            lanes.prefix_max(value).expect("max"),
+            lanes.prefix_and(value).expect("and"),
+            lanes.prefix_or(value).expect("or"),
+            lanes.prefix_xor(value).expect("xor"),
+        ];
+
+        let mut total = running[0];
+        for next in &running[1..] {
+            total = lanes.xor(total, *next).expect("combined");
+        }
+        lanes.reduce_sum(total).expect("summed")
+    };
+
+    kernel.store_scalar(1, combined).expect("stored");
+    expect_valid(
+        &kernel.finish().expect("finished"),
+        "kernel-scans",
+        VULKAN_1_1,
+    );
+}
+
+#[test]
+fn the_exclusive_scans_are_valid_spirv_whole_and_in_clusters() {
+    let build = |narrow: bool| {
+        let mut kernel = Kernel::<U32>::new(shape()).expect("built");
+        let total = if narrow {
+            let value = kernel.load::<4>(0).expect("loaded");
+            let mut lanes = kernel.lanes().expect("lanes");
+            let running = lanes.prefix_max_exclusive(value).expect("max");
+            let masked = lanes.prefix_and_exclusive(running).expect("and");
+            lanes.reduce_sum(masked).expect("summed")
+        } else {
+            let value = kernel.load::<32>(0).expect("loaded");
+            let mut lanes = kernel.lanes().expect("lanes");
+            let running = lanes.prefix_product_exclusive(value).expect("product");
+            let smallest = lanes.prefix_min_exclusive(running).expect("min");
+            lanes.reduce_sum(smallest).expect("summed")
+        };
+
+        kernel.store_scalar(1, total).expect("stored");
+        kernel.finish().expect("finished")
+    };
+
+    expect_valid(&build(false), "kernel-scans-exclusive", VULKAN_1_1);
+    expect_valid(&build(true), "kernel-scans-clustered", VULKAN_1_1);
 }

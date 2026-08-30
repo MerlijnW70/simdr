@@ -2,6 +2,12 @@ use super::{LaneError, Lanes, Predicate};
 use crate::module::Id;
 use crate::spec::SelectionControl;
 
+/// A condition every lane of the subgroup agrees on.
+///
+/// This is the only thing the lane API will branch on, and it cannot be built
+/// outside this crate: a [`Predicate`] becomes one by being voted on, and by no
+/// other route. That is what keeps lanes from diverging, and so what makes
+/// [`crate::kernel::Kernel::barrier`] reached by every invocation or by none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Uniform {
     id: Id,

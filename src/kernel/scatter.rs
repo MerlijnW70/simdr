@@ -1,5 +1,5 @@
 use super::Kernel;
-use crate::lanes::{Element, LaneError};
+use crate::lanes::{Element, LaneError, U32, Vector};
 use crate::module::Id;
 use crate::spec::{MemorySemantics, Scope};
 
@@ -11,6 +11,29 @@ impl<T: Element> Kernel<T> {
         Ok(self
             .module()
             .access_chain(element_pointer, buffer, &[zero, index])?)
+    }
+
+    /// One element per lane, each from the slot its own element of `indices`
+    /// names — the read that [`Kernel::store_at`] is the write of.
+    ///
+    /// The indices are values rather than a pattern known here, so nothing
+    /// bounds them. A slot outside the binding is what Vulkan's robustness
+    /// rules make of it, which is a device setting and not a promise this
+    /// emitter can make; keep the indices inside the buffer.
+    pub fn gather<const LANES: u32>(
+        &mut self,
+        binding: u32,
+        indices: Vector<U32, LANES>,
+    ) -> Result<Vector<T, LANES>, LaneError> {
+        let element = self.element();
+        let mut loaded = Vec::with_capacity(indices.strip_count());
+
+        for &index in indices.strips() {
+            let pointer = self.element_pointer_to(binding, index)?;
+            loaded.push(self.module().load(element, pointer)?);
+        }
+
+        self.lanes()?.from_strips(&loaded)
     }
 
     pub fn atomic_add_at(&mut self, binding: u32, index: Id, value: Id) -> Result<Id, LaneError> {
@@ -193,6 +216,62 @@ mod tests {
         assert_eq!(
             kernel.atomic_add_at(7, value.id(), value.id()).err(),
             Some(LaneError::NoSuchBuffer { index: 7, bound: 2 })
+        );
+    }
+
+    #[test]
+    fn a_gather_is_one_load_per_strip_and_reads_the_index_it_was_handed() {
+        let mut kernel = Kernel::<U32>::new(Shape::new(32, 64, 2)).expect("built");
+        let indices = kernel
+            .lanes()
+            .expect("lanes")
+            .position::<32>()
+            .expect("lane");
+
+        let gathered = kernel.gather::<32>(0, indices).expect("gathered");
+
+        assert_eq!(gathered.strip_count(), 1);
+        let words = kernel.finish().expect("finished");
+        let chains: Vec<Vec<u32>> = crate::decode::body(&words)
+            .filter(|instruction| instruction.opcode() == crate::module::op::ACCESS_CHAIN)
+            .map(|instruction| instruction.operands().to_vec())
+            .collect();
+
+        assert!(
+            chains
+                .iter()
+                .any(|operands| operands.contains(&indices.id().word())),
+            "the pointer a gather loads through is built from the index it was given"
+        );
+    }
+
+    #[test]
+    fn a_strip_mined_gather_loads_once_for_every_strip() {
+        let mut kernel = Kernel::<U32>::new(Shape::new(32, 64, 2)).expect("built");
+        let indices = kernel.load::<128>(0).expect("loaded");
+
+        let gathered = kernel.gather::<128>(0, indices).expect("gathered");
+
+        assert_eq!(
+            gathered.strip_count(),
+            4,
+            "four strips in, four elements out"
+        );
+    }
+
+    #[test]
+    fn a_gather_from_a_buffer_that_was_never_bound_is_refused() {
+        let mut kernel = Kernel::<U32>::new(Shape::new(32, 64, 2)).expect("built");
+        let indices = kernel
+            .lanes()
+            .expect("lanes")
+            .position::<32>()
+            .expect("lane");
+
+        assert_eq!(
+            kernel.gather::<32>(7, indices).err(),
+            Some(LaneError::NoSuchBuffer { index: 7, bound: 2 }),
+            "a gather checks its binding even though it cannot check its indices"
         );
     }
 }

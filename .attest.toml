@@ -3,7 +3,7 @@
 # What is refused is an assertion nothing settles: a figure nobody measured, a path that is not
 # there, a name the tree does not declare.
 
-comments = "strict"
+comments = "claims"
 tolerance = 0.005
 exempt = ["target/**", ".git/**"]
 
@@ -27,10 +27,16 @@ timeout = 900
 
 # The gate a passing suite cannot supply, delegated to the prober this repository already uses.
 #
-# `proved` is empty until a baseline exists. `.noha/` holds a test-impact matrix and no
-# baseline.tsv, so `noha prober` refuses until `--update` has seeded one -- and that run is the
-# whole workspace at `max: 4000`, which is hours. Seed it in shards, one invocation at a time, and
-# add paths here as each earns a run with no survivors.
+# `proved` is empty because no baseline exists. `.noha/baseline.tsv` is present on this machine and
+# holds its header line and nothing else -- zero rows, so the ratchet floor is unseeded and `noha
+# prober` refuses until `--update` has written one. That run is the whole workspace at `max: 4000`,
+# which is hours. Seed it in shards, one invocation at a time, and add paths here as each earns a
+# run with no survivors.
+#
+# That the file is here says nothing about any other checkout. This machine's global gitignore
+# excludes `.noha/` from every repository on it, so neither the baseline nor the test-impact matrix
+# beside it is in the tree, and `git check-ignore` names that global rule rather than `.gitignore`.
+# `.gitignore` states the policy and the price it charges.
 [mutation]
 command = "noha prober --diff"
 pattern = 'killed\s+(?P<killed>[0-9]+)/(?P<total>[0-9]+) viable\s+survivors\s+(?P<survivors>[0-9]+)'

@@ -6,7 +6,7 @@ mod program;
 pub use domain::{ALL_DOMAINS, BitShift, Domain};
 pub use generate::{Rng, generate};
 pub use interpret::{Reference, reference};
-pub use program::{Emit, Finish, Op, Program, ProgramError};
+pub use program::{Emit, Finish, Fold, Op, Program, ProgramError};
 
 use crate::{Error, Gpu};
 

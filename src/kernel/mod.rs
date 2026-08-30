@@ -16,6 +16,7 @@ mod plane;
 mod scatter;
 mod shared;
 
+pub use self::access::Binding;
 pub use self::shared::Shared;
 
 use crate::lanes::{Element, LaneError, Lanes};
@@ -171,6 +172,18 @@ impl<T: Element> Kernel<T> {
 
     pub(super) const fn row_index(&self) -> Option<Id> {
         self.row
+    }
+
+    /// How many descriptors this kernel has declared, which is where the next
+    /// one goes.
+    pub(super) fn bound(&self) -> u32 {
+        self.buffers.len() as u32
+    }
+
+    /// Keeps a binding declared after the shape in the same list, so a later
+    /// one lands beside it rather than on top of it.
+    pub(super) fn remember(&mut self, variable: Id) {
+        self.buffers.push(variable);
     }
 
     pub(super) fn buffer(&self, index: u32) -> Result<Id, LaneError> {

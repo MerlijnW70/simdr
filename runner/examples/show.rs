@@ -1,5 +1,5 @@
 use runner::Gpu;
-use runner::kernels::{self, WORKGROUP_SIZE};
+use runner::kernels::{self, Bitwise, Comparison, Running, Transcendental, WORKGROUP_SIZE};
 use simdr::lanes::{F32, U32};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -61,6 +61,160 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let voted = gpu.run(&kernels::any_above(width, 40.0)?, &input, 1)?;
     println!("  any(x > 40)   {:?}", &voted[..8]);
 
+    println!("\narithmetic and the six orderings, against 4:");
+    let difference = gpu.run(&kernels::lane_sub(width, 1.0)?, &input, 1)?;
+    println!("  x - 1         {:?}", &difference[..8]);
+
+    let quotient = gpu.run(&kernels::lane_div(width, 2.0)?, &input, 1)?;
+    println!("  x / 2         {:?}", &quotient[..8]);
+
+    let negated = gpu.run(&kernels::lane_neg(width)?, &input, 1)?;
+    println!("  -x            {:?}", &negated[..8]);
+
+    for (label, comparison) in [
+        ("x <  4", Comparison::Less),
+        ("x <= 4", Comparison::LessEqual),
+        ("x >  4", Comparison::Greater),
+        ("x >= 4", Comparison::GreaterEqual),
+        ("x == 4", Comparison::Equal),
+        ("x != 4", Comparison::NotEqual),
+    ] {
+        let held = gpu.run(&kernels::lane_compare(width, 4.0, comparison)?, &input, 1)?;
+        let flags: Vec<u32> = held[..8].iter().map(|value| *value as u32).collect();
+        println!("  {label}        {flags:?}");
+    }
+
+    println!("\nthe bitwise four, in hex against 0x5:");
+    let bits: Vec<u32> = (0..count as u32).collect();
+    println!("  in            {}", hex(&bits[..8]));
+    for (label, operation) in [
+        ("x & 5", Bitwise::And),
+        ("x | 5", Bitwise::Or),
+        ("x ^ 5", Bitwise::Xor),
+        ("!x   ", Bitwise::Not),
+    ] {
+        let output = gpu.run_u32(
+            &kernels::lane_bitwise_with(width, 0x5, operation)?,
+            &bits,
+            1,
+        )?;
+        println!("  {label}         {}", hex(&output[..8]));
+    }
+
+    println!("\nreductions over the subgroup, and a product in clusters of four:");
+    let folded: Vec<u32> = (0..count as u32)
+        .map(|index| 0b1100 | (index % 3))
+        .collect();
+    println!("  in            {}", hex(&folded[..8]));
+    for (label, spirv) in [
+        ("reduce_and", kernels::lane_and_whole::<U32>(width)?),
+        ("reduce_or ", kernels::lane_or_whole::<U32>(width)?),
+        ("reduce_xor", kernels::lane_xor_whole::<U32>(width)?),
+    ] {
+        let output = gpu.run_u32(&spirv, &folded, 1)?;
+        println!("  {label}    {}", hex(&output[..8]));
+    }
+
+    let product = gpu.run_u32(&kernels::lane_product::<U32, 4>(width)?, &folded, 1)?;
+    println!("  product/4     {:?}", &product[..8]);
+
+    println!("\nsaturating, where the wrapping kind would wrap:");
+    let ceiling = u32::MAX - 3;
+    let climbing = gpu.run_u32(
+        &kernels::lane_saturating_add_whole::<U32>(width, ceiling)?,
+        &bits,
+        1,
+    )?;
+    println!("  x +sat MAX-3  {}", hex(&climbing[..8]));
+
+    let floored = gpu.run_u32(
+        &kernels::lane_saturating_sub_whole::<U32>(width, 4)?,
+        &bits,
+        1,
+    )?;
+    println!("  x -sat 4      {:?}", &floored[..8]);
+
+    println!("\nmoving elements rather than computing them:");
+    let reversed = gpu.run(&kernels::lane_reverse(width)?, &input, 1)?;
+    println!("  swizzle rev   {:?}", &reversed[..8]);
+
+    let slots: Vec<u32> = (0..count as u32)
+        .map(|index| (index + 5) % count as u32)
+        .collect();
+    println!("  gather from   {:?}", &slots[..8]);
+    let gathered = gpu.run_u32(&kernels::lane_gather_whole(width)?, &slots, 1)?;
+    println!("  gather        {:?}", &gathered[..8]);
+
+    println!("\nthe extended math set, on values that straddle zero:");
+    let fractional: Vec<f32> = (0..count)
+        .map(|index| (index % 8) as f32 * 0.5 - 1.75)
+        .collect();
+    println!("  in            {:?}", &fractional[..8]);
+    for (label, which) in [
+        ("floor ", Transcendental::Floor),
+        ("ceil  ", Transcendental::Ceil),
+        ("trunc ", Transcendental::Trunc),
+        ("round ", Transcendental::Round),
+        ("sin   ", Transcendental::Sin),
+        ("cos   ", Transcendental::Cos),
+    ] {
+        let output = gpu.run(&kernels::lane_transcendental(width, which)?, &fractional, 1)?;
+        let rounded: Vec<f32> = output[..8]
+            .iter()
+            .map(|value| (value * 1000.0).round() / 1000.0)
+            .collect();
+        println!("  {label}        {rounded:?}");
+    }
+
+    // `pow` is undefined for a negative base, so it takes the ramp above and
+    // not the values that straddle zero.
+    let squared = gpu.run(
+        &kernels::lane_transcendental(width, Transcendental::SquaredByPow)?,
+        &input,
+        1,
+    )?;
+    println!("  pow(x, 2)     {:?}", &squared[..8]);
+
+    println!("\nrunning folds over the subgroup, each lane holding everything up to it:");
+    let steps: Vec<u32> = (0..count as u32)
+        .map(|index| (index % 3 + 1) | 0b1000)
+        .collect();
+    println!("  in            {:?}", &steps[..8]);
+    for (label, running) in [
+        ("sum    ", Running::Sum),
+        ("product", Running::Product),
+        ("min    ", Running::Min),
+        ("max    ", Running::Max),
+        ("and    ", Running::And),
+        ("or     ", Running::Or),
+        ("xor    ", Running::Xor),
+    ] {
+        let output = gpu.run_u32(
+            &kernels::lane_prefix_whole(width, running, false)?,
+            &steps,
+            1,
+        )?;
+        println!("  prefix {label} {:?}", &output[..8]);
+    }
+
+    println!("\nthe exclusive form leaves each lane its own element out:");
+    for (label, running) in [("sum", Running::Sum), ("and", Running::And)] {
+        let inclusive = gpu.run_u32(
+            &kernels::lane_prefix_whole(width, running, false)?,
+            &steps,
+            1,
+        )?;
+        let exclusive = gpu.run_u32(
+            &kernels::lane_prefix_whole(width, running, true)?,
+            &steps,
+            1,
+        )?;
+        println!("  {label} inclusive  {:?}", &inclusive[..8]);
+        println!("  {label} exclusive  {:?}", &exclusive[..8]);
+    }
+    println!("  the first lane of the exclusive `and` is every bit set, which is what leaves an");
+    println!("  intersection alone; seeding it with nought would empty the fold.");
+
     println!("\nstrip-mined, and an integer:");
     let long: Vec<f32> = (0..count as u32 * 2).map(|index| index as f32).collect();
     let strided = gpu.run(&kernels::lane_sum::<F32, 64>(width)?, &long, 1)?;
@@ -71,4 +225,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Simd<u32,32>  {:?}", &summed[..8]);
 
     Ok(())
+}
+
+fn hex(values: &[u32]) -> String {
+    let cells: Vec<String> = values
+        .iter()
+        .map(|value| format!("0x{value:08x}"))
+        .collect();
+    format!("[{}]", cells.join(", "))
 }

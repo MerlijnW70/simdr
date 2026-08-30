@@ -32,6 +32,34 @@ pub(super) fn apply(program: &Program, held: &[Vec<u32>], step: Op) -> Vec<Vec<u
         }
         Op::ShiftUp | Op::ShiftDown => held.to_vec(),
         Op::BitShift { kind, by } => elementwise(held, |value| domain.bit_shift(kind, value, by)),
+        Op::SubConstant(operand) => {
+            let operand = domain.encode(operand);
+            elementwise(held, |value| domain.sub(value, operand))
+        }
+        Op::SaturatingAddConstant(operand) => {
+            let operand = domain.encode(operand);
+            elementwise(held, |value| domain.saturating_add(value, operand))
+        }
+        Op::SaturatingSubConstant(operand) => {
+            let operand = domain.encode(operand);
+            elementwise(held, |value| domain.saturating_sub(value, operand))
+        }
+        Op::AndConstant(operand) => {
+            let operand = domain.encode(operand);
+            elementwise(held, |value| domain.bitand(value, operand))
+        }
+        Op::OrConstant(operand) => {
+            let operand = domain.encode(operand);
+            elementwise(held, |value| domain.bitor(value, operand))
+        }
+        Op::XorConstant(operand) => {
+            let operand = domain.encode(operand);
+            elementwise(held, |value| domain.bitxor(value, operand))
+        }
+        Op::NotValue => elementwise(held, |value| domain.not(value)),
+        Op::Floor => elementwise(held, |value| domain.floor(value)),
+        Op::Ceil => elementwise(held, |value| domain.ceil(value)),
+        Op::Trunc => elementwise(held, |value| domain.trunc(value)),
         Op::Absolute => elementwise(held, |value| domain.abs(value)),
         Op::FusedMulAdd { by, plus } => {
             let factor = domain.encode(by);

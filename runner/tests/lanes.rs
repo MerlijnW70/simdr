@@ -1,8 +1,12 @@
 mod common;
 
-use common::{device, grouped_sums, ramp, runnable};
-use runner::kernels::{self, WORKGROUP_SIZE};
-use simdr::lanes::{F32, U32};
+type Ordering = (Comparison, fn(f32, f32) -> bool);
+type BitwisePair = (Bitwise, fn(u32, u32) -> u32);
+type Approximated = (Transcendental, fn(f32) -> f32, f32);
+
+use common::{device, grouped_sums, ramp, ramp_u32, runnable};
+use runner::kernels::{self, Bitwise, Comparison, Running, Transcendental, WORKGROUP_SIZE};
+use simdr::lanes::{F32, I32, U32};
 
 #[test]
 fn a_workgroup_reduction_crosses_between_subgroups() {
@@ -317,5 +321,1054 @@ fn the_lane_api_refuses_the_lane_counts_that_have_no_mapping() {
     assert!(
         kernels::lane_sum::<F32, 4096>(width).is_err(),
         "4096 lanes need more elements per lane than a vector holds inline, at any width"
+    );
+}
+
+#[test]
+fn subtraction_division_and_negation_compute_per_element_on_the_device() {
+    let Some(gpu) = device("arithmetic") else {
+        return;
+    };
+
+    let width = gpu.limits().subgroup_size;
+    let count = WORKGROUP_SIZE as usize;
+    let input = ramp(count);
+
+    let output = gpu
+        .run(&kernels::lane_arithmetic(width).expect("built"), &input, 1)
+        .expect("dispatched");
+
+    let expected: Vec<f32> = input.iter().map(|value| -((value - 1.0) / 2.0)).collect();
+    assert_eq!(
+        output, expected,
+        "the three operations run in the order they were written"
+    );
+    assert!(
+        output.iter().any(|value| *value > 0.0),
+        "an input that straddles one leaves both signs behind, so a dropped negation shows"
+    );
+}
+
+#[test]
+fn each_of_the_six_comparisons_holds_exactly_where_it_should() {
+    let Some(gpu) = device("ordering") else {
+        return;
+    };
+
+    let width = gpu.limits().subgroup_size;
+    let count = WORKGROUP_SIZE as usize;
+    let input = ramp(count);
+    assert!(
+        input.contains(&kernels::ORDERING_THRESHOLD),
+        "the equal-to case has to be reached or two of the six go untested"
+    );
+
+    let output = gpu
+        .run(&kernels::lane_ordering(width).expect("built"), &input, 1)
+        .expect("dispatched");
+
+    let expected: Vec<f32> = input
+        .iter()
+        .map(|value| {
+            let threshold = kernels::ORDERING_THRESHOLD;
+            let bits = [
+                (*value < threshold, 1.0),
+                (*value <= threshold, 2.0),
+                (*value > threshold, 4.0),
+                (*value >= threshold, 8.0),
+                ((*value - threshold).abs() < f32::EPSILON, 16.0),
+                ((*value - threshold).abs() >= f32::EPSILON, 32.0),
+            ];
+            bits.iter()
+                .filter(|(held, _)| *held)
+                .map(|(_, weight)| weight)
+                .sum()
+        })
+        .collect();
+
+    assert_eq!(
+        output, expected,
+        "each comparison carries its own bit, so a wrong one names itself"
+    );
+    assert_eq!(output[0], 35.0, "below: less, less-or-equal, not-equal");
+    assert_eq!(
+        output[4], 26.0,
+        "at: less-or-equal, greater-or-equal, equal"
+    );
+    assert_eq!(
+        output[5], 44.0,
+        "above: greater, greater-or-equal, not-equal"
+    );
+}
+
+#[test]
+fn the_two_integer_families_divide_with_their_own_instruction() {
+    let Some(gpu) = device("division") else {
+        return;
+    };
+
+    let width = gpu.limits().subgroup_size;
+    let count = WORKGROUP_SIZE as usize;
+    let signed: Vec<i32> = (0..count as i32).map(|index| index - 32).collect();
+    let words: Vec<u32> = signed
+        .iter()
+        .map(|value| u32::from_ne_bytes(value.to_ne_bytes()))
+        .collect();
+
+    let signed_out = gpu
+        .run_u32(
+            &kernels::lane_divide_signed(width).expect("built"),
+            &words,
+            1,
+        )
+        .expect("dispatched");
+    let signed_out: Vec<i32> = signed_out
+        .iter()
+        .map(|word| i32::from_ne_bytes(word.to_ne_bytes()))
+        .collect();
+
+    let expected: Vec<i32> = signed.iter().map(|value| -(value / 2)).collect();
+    assert_eq!(
+        signed_out, expected,
+        "a signed division truncates toward zero and keeps the sign — OpUDiv would not"
+    );
+    assert!(
+        signed_out.iter().any(|value| *value < 0),
+        "the inputs have to reach past zero or OpUDiv would pass this too"
+    );
+
+    let unsigned_out = gpu
+        .run_u32(
+            &kernels::lane_divide_unsigned(width).expect("built"),
+            &words,
+            1,
+        )
+        .expect("dispatched");
+    let expected: Vec<u32> = words.iter().map(|word| word / 2).collect();
+    assert_eq!(
+        unsigned_out, expected,
+        "the same bits read as unsigned halve as unsigned"
+    );
+}
+
+#[test]
+fn the_four_bitwise_operations_each_produce_the_bits_they_are_named_for() {
+    let Some(gpu) = device("bitwise") else {
+        return;
+    };
+
+    let width = gpu.limits().subgroup_size;
+    let count = WORKGROUP_SIZE as usize;
+    let input: Vec<u32> = (0..count as u32).collect();
+
+    let expected: Vec<u32> = input
+        .iter()
+        .map(|value| {
+            [
+                (value & kernels::BITWISE_AND_MASK, 1_u32),
+                (value | kernels::BITWISE_OR_MASK, 3),
+                (value ^ kernels::BITWISE_XOR_MASK, 5),
+                (!value, 7),
+            ]
+            .iter()
+            .fold(0_u32, |total, (term, weight)| {
+                total.wrapping_add(term.wrapping_mul(*weight))
+            })
+        })
+        .collect();
+
+    assert!(
+        expected.windows(2).any(|pair| pair[0] != pair[1]),
+        "an expectation that does not vary with its input is one the identity          `(x | m) == (x & m) + (x ^ m)` has collapsed, and it would pass with two          of the four traded"
+    );
+
+    let output = gpu
+        .run_u32(&kernels::lane_bitwise(width).expect("built"), &input, 1)
+        .expect("dispatched");
+
+    assert_eq!(output, expected);
+}
+
+#[test]
+fn a_complement_on_a_signed_lane_is_ones_complement_and_not_a_negation() {
+    let Some(gpu) = device("complement") else {
+        return;
+    };
+
+    let width = gpu.limits().subgroup_size;
+    let count = WORKGROUP_SIZE as usize;
+    let signed: Vec<i32> = (0..count as i32).map(|index| index - 32).collect();
+    let words: Vec<u32> = signed
+        .iter()
+        .map(|value| u32::from_ne_bytes(value.to_ne_bytes()))
+        .collect();
+
+    let output = gpu
+        .run_u32(
+            &kernels::lane_complement_signed(width).expect("built"),
+            &words,
+            1,
+        )
+        .expect("dispatched");
+    let output: Vec<i32> = output
+        .iter()
+        .map(|word| i32::from_ne_bytes(word.to_ne_bytes()))
+        .collect();
+
+    let expected: Vec<i32> = signed.iter().map(|value| !value).collect();
+    assert_eq!(output, expected);
+
+    for (complemented, value) in output.iter().zip(&signed) {
+        assert_eq!(
+            *complemented,
+            -value - 1,
+            "the complement and the negation differ by one, and this is the complement"
+        );
+    }
+}
+
+#[test]
+fn the_three_bitwise_reductions_fold_the_lanes_they_are_named_over() {
+    let Some(gpu) = device("bitwise-reduce") else {
+        return;
+    };
+
+    let width = gpu.limits().subgroup_size as usize;
+    let count = WORKGROUP_SIZE as usize;
+
+    // Distinct low bits per lane, so `and` clears where `or` sets and the
+    // parity of each column decides `xor` — no two of the three agree.
+    let input: Vec<u32> = (0..count as u32).map(|index| (index * 7) | 1).collect();
+
+    let modules = [
+        kernels::lane_and_whole::<U32>(gpu.limits().subgroup_size).expect("built"),
+        kernels::lane_or_whole::<U32>(gpu.limits().subgroup_size).expect("built"),
+        kernels::lane_xor_whole::<U32>(gpu.limits().subgroup_size).expect("built"),
+    ];
+    let borrowed: Vec<&[u32]> = modules.iter().map(Vec::as_slice).collect();
+    if !runnable(&gpu, "bitwise-reduce", &borrowed) {
+        return;
+    }
+
+    let folded = |combine: fn(u32, u32) -> u32| -> Vec<u32> {
+        (0..count)
+            .map(|lane| {
+                let first = lane / width * width;
+                input[first..(first + width).min(count)]
+                    .iter()
+                    .copied()
+                    .reduce(combine)
+                    .expect("a subgroup holds at least one lane")
+            })
+            .collect()
+    };
+
+    let outputs: Vec<Vec<u32>> = modules
+        .iter()
+        .map(|spirv| gpu.run_u32(spirv, &input, 1).expect("dispatched"))
+        .collect();
+
+    assert_eq!(outputs[0], folded(|a, b| a & b), "and");
+    assert_eq!(outputs[1], folded(|a, b| a | b), "or");
+    assert_eq!(outputs[2], folded(|a, b| a ^ b), "xor");
+
+    assert_ne!(outputs[0], outputs[1], "and and or must not agree here");
+    assert_ne!(outputs[1], outputs[2], "nor or and xor");
+    assert_ne!(outputs[0], outputs[2], "nor and and xor");
+}
+
+#[test]
+fn a_product_reduction_multiplies_the_lanes_rather_than_adding_them() {
+    let Some(gpu) = device("product-reduce") else {
+        return;
+    };
+
+    let width = gpu.limits().subgroup_size as usize;
+    let count = WORKGROUP_SIZE as usize;
+
+    // Values a wrapping product stays exact over, and never 1, so a dropped
+    // multiply cannot hide in an identity.
+    let input: Vec<u32> = (0..count).map(|index| (index % 3 + 2) as u32).collect();
+
+    let spirv = kernels::lane_product_whole::<U32>(gpu.limits().subgroup_size).expect("built");
+    if !runnable(&gpu, "product-reduce", &[&spirv]) {
+        return;
+    }
+
+    let output = gpu.run_u32(&spirv, &input, 1).expect("dispatched");
+
+    let expected: Vec<u32> = (0..count)
+        .map(|lane| {
+            let first = lane / width * width;
+            input[first..(first + width).min(count)]
+                .iter()
+                .fold(1_u32, |total, value| total.wrapping_mul(*value))
+        })
+        .collect();
+
+    assert_eq!(output, expected);
+
+    let sums: Vec<u32> = (0..count)
+        .map(|lane| {
+            let first = lane / width * width;
+            input[first..(first + width).min(count)].iter().sum()
+        })
+        .collect();
+    assert_ne!(output, sums, "a product is not a sum over this input");
+}
+
+#[test]
+fn the_new_reductions_cluster_and_strip_mine_like_every_other_one() {
+    let Some(gpu) = device("reduce-shapes") else {
+        return;
+    };
+    let limits = gpu.limits().clone();
+
+    let width = limits.subgroup_size as usize;
+    if width < 4 {
+        eprintln!("SKIPPED reduce-shapes: a subgroup of {width} has no cluster of four");
+        return;
+    }
+    let count = WORKGROUP_SIZE as usize;
+    let input: Vec<u32> = (0..count as u32)
+        .map(|index| index.wrapping_mul(37) | 1)
+        .collect();
+
+    let in_clusters = |combine: fn(u32, u32) -> u32, seed: Option<u32>| -> Vec<u32> {
+        (0..count)
+            .map(|lane| {
+                let first = lane / 4 * 4;
+                let cluster = input[first..(first + 4).min(count)].iter().copied();
+                match seed {
+                    Some(start) => cluster.fold(start, combine),
+                    None => cluster.reduce(combine).expect("a cluster is not empty"),
+                }
+            })
+            .collect()
+    };
+
+    let clustered = [
+        (
+            "and",
+            kernels::lane_and::<U32, 4>(limits.subgroup_size).expect("built"),
+            in_clusters(|a, b| a & b, None),
+        ),
+        (
+            "or",
+            kernels::lane_or::<U32, 4>(limits.subgroup_size).expect("built"),
+            in_clusters(|a, b| a | b, None),
+        ),
+        (
+            "product",
+            kernels::lane_product::<U32, 4>(limits.subgroup_size).expect("built"),
+            in_clusters(u32::wrapping_mul, Some(1)),
+        ),
+    ];
+
+    let borrowed: Vec<&[u32]> = clustered
+        .iter()
+        .map(|(_, spirv, _)| spirv.as_slice())
+        .collect();
+    if !runnable(&gpu, "reduce-shapes", &borrowed) {
+        return;
+    }
+
+    for (name, spirv, expected) in &clustered {
+        let output = gpu.run_u32(spirv, &input, 1).expect("dispatched");
+        assert_eq!(output, *expected, "{name} in clusters of four");
+    }
+
+    let strips = 2_usize;
+    let stride = count;
+    let wide = ramp_u32(count * strips);
+    let spirv = match limits.subgroup_size {
+        32 => kernels::lane_xor::<U32, 64>(32).expect("built"),
+        64 => kernels::lane_xor::<U32, 128>(64).expect("built"),
+        other => {
+            eprintln!("SKIPPED reduce-shapes: no strip-mined case written for {other}");
+            return;
+        }
+    };
+
+    let output = gpu.run_u32(&spirv, &wide, 1).expect("dispatched");
+    let expected: Vec<u32> = (0..count)
+        .map(|lane| {
+            let first = lane / width * width;
+            (first..first + width)
+                .flat_map(|other| (0..strips).map(move |strip| other + strip * stride))
+                .fold(0_u32, |total, index| total ^ wide[index])
+        })
+        .collect();
+
+    assert_eq!(&output[..count], &expected[..count], "xor, strip-mined");
+
+    let one_strip_only = (0..width).fold(0_u32, |total, other| total ^ wide[other]);
+    assert_ne!(
+        output.first(),
+        Some(&one_strip_only),
+        "the second strip was not folded in"
+    );
+}
+
+#[test]
+fn every_arm_of_the_tours_comparison_and_bitwise_kernels_is_the_one_it_names() {
+    let Some(gpu) = device("tour-arms") else {
+        return;
+    };
+
+    let width = gpu.limits().subgroup_size;
+    let count = WORKGROUP_SIZE as usize;
+    let threshold = 4.0_f32;
+    let floats: Vec<f32> = (0..count as u32).map(|index| index as f32).collect();
+
+    let orderings: [Ordering; 6] = [
+        (Comparison::Less, |x, t| x < t),
+        (Comparison::LessEqual, |x, t| x <= t),
+        (Comparison::Greater, |x, t| x > t),
+        (Comparison::GreaterEqual, |x, t| x >= t),
+        (Comparison::Equal, |x, t| (x - t).abs() < f32::EPSILON),
+        (Comparison::NotEqual, |x, t| (x - t).abs() >= f32::EPSILON),
+    ];
+
+    let mut seen: Vec<Vec<f32>> = Vec::new();
+    for (comparison, holds) in orderings {
+        let spirv = kernels::lane_compare(width, threshold, comparison).expect("built");
+        let output = gpu.run(&spirv, &floats, 1).expect("dispatched");
+
+        let expected: Vec<f32> = floats
+            .iter()
+            .map(|value| if holds(*value, threshold) { 1.0 } else { 0.0 })
+            .collect();
+        assert_eq!(output, expected, "{comparison:?}");
+        seen.push(output);
+    }
+
+    for (index, answer) in seen.iter().enumerate() {
+        for (other, another) in seen.iter().enumerate().skip(index + 1) {
+            assert_ne!(
+                answer, another,
+                "{:?} and {:?} answer alike over this input, so one could stand in for the other",
+                orderings[index].0, orderings[other].0
+            );
+        }
+    }
+
+    let mask = 0x5_u32;
+    let bits: Vec<u32> = (0..count as u32).collect();
+    let bitwise: [BitwisePair; 4] = [
+        (Bitwise::And, |x, m| x & m),
+        (Bitwise::Or, |x, m| x | m),
+        (Bitwise::Xor, |x, m| x ^ m),
+        (Bitwise::Not, |x, _| !x),
+    ];
+
+    let mut seen: Vec<Vec<u32>> = Vec::new();
+    for (operation, apply) in bitwise {
+        let spirv = kernels::lane_bitwise_with(width, mask, operation).expect("built");
+        let output = gpu.run_u32(&spirv, &bits, 1).expect("dispatched");
+
+        let expected: Vec<u32> = bits.iter().map(|value| apply(*value, mask)).collect();
+        assert_eq!(output, expected, "{operation:?}");
+        seen.push(output);
+    }
+
+    for (index, answer) in seen.iter().enumerate() {
+        for another in seen.iter().skip(index + 1) {
+            assert_ne!(answer, another, "two bitwise arms answer alike");
+        }
+    }
+}
+
+#[test]
+fn the_tours_arithmetic_kernels_each_apply_the_operation_they_name() {
+    let Some(gpu) = device("tour-arithmetic") else {
+        return;
+    };
+
+    let width = gpu.limits().subgroup_size;
+    let count = WORKGROUP_SIZE as usize;
+    let input: Vec<f32> = (0..count as u32).map(|index| index as f32).collect();
+
+    let difference = gpu
+        .run(&kernels::lane_sub(width, 1.0).expect("built"), &input, 1)
+        .expect("dispatched");
+    let quotient = gpu
+        .run(&kernels::lane_div(width, 2.0).expect("built"), &input, 1)
+        .expect("dispatched");
+    let negated = gpu
+        .run(&kernels::lane_neg(width).expect("built"), &input, 1)
+        .expect("dispatched");
+
+    assert_eq!(
+        difference,
+        input.iter().map(|value| value - 1.0).collect::<Vec<f32>>()
+    );
+    assert_eq!(
+        quotient,
+        input.iter().map(|value| value / 2.0).collect::<Vec<f32>>()
+    );
+    assert_eq!(
+        negated,
+        input.iter().map(|value| -value).collect::<Vec<f32>>()
+    );
+
+    assert!(
+        negated[1] < 0.0 && difference[0] < 0.0,
+        "an input that only ever grew would let a dropped sign through"
+    );
+}
+
+#[test]
+fn saturating_arithmetic_clamps_where_the_wrapping_kind_would_wrap() {
+    let Some(gpu) = device("saturating") else {
+        return;
+    };
+
+    let width = gpu.limits().subgroup_size;
+    let count = WORKGROUP_SIZE as usize;
+
+    let unsigned: Vec<u32> = (0..count as u32).collect();
+    let near_the_top = u32::MAX - 10;
+
+    let added = gpu
+        .run_u32(
+            &kernels::lane_saturating_add_whole::<U32>(width, near_the_top).expect("built"),
+            &unsigned,
+            1,
+        )
+        .expect("dispatched");
+    assert_eq!(
+        added,
+        unsigned
+            .iter()
+            .map(|value| value.saturating_add(near_the_top))
+            .collect::<Vec<u32>>()
+    );
+    assert!(
+        added.contains(&u32::MAX) && added.iter().any(|value| *value != u32::MAX),
+        "the input has to reach the ceiling and also stop short of it"
+    );
+
+    let taken = 20_u32;
+    let subtracted = gpu
+        .run_u32(
+            &kernels::lane_saturating_sub_whole::<U32>(width, taken).expect("built"),
+            &unsigned,
+            1,
+        )
+        .expect("dispatched");
+    assert_eq!(
+        subtracted,
+        unsigned
+            .iter()
+            .map(|value| value.saturating_sub(taken))
+            .collect::<Vec<u32>>()
+    );
+    assert_eq!(subtracted[0], 0, "under the floor is the floor, not a wrap");
+
+    let signed: Vec<i32> = (0..count as i32).map(|index| index - 32).collect();
+    let words: Vec<u32> = signed
+        .iter()
+        .map(|value| u32::from_ne_bytes(value.to_ne_bytes()))
+        .collect();
+
+    for rhs in [i32::MAX - 5, i32::MIN + 5] {
+        let bits = u32::from_ne_bytes(rhs.to_ne_bytes());
+
+        let added = gpu
+            .run_u32(
+                &kernels::lane_saturating_add_whole::<I32>(width, bits).expect("built"),
+                &words,
+                1,
+            )
+            .expect("dispatched");
+        let added: Vec<i32> = added
+            .iter()
+            .map(|word| i32::from_ne_bytes(word.to_ne_bytes()))
+            .collect();
+        assert_eq!(
+            added,
+            signed
+                .iter()
+                .map(|value| value.saturating_add(rhs))
+                .collect::<Vec<i32>>(),
+            "signed saturating add against {rhs}"
+        );
+
+        let subtracted = gpu
+            .run_u32(
+                &kernels::lane_saturating_sub_whole::<I32>(width, bits).expect("built"),
+                &words,
+                1,
+            )
+            .expect("dispatched");
+        let subtracted: Vec<i32> = subtracted
+            .iter()
+            .map(|word| i32::from_ne_bytes(word.to_ne_bytes()))
+            .collect();
+        assert_eq!(
+            subtracted,
+            signed
+                .iter()
+                .map(|value| value.saturating_sub(rhs))
+                .collect::<Vec<i32>>(),
+            "signed saturating sub against {rhs}"
+        );
+    }
+}
+
+#[test]
+fn a_swizzle_moves_every_lane_to_the_one_its_index_named() {
+    let Some(gpu) = device("swizzle") else {
+        return;
+    };
+
+    let limits = gpu.limits().clone();
+    let width = limits.subgroup_size as usize;
+    let count = WORKGROUP_SIZE as usize;
+    let input = ramp(count);
+
+    let reversed = gpu
+        .run(
+            &kernels::lane_reverse(limits.subgroup_size).expect("built"),
+            &input,
+            1,
+        )
+        .expect("dispatched");
+
+    let expected: Vec<f32> = (0..count)
+        .map(|lane| {
+            let first = lane / width * width;
+            input[first + (width - 1 - (lane - first))]
+        })
+        .collect();
+    assert_eq!(reversed, expected, "each lane read the one opposite it");
+    assert_ne!(
+        reversed, input,
+        "a reversal that changed nothing is not one"
+    );
+
+    // The same permutation two ways: a swizzle carrying an index this test
+    // computed, and the fixed `rotate_up` that predates it. They share no code
+    // below `Lanes`, so agreeing is evidence rather than a tautology.
+    let delta = 3;
+    let counted: Vec<u32> = (0..count as u32).collect();
+    let by_swizzle = gpu
+        .run_u32(
+            &kernels::lane_rotate_by_swizzle(limits.subgroup_size, delta).expect("built"),
+            &counted,
+            1,
+        )
+        .expect("dispatched");
+    let by_rotate = gpu
+        .run_u32(
+            &kernels::rotate_in_cluster(limits.subgroup_size, limits.subgroup_size, delta)
+                .expect("built"),
+            &counted,
+            1,
+        )
+        .expect("dispatched");
+
+    assert_eq!(
+        by_swizzle, by_rotate,
+        "a rotation written as a swizzle is the rotation `rotate_up` already emitted"
+    );
+    assert_ne!(by_swizzle, counted, "and it moved something");
+}
+
+#[test]
+fn saturation_is_elementwise_so_it_holds_in_clusters_and_across_strips() {
+    let Some(gpu) = device("saturating-shapes") else {
+        return;
+    };
+
+    let limits = gpu.limits().clone();
+    if limits.subgroup_size != 32 {
+        eprintln!(
+            "SKIPPED saturating-shapes: no case written for a subgroup of {}",
+            limits.subgroup_size
+        );
+        return;
+    }
+
+    let count = WORKGROUP_SIZE as usize;
+    let rhs = u32::MAX - 10;
+
+    // Nothing here crosses a lane, so the answer is the same elementwise
+    // function whatever shape the vector takes -- which is the claim.
+    let clustered = kernels::lane_saturating_add::<U32, 4>(32, rhs).expect("built");
+    let input: Vec<u32> = (0..count as u32).collect();
+    let output = gpu.run_u32(&clustered, &input, 1).expect("dispatched");
+    assert_eq!(
+        output,
+        input
+            .iter()
+            .map(|value| value.saturating_add(rhs))
+            .collect::<Vec<u32>>(),
+        "in clusters of four"
+    );
+
+    let strip_mined = kernels::lane_saturating_sub::<U32, 64>(32, 20).expect("built");
+    let wide: Vec<u32> = (0..count as u32 * 2).collect();
+    let output = gpu.run_u32(&strip_mined, &wide, 1).expect("dispatched");
+    assert_eq!(
+        output,
+        wide.iter()
+            .map(|value| value.saturating_sub(20))
+            .collect::<Vec<u32>>(),
+        "across two strips"
+    );
+    assert!(
+        output.contains(&0) && output.iter().any(|value| *value > 0),
+        "the input has to reach the floor and also stay above it"
+    );
+}
+
+#[test]
+fn a_gather_reads_the_slot_each_lane_named_rather_than_its_own() {
+    let Some(gpu) = device("gather") else {
+        return;
+    };
+
+    let width = gpu.limits().subgroup_size;
+    let count = WORKGROUP_SIZE as usize;
+
+    // Each slot holds the index of another, so the gather's answer is the
+    // permutation itself and a lane reading its own slot would show as a
+    // fixed point.
+    let indices: Vec<u32> = (0..count as u32)
+        .map(|index| (index + 5) % count as u32)
+        .collect();
+
+    let output = gpu
+        .run_u32(
+            &kernels::lane_gather_whole(width).expect("built"),
+            &indices,
+            1,
+        )
+        .expect("dispatched");
+
+    let expected: Vec<u32> = indices.iter().map(|slot| indices[*slot as usize]).collect();
+    assert_eq!(output, expected);
+    assert_ne!(
+        output, indices,
+        "a gather that read its own lane is not one"
+    );
+    assert!(
+        output.iter().zip(&indices).any(|(read, own)| read != own),
+        "and it crossed at least one lane"
+    );
+}
+
+#[test]
+fn the_rest_of_the_math_set_computes_what_it_names() {
+    let Some(gpu) = device("math-set") else {
+        return;
+    };
+
+    let width = gpu.limits().subgroup_size;
+    let count = WORKGROUP_SIZE as usize;
+
+    // Values that straddle zero and land off the integers, so floor, ceil,
+    // trunc and round each answer differently somewhere.
+    let input: Vec<f32> = (0..count)
+        .map(|index| (index as f32 - 32.0) * 0.5 + 0.25)
+        .collect();
+
+    let cases: [Approximated; 5] = [
+        (Transcendental::Floor, f32::floor, 0.0),
+        (Transcendental::Ceil, f32::ceil, 0.0),
+        (Transcendental::Trunc, f32::trunc, 0.0),
+        (Transcendental::SquaredByPow, |value| value * value, 1e-3),
+        (Transcendental::Sin, f32::sin, 1e-5),
+    ];
+
+    let mut answers: Vec<Vec<f32>> = Vec::new();
+    for (which, reference, tolerance) in cases {
+        let spirv = kernels::lane_transcendental(width, which).expect("built");
+        let output = gpu.run(&spirv, &input, 1).expect("dispatched");
+
+        for (index, (got, value)) in output.iter().zip(&input).enumerate() {
+            let want = reference(*value);
+            assert!(
+                (got - want).abs() <= tolerance,
+                "{which:?} at lane {index}: {value} gave {got}, not {want}"
+            );
+        }
+        answers.push(output);
+    }
+
+    // `pow` is checked against a bare multiply, so `SquaredByPow` is excluded
+    // here; the three roundings share a shape and must still differ.
+    assert_ne!(answers[0], answers[1], "floor and ceil agree everywhere");
+    assert_ne!(answers[0], answers[2], "floor and trunc agree everywhere");
+
+    let rounded = gpu
+        .run(
+            &kernels::lane_transcendental(width, Transcendental::Round).expect("built"),
+            &input,
+            1,
+        )
+        .expect("dispatched");
+    for (got, value) in rounded.iter().zip(&input) {
+        assert!(
+            (got - value).abs() <= 0.5 + f32::EPSILON,
+            "{value} rounded to {got}, which is further than a half away"
+        );
+        assert_eq!(*got, got.trunc(), "a rounded value has no fraction left");
+    }
+
+    let cosine = gpu
+        .run(
+            &kernels::lane_transcendental(width, Transcendental::Cos).expect("built"),
+            &input,
+            1,
+        )
+        .expect("dispatched");
+    for (got, value) in cosine.iter().zip(&input) {
+        assert!(
+            (got - value.cos()).abs() <= 1e-5,
+            "cos({value}) gave {got}, not {}",
+            value.cos()
+        );
+    }
+}
+
+#[test]
+fn a_strip_mined_gather_reaches_the_index_of_its_own_strip() {
+    let Some(gpu) = device("gather-strips") else {
+        return;
+    };
+
+    let limits = gpu.limits().clone();
+    if limits.subgroup_size != 32 {
+        eprintln!(
+            "SKIPPED gather-strips: no case written for a subgroup of {}",
+            limits.subgroup_size
+        );
+        return;
+    }
+
+    // Two strips, so the second one has an index of its own. A gather that
+    // reached the first strip's index for both would agree with this on the
+    // first half and nowhere else, which is why one strip cannot show it.
+    let count = WORKGROUP_SIZE as usize * 2;
+    let indices: Vec<u32> = (0..count as u32)
+        .map(|index| (index + 5) % count as u32)
+        .collect();
+
+    let output = gpu
+        .run_u32(&kernels::lane_gather::<64>(32).expect("built"), &indices, 1)
+        .expect("dispatched");
+
+    let expected: Vec<u32> = indices.iter().map(|slot| indices[*slot as usize]).collect();
+    assert_eq!(output, expected);
+
+    let first_strip_only: Vec<u32> = (0..count)
+        .map(|position| {
+            let lane = position % WORKGROUP_SIZE as usize;
+            indices[indices[lane] as usize]
+        })
+        .collect();
+    assert_ne!(
+        output, first_strip_only,
+        "both strips read the first strip's index, which one strip could never show"
+    );
+}
+
+type Folding = (Running, fn(u32, u32) -> u32, u32);
+
+/// The seven folds, each with the operation it runs and the value a lane with
+/// nothing before it should hold.
+fn every_running_fold() -> [Folding; 7] {
+    [
+        (Running::Sum, |a, b| a.wrapping_add(b), 0),
+        (Running::Product, |a, b| a.wrapping_mul(b), 1),
+        (Running::Min, u32::min, u32::MAX),
+        (Running::Max, u32::max, 0),
+        (Running::And, |a, b| a & b, u32::MAX),
+        (Running::Or, |a, b| a | b, 0),
+        (Running::Xor, |a, b| a ^ b, 0),
+    ]
+}
+
+fn scanned(
+    input: &[u32],
+    group: usize,
+    fold: fn(u32, u32) -> u32,
+    seed: u32,
+    exclusive: bool,
+) -> Vec<u32> {
+    (0..input.len())
+        .map(|position| {
+            let first = position / group * group;
+            let upto = if exclusive { position } else { position + 1 };
+            input[first..upto]
+                .iter()
+                .fold(seed, |total, value| fold(total, *value))
+        })
+        .collect()
+}
+
+#[test]
+fn every_scan_runs_its_own_fold_over_the_whole_subgroup() {
+    let Some(gpu) = device("scan-whole") else {
+        return;
+    };
+
+    let limits = gpu.limits().clone();
+    let width = limits.subgroup_size as usize;
+    let count = WORKGROUP_SIZE as usize;
+
+    // Small factors, so a running product stays exact rather than wrapping,
+    // and bits that differ, so and, or and xor disagree.
+    let input: Vec<u32> = (0..count)
+        .map(|index| (index % 3 + 1) as u32 | 0b1000)
+        .collect();
+
+    let mut seen: Vec<Vec<u32>> = Vec::new();
+    for (running, fold, seed) in every_running_fold() {
+        for exclusive in [false, true] {
+            let spirv = kernels::lane_prefix_whole(limits.subgroup_size, running, exclusive)
+                .expect("built");
+            let output = gpu.run_u32(&spirv, &input, 1).expect("dispatched");
+
+            assert_eq!(
+                output,
+                scanned(&input, width, fold, seed, exclusive),
+                "{running:?}, exclusive: {exclusive}"
+            );
+            seen.push(output);
+        }
+    }
+
+    for (index, answer) in seen.iter().enumerate() {
+        for another in seen.iter().skip(index + 1) {
+            assert_ne!(
+                answer, another,
+                "two of the fourteen scans answer alike over this input, so one could stand in                  for the other"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_clustered_scan_starts_each_cluster_from_the_identity_of_its_own_fold() {
+    let Some(gpu) = device("scan-clusters") else {
+        return;
+    };
+
+    let limits = gpu.limits().clone();
+    if limits.subgroup_size < 4 {
+        eprintln!(
+            "SKIPPED scan-clusters: a subgroup of {} has no cluster of four",
+            limits.subgroup_size
+        );
+        return;
+    }
+
+    let count = WORKGROUP_SIZE as usize;
+    let input: Vec<u32> = (0..count)
+        .map(|index| (index % 3 + 1) as u32 | 0b1000)
+        .collect();
+
+    // The clustered path is emulated rather than one instruction, and the
+    // exclusive form is where the identity reaches the lane at the edge -- an
+    // `and` seeded with nought would empty the first lane of every cluster.
+    for (running, fold, seed) in every_running_fold() {
+        for exclusive in [false, true] {
+            let spirv =
+                kernels::lane_prefix::<4>(limits.subgroup_size, running, exclusive).expect("built");
+            let output = gpu.run_u32(&spirv, &input, 1).expect("dispatched");
+
+            assert_eq!(
+                output,
+                scanned(&input, 4, fold, seed, exclusive),
+                "{running:?} in clusters of four, exclusive: {exclusive}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_strip_mined_scan_carries_its_own_fold_between_the_strips() {
+    let Some(gpu) = device("scan-strips") else {
+        return;
+    };
+
+    let limits = gpu.limits().clone();
+    if limits.subgroup_size != 32 {
+        eprintln!(
+            "SKIPPED scan-strips: no case written for a subgroup of {}",
+            limits.subgroup_size
+        );
+        return;
+    }
+
+    let count = WORKGROUP_SIZE as usize;
+    let stride = count;
+    let wide: Vec<u32> = (0..count * 2)
+        .map(|index| (index % 3 + 1) as u32 | 0b1000)
+        .collect();
+
+    for (running, fold, seed) in every_running_fold() {
+        let spirv = kernels::lane_prefix::<64>(32, running, false).expect("built");
+        let output = gpu.run_u32(&spirv, &wide, 1).expect("dispatched");
+
+        // Lane `l` of strip `s` holds element `l + s * stride`, and the scan
+        // runs over the strips in order within each subgroup.
+        let expected: Vec<u32> = (0..count * 2)
+            .map(|position| {
+                let lane = position % stride;
+                let strip = position / stride;
+                let first = lane / 32 * 32;
+                let mut total = seed;
+                for earlier in 0..=strip {
+                    let upto = if earlier == strip {
+                        lane + 1
+                    } else {
+                        first + 32
+                    };
+                    for other in first..upto {
+                        total = fold(total, wide[other + earlier * stride]);
+                    }
+                }
+                total
+            })
+            .collect();
+
+        assert_eq!(output, expected, "{running:?} across two strips");
+    }
+}
+
+#[test]
+fn a_table_of_one_type_is_looked_up_by_indices_of_another() {
+    let Some(gpu) = device("lookup") else {
+        return;
+    };
+
+    let width = gpu.limits().subgroup_size;
+    let count = WORKGROUP_SIZE as usize;
+
+    // A table of floats that are not whole, so a lane reading its own slot
+    // instead of the one it was given shows up as the wrong fraction.
+    let table: Vec<f32> = (0..count).map(|index| index as f32 * 0.25 - 4.0).collect();
+    let slots: Vec<u32> = (0..count as u32)
+        .map(|index| (index * 7 + 3) % count as u32)
+        .collect();
+
+    let spirv = kernels::lane_lookup(width).expect("built");
+    let words: Vec<u32> = table.iter().map(|value| value.to_bits()).collect();
+    let output = gpu
+        .run_bound(&spirv, &[&words, &slots], count, 1)
+        .expect("dispatched");
+    let output: Vec<f32> = output.into_iter().map(f32::from_bits).collect();
+
+    let expected: Vec<f32> = slots.iter().map(|slot| table[*slot as usize]).collect();
+    assert_eq!(output, expected);
+    assert_ne!(output, table, "a lookup that read its own lane is not one");
+    assert!(
+        output.iter().any(|value| *value < 0.0),
+        "the table straddles zero, so a lookup reading the wrong half would show"
     );
 }

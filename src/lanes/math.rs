@@ -64,6 +64,64 @@ impl Lanes<'_> {
         self.map_extended(Glsl::Log, value)
     }
 
+    /// `left` raised to `right`. GLSL's `Pow` is undefined where `left` is
+    /// negative, and where it is zero and `right` is not positive.
+    pub fn pow<const LANES: u32>(
+        &mut self,
+        left: Vector<F32, LANES>,
+        right: Vector<F32, LANES>,
+    ) -> Result<Vector<F32, LANES>, LaneError> {
+        self.zip_extended(Glsl::Pow, left, right)
+    }
+
+    pub fn sin<const LANES: u32>(
+        &mut self,
+        value: Vector<F32, LANES>,
+    ) -> Result<Vector<F32, LANES>, LaneError> {
+        self.map_extended(Glsl::Sin, value)
+    }
+
+    pub fn cos<const LANES: u32>(
+        &mut self,
+        value: Vector<F32, LANES>,
+    ) -> Result<Vector<F32, LANES>, LaneError> {
+        self.map_extended(Glsl::Cos, value)
+    }
+
+    /// Towards negative infinity, so `-0.5` floors to `-1.0`.
+    pub fn floor<const LANES: u32>(
+        &mut self,
+        value: Vector<F32, LANES>,
+    ) -> Result<Vector<F32, LANES>, LaneError> {
+        self.map_extended(Glsl::Floor, value)
+    }
+
+    pub fn ceil<const LANES: u32>(
+        &mut self,
+        value: Vector<F32, LANES>,
+    ) -> Result<Vector<F32, LANES>, LaneError> {
+        self.map_extended(Glsl::Ceil, value)
+    }
+
+    /// Towards zero, so `-1.5` truncates to `-1.0` where [`Lanes::floor`] would
+    /// give `-2.0`.
+    pub fn trunc<const LANES: u32>(
+        &mut self,
+        value: Vector<F32, LANES>,
+    ) -> Result<Vector<F32, LANES>, LaneError> {
+        self.map_extended(Glsl::Trunc, value)
+    }
+
+    /// To the nearest integer. GLSL's `Round` leaves the halfway case to the
+    /// implementation, which may take it either way; `RoundEven` is the one
+    /// that does not, and this is not it.
+    pub fn round<const LANES: u32>(
+        &mut self,
+        value: Vector<F32, LANES>,
+    ) -> Result<Vector<F32, LANES>, LaneError> {
+        self.map_extended(Glsl::Round, value)
+    }
+
     pub fn fma<const LANES: u32>(
         &mut self,
         a: Vector<F32, LANES>,
@@ -138,7 +196,7 @@ impl Lanes<'_> {
         self.from_strips(&ids)
     }
 
-    fn glsl(&mut self) -> Result<Id, LaneError> {
+    pub(super) fn glsl(&mut self) -> Result<Id, LaneError> {
         Ok(self.module().ext_inst_import(Glsl::SET_NAME)?)
     }
 }
@@ -151,6 +209,8 @@ mod tests {
     use crate::decode;
     use crate::lanes::{I32, U32};
     use crate::module::{Module, Version, op};
+
+    type Build = fn(&mut Lanes<'_>);
 
     fn built() -> Module {
         Module::new(Version::V1_3)
@@ -389,5 +449,107 @@ mod tests {
 
         assert_eq!(bounded.strip_count(), 2);
         assert_ne!(total, summed.id());
+    }
+
+    #[test]
+    fn each_new_function_reaches_the_extended_instruction_it_names() {
+        let emitted = |build: Build| {
+            let mut module = Module::new(Version::V1_3);
+            let mut lanes = Lanes::new(&mut module, 32).expect("built");
+            build(&mut lanes);
+            let words = module.finish();
+            decode::body(&words)
+                .find(|instruction| instruction.opcode() == op::EXT_INST)
+                .expect("an extended instruction was emitted")
+                .operands()
+                .to_vec()
+        };
+
+        let cases: [(&str, Glsl, Build); 7] = [
+            ("sin", Glsl::Sin, |lanes| {
+                let v = lanes.splat_bits::<F32, 32>(0).expect("splat");
+                lanes.sin(v).expect("sin");
+            }),
+            ("cos", Glsl::Cos, |lanes| {
+                let v = lanes.splat_bits::<F32, 32>(0).expect("splat");
+                lanes.cos(v).expect("cos");
+            }),
+            ("floor", Glsl::Floor, |lanes| {
+                let v = lanes.splat_bits::<F32, 32>(0).expect("splat");
+                lanes.floor(v).expect("floor");
+            }),
+            ("ceil", Glsl::Ceil, |lanes| {
+                let v = lanes.splat_bits::<F32, 32>(0).expect("splat");
+                lanes.ceil(v).expect("ceil");
+            }),
+            ("trunc", Glsl::Trunc, |lanes| {
+                let v = lanes.splat_bits::<F32, 32>(0).expect("splat");
+                lanes.trunc(v).expect("trunc");
+            }),
+            ("round", Glsl::Round, |lanes| {
+                let v = lanes.splat_bits::<F32, 32>(0).expect("splat");
+                lanes.round(v).expect("round");
+            }),
+            ("pow", Glsl::Pow, |lanes| {
+                let v = lanes.splat_bits::<F32, 32>(0).expect("splat");
+                lanes.pow(v, v).expect("pow");
+            }),
+        ];
+
+        for (name, instruction, build) in cases {
+            let operands = emitted(build);
+            assert_eq!(
+                operands[3],
+                instruction.word(),
+                "{name} named the wrong instruction of the set"
+            );
+            assert_eq!(
+                operands.len(),
+                4 + instruction.operands(),
+                "{name} passed the wrong number of operands"
+            );
+        }
+    }
+
+    #[test]
+    fn the_seven_new_functions_are_seven_different_instructions() {
+        let numbers: std::collections::BTreeSet<u32> = [
+            Glsl::Sin,
+            Glsl::Cos,
+            Glsl::Floor,
+            Glsl::Ceil,
+            Glsl::Trunc,
+            Glsl::Round,
+            Glsl::Pow,
+        ]
+        .iter()
+        .map(|instruction| instruction.word())
+        .collect();
+
+        assert_eq!(
+            numbers.len(),
+            7,
+            "two of the seven lower to one instruction"
+        );
+    }
+
+    #[test]
+    fn a_strip_mined_rounding_rounds_every_strip() {
+        let mut module = Module::new(Version::V1_3);
+        let mut lanes = Lanes::new(&mut module, 32).expect("built");
+        let wide = lanes
+            .splat_bits::<F32, 128>(1.5_f32.to_bits())
+            .expect("splat");
+
+        let rounded = lanes.floor(wide).expect("floored");
+
+        assert_eq!(rounded.strip_count(), 4);
+        let words = module.finish();
+        assert_eq!(
+            decode::body(&words)
+                .filter(|instruction| instruction.opcode() == op::EXT_INST)
+                .count(),
+            4
+        );
     }
 }
