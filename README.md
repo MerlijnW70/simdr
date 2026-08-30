@@ -62,7 +62,7 @@ fails the build, so nothing here is stated on trust.
 | --- | --- |
 | SPIR-V opcodes declared | <!--count:opcodes-->121 |
 | lane operations | <!--count:lane-operations-->82 |
-| `#[test]` functions | <!--count:test-functions-->933 |
+| `#[test]` functions | <!--count:test-functions-->935 |
 | checks in `tests/integrity.rs` | <!--count:integrity-tests-->17 |
 | checks in `tests/documented.rs` | <!--count:documented-tests-->12 |
 | counters behind this table | <!--count:counters-->10 |

@@ -1,5 +1,5 @@
 use runner::Gpu;
-use runner::kernels::{self, WORKGROUP_SIZE};
+use runner::kernels::{self, Bitwise, Comparison, WORKGROUP_SIZE};
 use simdr::lanes::{F32, U32};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -61,6 +61,63 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let voted = gpu.run(&kernels::any_above(width, 40.0)?, &input, 1)?;
     println!("  any(x > 40)   {:?}", &voted[..8]);
 
+    println!("\narithmetic and the six orderings, against 4:");
+    let difference = gpu.run(&kernels::lane_sub(width, 1.0)?, &input, 1)?;
+    println!("  x - 1         {:?}", &difference[..8]);
+
+    let quotient = gpu.run(&kernels::lane_div(width, 2.0)?, &input, 1)?;
+    println!("  x / 2         {:?}", &quotient[..8]);
+
+    let negated = gpu.run(&kernels::lane_neg(width)?, &input, 1)?;
+    println!("  -x            {:?}", &negated[..8]);
+
+    for (label, comparison) in [
+        ("x <  4", Comparison::Less),
+        ("x <= 4", Comparison::LessEqual),
+        ("x >  4", Comparison::Greater),
+        ("x >= 4", Comparison::GreaterEqual),
+        ("x == 4", Comparison::Equal),
+        ("x != 4", Comparison::NotEqual),
+    ] {
+        let held = gpu.run(&kernels::lane_compare(width, 4.0, comparison)?, &input, 1)?;
+        let flags: Vec<u32> = held[..8].iter().map(|value| *value as u32).collect();
+        println!("  {label}        {flags:?}");
+    }
+
+    println!("\nthe bitwise four, in hex against 0x5:");
+    let bits: Vec<u32> = (0..count as u32).collect();
+    println!("  in            {}", hex(&bits[..8]));
+    for (label, operation) in [
+        ("x & 5", Bitwise::And),
+        ("x | 5", Bitwise::Or),
+        ("x ^ 5", Bitwise::Xor),
+        ("!x   ", Bitwise::Not),
+    ] {
+        let output = gpu.run_u32(
+            &kernels::lane_bitwise_with(width, 0x5, operation)?,
+            &bits,
+            1,
+        )?;
+        println!("  {label}         {}", hex(&output[..8]));
+    }
+
+    println!("\nreductions over the subgroup, and a product in clusters of four:");
+    let folded: Vec<u32> = (0..count as u32)
+        .map(|index| 0b1100 | (index % 3))
+        .collect();
+    println!("  in            {}", hex(&folded[..8]));
+    for (label, spirv) in [
+        ("reduce_and", kernels::lane_and_whole::<U32>(width)?),
+        ("reduce_or ", kernels::lane_or_whole::<U32>(width)?),
+        ("reduce_xor", kernels::lane_xor_whole::<U32>(width)?),
+    ] {
+        let output = gpu.run_u32(&spirv, &folded, 1)?;
+        println!("  {label}    {}", hex(&output[..8]));
+    }
+
+    let product = gpu.run_u32(&kernels::lane_product::<U32, 4>(width)?, &folded, 1)?;
+    println!("  product/4     {:?}", &product[..8]);
+
     println!("\nstrip-mined, and an integer:");
     let long: Vec<f32> = (0..count as u32 * 2).map(|index| index as f32).collect();
     let strided = gpu.run(&kernels::lane_sum::<F32, 64>(width)?, &long, 1)?;
@@ -71,4 +128,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Simd<u32,32>  {:?}", &summed[..8]);
 
     Ok(())
+}
+
+fn hex(values: &[u32]) -> String {
+    let cells: Vec<String> = values
+        .iter()
+        .map(|value| format!("0x{value:08x}"))
+        .collect();
+    format!("[{}]", cells.join(", "))
 }

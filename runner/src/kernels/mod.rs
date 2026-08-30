@@ -95,6 +95,149 @@ fn scale_at<const LANES: u32>(subgroup: u32, factor: f32) -> Result<Vec<u32>, La
     kernel.finish()
 }
 
+/// `x - rhs`, `x / rhs` and `-x`, one operation apiece so a tour can print each
+/// on its own line rather than a single number four of them agree on.
+pub fn lane_sub(subgroup: u32, rhs: f32) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup!(subgroup, lane_sub_at, rhs)
+}
+
+fn lane_sub_at<const LANES: u32>(subgroup: u32, rhs: f32) -> Result<Vec<u32>, LaneError> {
+    use simdr::lanes::F32;
+
+    let mut kernel = Kernel::<F32>::new(shape(subgroup))?;
+    let value = kernel.load::<LANES>(0)?;
+    let difference = {
+        let mut lanes = kernel.lanes()?;
+        let rhs = lanes.splat_bits::<F32, LANES>(rhs.to_bits())?;
+        lanes.sub(value, rhs)?
+    };
+    kernel.store(1, difference)?;
+    kernel.finish()
+}
+
+pub fn lane_div(subgroup: u32, rhs: f32) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup!(subgroup, lane_div_at, rhs)
+}
+
+fn lane_div_at<const LANES: u32>(subgroup: u32, rhs: f32) -> Result<Vec<u32>, LaneError> {
+    use simdr::lanes::F32;
+
+    let mut kernel = Kernel::<F32>::new(shape(subgroup))?;
+    let value = kernel.load::<LANES>(0)?;
+    let quotient = {
+        let mut lanes = kernel.lanes()?;
+        let rhs = lanes.splat_bits::<F32, LANES>(rhs.to_bits())?;
+        lanes.div(value, rhs)?
+    };
+    kernel.store(1, quotient)?;
+    kernel.finish()
+}
+
+pub fn lane_neg(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup!(subgroup, lane_neg_at)
+}
+
+fn lane_neg_at<const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    use simdr::lanes::F32;
+
+    let mut kernel = Kernel::<F32>::new(shape(subgroup))?;
+    let value = kernel.load::<LANES>(0)?;
+    let negated = kernel.lanes()?.neg(value)?;
+    kernel.store(1, negated)?;
+    kernel.finish()
+}
+
+/// Which of the six orderings [`lane_compare`] asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Comparison {
+    Less,
+    LessEqual,
+    Greater,
+    GreaterEqual,
+    Equal,
+    NotEqual,
+}
+
+/// `1.0` where the comparison holds and `0.0` where it does not, so the answer
+/// reads as the predicate itself rather than as whatever was selected by it.
+pub fn lane_compare(
+    subgroup: u32,
+    threshold: f32,
+    comparison: Comparison,
+) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup!(subgroup, lane_compare_at, threshold, comparison)
+}
+
+fn lane_compare_at<const LANES: u32>(
+    subgroup: u32,
+    threshold: f32,
+    comparison: Comparison,
+) -> Result<Vec<u32>, LaneError> {
+    use simdr::lanes::F32;
+
+    let mut kernel = Kernel::<F32>::new(shape(subgroup))?;
+    let value = kernel.load::<LANES>(0)?;
+    let held = {
+        let mut lanes = kernel.lanes()?;
+        let threshold = lanes.splat_bits::<F32, LANES>(threshold.to_bits())?;
+        let one = lanes.splat_bits::<F32, LANES>(1.0_f32.to_bits())?;
+        let zero = lanes.splat_bits::<F32, LANES>(0.0_f32.to_bits())?;
+
+        let predicate = match comparison {
+            Comparison::Less => lanes.less_than(value, threshold)?,
+            Comparison::LessEqual => lanes.less_equal(value, threshold)?,
+            Comparison::Greater => lanes.greater_than(value, threshold)?,
+            Comparison::GreaterEqual => lanes.greater_equal(value, threshold)?,
+            Comparison::Equal => lanes.equal(value, threshold)?,
+            Comparison::NotEqual => lanes.not_equal(value, threshold)?,
+        };
+        lanes.select(predicate, one, zero)?
+    };
+    kernel.store(1, held)?;
+    kernel.finish()
+}
+
+/// Which of the four bitwise operations [`lane_bitwise_with`] applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bitwise {
+    And,
+    Or,
+    Xor,
+    /// The complement takes no second operand, so the mask goes unused.
+    Not,
+}
+
+pub fn lane_bitwise_with(
+    subgroup: u32,
+    mask: u32,
+    operation: Bitwise,
+) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup!(subgroup, lane_bitwise_with_at, mask, operation)
+}
+
+fn lane_bitwise_with_at<const LANES: u32>(
+    subgroup: u32,
+    mask: u32,
+    operation: Bitwise,
+) -> Result<Vec<u32>, LaneError> {
+    use simdr::lanes::U32;
+
+    let mut kernel = Kernel::<U32>::new(shape(subgroup))?;
+    let value = kernel.load::<LANES>(0)?;
+    let result = {
+        let mut lanes = kernel.lanes()?;
+        let mask = lanes.splat_bits::<U32, LANES>(mask)?;
+        match operation {
+            Bitwise::And => lanes.and(value, mask)?,
+            Bitwise::Or => lanes.or(value, mask)?,
+            Bitwise::Xor => lanes.xor(value, mask)?,
+            Bitwise::Not => lanes.not(value)?,
+        }
+    };
+    kernel.store(1, result)?;
+    kernel.finish()
+}
+
 pub fn lane_affine<const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
     use simdr::lanes::F32;
 

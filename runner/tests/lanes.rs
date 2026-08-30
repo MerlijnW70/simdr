@@ -1,7 +1,10 @@
 mod common;
 
+type Ordering = (Comparison, fn(f32, f32) -> bool);
+type BitwisePair = (Bitwise, fn(u32, u32) -> u32);
+
 use common::{device, grouped_sums, ramp, ramp_u32, runnable};
-use runner::kernels::{self, WORKGROUP_SIZE};
+use runner::kernels::{self, Bitwise, Comparison, WORKGROUP_SIZE};
 use simdr::lanes::{F32, U32};
 
 #[test]
@@ -703,5 +706,113 @@ fn the_new_reductions_cluster_and_strip_mine_like_every_other_one() {
         output.first(),
         Some(&one_strip_only),
         "the second strip was not folded in"
+    );
+}
+
+#[test]
+fn every_arm_of_the_tours_comparison_and_bitwise_kernels_is_the_one_it_names() {
+    let Some(gpu) = device("tour-arms") else {
+        return;
+    };
+
+    let width = gpu.limits().subgroup_size;
+    let count = WORKGROUP_SIZE as usize;
+    let threshold = 4.0_f32;
+    let floats: Vec<f32> = (0..count as u32).map(|index| index as f32).collect();
+
+    let orderings: [Ordering; 6] = [
+        (Comparison::Less, |x, t| x < t),
+        (Comparison::LessEqual, |x, t| x <= t),
+        (Comparison::Greater, |x, t| x > t),
+        (Comparison::GreaterEqual, |x, t| x >= t),
+        (Comparison::Equal, |x, t| (x - t).abs() < f32::EPSILON),
+        (Comparison::NotEqual, |x, t| (x - t).abs() >= f32::EPSILON),
+    ];
+
+    let mut seen: Vec<Vec<f32>> = Vec::new();
+    for (comparison, holds) in orderings {
+        let spirv = kernels::lane_compare(width, threshold, comparison).expect("built");
+        let output = gpu.run(&spirv, &floats, 1).expect("dispatched");
+
+        let expected: Vec<f32> = floats
+            .iter()
+            .map(|value| if holds(*value, threshold) { 1.0 } else { 0.0 })
+            .collect();
+        assert_eq!(output, expected, "{comparison:?}");
+        seen.push(output);
+    }
+
+    for (index, answer) in seen.iter().enumerate() {
+        for (other, another) in seen.iter().enumerate().skip(index + 1) {
+            assert_ne!(
+                answer, another,
+                "{:?} and {:?} answer alike over this input, so one could stand in for the other",
+                orderings[index].0, orderings[other].0
+            );
+        }
+    }
+
+    let mask = 0x5_u32;
+    let bits: Vec<u32> = (0..count as u32).collect();
+    let bitwise: [BitwisePair; 4] = [
+        (Bitwise::And, |x, m| x & m),
+        (Bitwise::Or, |x, m| x | m),
+        (Bitwise::Xor, |x, m| x ^ m),
+        (Bitwise::Not, |x, _| !x),
+    ];
+
+    let mut seen: Vec<Vec<u32>> = Vec::new();
+    for (operation, apply) in bitwise {
+        let spirv = kernels::lane_bitwise_with(width, mask, operation).expect("built");
+        let output = gpu.run_u32(&spirv, &bits, 1).expect("dispatched");
+
+        let expected: Vec<u32> = bits.iter().map(|value| apply(*value, mask)).collect();
+        assert_eq!(output, expected, "{operation:?}");
+        seen.push(output);
+    }
+
+    for (index, answer) in seen.iter().enumerate() {
+        for another in seen.iter().skip(index + 1) {
+            assert_ne!(answer, another, "two bitwise arms answer alike");
+        }
+    }
+}
+
+#[test]
+fn the_tours_arithmetic_kernels_each_apply_the_operation_they_name() {
+    let Some(gpu) = device("tour-arithmetic") else {
+        return;
+    };
+
+    let width = gpu.limits().subgroup_size;
+    let count = WORKGROUP_SIZE as usize;
+    let input: Vec<f32> = (0..count as u32).map(|index| index as f32).collect();
+
+    let difference = gpu
+        .run(&kernels::lane_sub(width, 1.0).expect("built"), &input, 1)
+        .expect("dispatched");
+    let quotient = gpu
+        .run(&kernels::lane_div(width, 2.0).expect("built"), &input, 1)
+        .expect("dispatched");
+    let negated = gpu
+        .run(&kernels::lane_neg(width).expect("built"), &input, 1)
+        .expect("dispatched");
+
+    assert_eq!(
+        difference,
+        input.iter().map(|value| value - 1.0).collect::<Vec<f32>>()
+    );
+    assert_eq!(
+        quotient,
+        input.iter().map(|value| value / 2.0).collect::<Vec<f32>>()
+    );
+    assert_eq!(
+        negated,
+        input.iter().map(|value| -value).collect::<Vec<f32>>()
+    );
+
+    assert!(
+        negated[1] < 0.0 && difference[0] < 0.0,
+        "an input that only ever grew would let a dropped sign through"
     );
 }
