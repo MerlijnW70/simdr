@@ -5,7 +5,7 @@ type BitwisePair = (Bitwise, fn(u32, u32) -> u32);
 
 use common::{device, grouped_sums, ramp, ramp_u32, runnable};
 use runner::kernels::{self, Bitwise, Comparison, WORKGROUP_SIZE};
-use simdr::lanes::{F32, U32};
+use simdr::lanes::{F32, I32, U32};
 
 #[test]
 fn a_workgroup_reduction_crosses_between_subgroups() {
@@ -814,5 +814,211 @@ fn the_tours_arithmetic_kernels_each_apply_the_operation_they_name() {
     assert!(
         negated[1] < 0.0 && difference[0] < 0.0,
         "an input that only ever grew would let a dropped sign through"
+    );
+}
+
+#[test]
+fn saturating_arithmetic_clamps_where_the_wrapping_kind_would_wrap() {
+    let Some(gpu) = device("saturating") else {
+        return;
+    };
+
+    let width = gpu.limits().subgroup_size;
+    let count = WORKGROUP_SIZE as usize;
+
+    let unsigned: Vec<u32> = (0..count as u32).collect();
+    let near_the_top = u32::MAX - 10;
+
+    let added = gpu
+        .run_u32(
+            &kernels::lane_saturating_add_whole::<U32>(width, near_the_top).expect("built"),
+            &unsigned,
+            1,
+        )
+        .expect("dispatched");
+    assert_eq!(
+        added,
+        unsigned
+            .iter()
+            .map(|value| value.saturating_add(near_the_top))
+            .collect::<Vec<u32>>()
+    );
+    assert!(
+        added.contains(&u32::MAX) && added.iter().any(|value| *value != u32::MAX),
+        "the input has to reach the ceiling and also stop short of it"
+    );
+
+    let taken = 20_u32;
+    let subtracted = gpu
+        .run_u32(
+            &kernels::lane_saturating_sub_whole::<U32>(width, taken).expect("built"),
+            &unsigned,
+            1,
+        )
+        .expect("dispatched");
+    assert_eq!(
+        subtracted,
+        unsigned
+            .iter()
+            .map(|value| value.saturating_sub(taken))
+            .collect::<Vec<u32>>()
+    );
+    assert_eq!(subtracted[0], 0, "under the floor is the floor, not a wrap");
+
+    let signed: Vec<i32> = (0..count as i32).map(|index| index - 32).collect();
+    let words: Vec<u32> = signed
+        .iter()
+        .map(|value| u32::from_ne_bytes(value.to_ne_bytes()))
+        .collect();
+
+    for rhs in [i32::MAX - 5, i32::MIN + 5] {
+        let bits = u32::from_ne_bytes(rhs.to_ne_bytes());
+
+        let added = gpu
+            .run_u32(
+                &kernels::lane_saturating_add_whole::<I32>(width, bits).expect("built"),
+                &words,
+                1,
+            )
+            .expect("dispatched");
+        let added: Vec<i32> = added
+            .iter()
+            .map(|word| i32::from_ne_bytes(word.to_ne_bytes()))
+            .collect();
+        assert_eq!(
+            added,
+            signed
+                .iter()
+                .map(|value| value.saturating_add(rhs))
+                .collect::<Vec<i32>>(),
+            "signed saturating add against {rhs}"
+        );
+
+        let subtracted = gpu
+            .run_u32(
+                &kernels::lane_saturating_sub_whole::<I32>(width, bits).expect("built"),
+                &words,
+                1,
+            )
+            .expect("dispatched");
+        let subtracted: Vec<i32> = subtracted
+            .iter()
+            .map(|word| i32::from_ne_bytes(word.to_ne_bytes()))
+            .collect();
+        assert_eq!(
+            subtracted,
+            signed
+                .iter()
+                .map(|value| value.saturating_sub(rhs))
+                .collect::<Vec<i32>>(),
+            "signed saturating sub against {rhs}"
+        );
+    }
+}
+
+#[test]
+fn a_swizzle_moves_every_lane_to_the_one_its_index_named() {
+    let Some(gpu) = device("swizzle") else {
+        return;
+    };
+
+    let limits = gpu.limits().clone();
+    let width = limits.subgroup_size as usize;
+    let count = WORKGROUP_SIZE as usize;
+    let input = ramp(count);
+
+    let reversed = gpu
+        .run(
+            &kernels::lane_reverse(limits.subgroup_size).expect("built"),
+            &input,
+            1,
+        )
+        .expect("dispatched");
+
+    let expected: Vec<f32> = (0..count)
+        .map(|lane| {
+            let first = lane / width * width;
+            input[first + (width - 1 - (lane - first))]
+        })
+        .collect();
+    assert_eq!(reversed, expected, "each lane read the one opposite it");
+    assert_ne!(
+        reversed, input,
+        "a reversal that changed nothing is not one"
+    );
+
+    // The same permutation two ways: a swizzle carrying an index this test
+    // computed, and the fixed `rotate_up` that predates it. They share no code
+    // below `Lanes`, so agreeing is evidence rather than a tautology.
+    let delta = 3;
+    let counted: Vec<u32> = (0..count as u32).collect();
+    let by_swizzle = gpu
+        .run_u32(
+            &kernels::lane_rotate_by_swizzle(limits.subgroup_size, delta).expect("built"),
+            &counted,
+            1,
+        )
+        .expect("dispatched");
+    let by_rotate = gpu
+        .run_u32(
+            &kernels::rotate_in_cluster(limits.subgroup_size, limits.subgroup_size, delta)
+                .expect("built"),
+            &counted,
+            1,
+        )
+        .expect("dispatched");
+
+    assert_eq!(
+        by_swizzle, by_rotate,
+        "a rotation written as a swizzle is the rotation `rotate_up` already emitted"
+    );
+    assert_ne!(by_swizzle, counted, "and it moved something");
+}
+
+#[test]
+fn saturation_is_elementwise_so_it_holds_in_clusters_and_across_strips() {
+    let Some(gpu) = device("saturating-shapes") else {
+        return;
+    };
+
+    let limits = gpu.limits().clone();
+    if limits.subgroup_size != 32 {
+        eprintln!(
+            "SKIPPED saturating-shapes: no case written for a subgroup of {}",
+            limits.subgroup_size
+        );
+        return;
+    }
+
+    let count = WORKGROUP_SIZE as usize;
+    let rhs = u32::MAX - 10;
+
+    // Nothing here crosses a lane, so the answer is the same elementwise
+    // function whatever shape the vector takes -- which is the claim.
+    let clustered = kernels::lane_saturating_add::<U32, 4>(32, rhs).expect("built");
+    let input: Vec<u32> = (0..count as u32).collect();
+    let output = gpu.run_u32(&clustered, &input, 1).expect("dispatched");
+    assert_eq!(
+        output,
+        input
+            .iter()
+            .map(|value| value.saturating_add(rhs))
+            .collect::<Vec<u32>>(),
+        "in clusters of four"
+    );
+
+    let strip_mined = kernels::lane_saturating_sub::<U32, 64>(32, 20).expect("built");
+    let wide: Vec<u32> = (0..count as u32 * 2).collect();
+    let output = gpu.run_u32(&strip_mined, &wide, 1).expect("dispatched");
+    assert_eq!(
+        output,
+        wide.iter()
+            .map(|value| value.saturating_sub(20))
+            .collect::<Vec<u32>>(),
+        "across two strips"
+    );
+    assert!(
+        output.contains(&0) && output.iter().any(|value| *value > 0),
+        "the input has to reach the floor and also stay above it"
     );
 }

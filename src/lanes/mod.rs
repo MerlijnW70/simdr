@@ -9,6 +9,7 @@ mod mapping;
 mod math;
 mod narrow;
 mod reduce;
+mod saturating;
 mod scan;
 mod shift;
 mod shuffle;

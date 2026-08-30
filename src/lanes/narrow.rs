@@ -222,10 +222,21 @@ fn sign_extend(bits: u32, width: u32) -> u32 {
     (((bits << spare) as i32) >> spare) as u32
 }
 
-impl Integer for I8 {}
-impl Integer for U8 {}
-impl Integer for I16 {}
-impl Integer for U16 {}
+impl Integer for I8 {
+    const SIGNED: bool = true;
+}
+
+impl Integer for U8 {
+    const SIGNED: bool = false;
+}
+
+impl Integer for I16 {
+    const SIGNED: bool = true;
+}
+
+impl Integer for U16 {
+    const SIGNED: bool = false;
+}
 
 #[cfg(test)]
 mod tests {

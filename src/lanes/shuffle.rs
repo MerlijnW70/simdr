@@ -110,6 +110,43 @@ impl Lanes<'_> {
         )
     }
 
+    /// Every lane reads the lane its own element of `source` names — the
+    /// general form the fixed patterns above are special cases of.
+    ///
+    /// The index is a value rather than a pattern known here, so it cannot be
+    /// checked the way `broadcast` checks its constant. SPIR-V leaves the
+    /// result undefined for a lane that names one outside the subgroup, and so
+    /// does this; mask the index if it can reach past the width.
+    pub fn swizzle<T: Element, const LANES: u32>(
+        &mut self,
+        vector: Vector<T, LANES>,
+        source: Vector<U32, LANES>,
+    ) -> Result<Vector<T, LANES>, LaneError> {
+        match self.mapping::<LANES>()? {
+            Mapping::WholeSubgroup => {}
+            Mapping::Clusters { .. } => {
+                return Err(LaneError::NoSuchForm {
+                    operation: "swizzle",
+                    because: "a shuffle reads a lane of the subgroup, and a narrower vector shares                               those lanes with other vectors",
+                });
+            }
+            Mapping::Strips { .. } => {
+                return Err(LaneError::NoSuchForm {
+                    operation: "swizzle",
+                    because: "a swizzle of a strip-mined vector moves elements between strips,                               which is a shuffle per strip and a permutation of the strips as well",
+                });
+            }
+        }
+
+        let index = *source.strips().first().ok_or(LaneError::no_strips())?;
+        self.shuffle::<T, LANES>(
+            vector,
+            Exchange::Index,
+            index,
+            Capability::GroupNonUniformShuffle,
+        )
+    }
+
     fn broadcast_within_cluster<T: Element, const LANES: u32>(
         &mut self,
         vector: Vector<T, LANES>,
@@ -626,5 +663,114 @@ mod tests {
 
         assert_eq!(operands[0], float.word());
         assert_eq!(operands[1], shuffled.id().word());
+    }
+
+    #[test]
+    fn a_swizzle_is_one_shuffle_reading_the_index_each_lane_was_handed() {
+        let mut module = Module::new(Version::V1_3);
+        let mut lanes = Lanes::new(&mut module, 32).expect("built");
+        let value = lanes
+            .splat_bits::<F32, 32>(1.0_f32.to_bits())
+            .expect("splat");
+        let source = lanes.position::<32>().expect("lane index");
+
+        let swizzled = lanes.swizzle(value, source).expect("swizzled");
+
+        let words = module.finish();
+        let operands = decode::body(&words)
+            .find(|instruction| instruction.opcode() == op::GROUP_NON_UNIFORM_SHUFFLE)
+            .expect("emitted")
+            .operands()
+            .to_vec();
+
+        assert_eq!(operands[1], swizzled.id().word());
+        assert_eq!(operands[3], value.id().word(), "the value it reads from");
+        assert_eq!(
+            operands[4],
+            source.id().word(),
+            "and the index it was handed, not a constant of its own"
+        );
+    }
+
+    #[test]
+    fn a_swizzle_of_a_narrow_or_a_strip_mined_vector_is_refused_by_name() {
+        let refused = |build: fn(&mut Lanes<'_>) -> LaneError| {
+            let mut module = Module::new(Version::V1_3);
+            let mut lanes = Lanes::new(&mut module, 32).expect("built");
+            build(&mut lanes)
+        };
+
+        let narrow = refused(|lanes| {
+            let value = lanes.splat_bits::<F32, 8>(0).expect("splat");
+            let source = lanes.position::<8>().expect("index");
+            lanes
+                .swizzle(value, source)
+                .expect_err("a cluster has no swizzle")
+        });
+        let strip_mined = refused(|lanes| {
+            let value = lanes.splat_bits::<F32, 64>(0).expect("splat");
+            let source = lanes.position::<64>().expect("index");
+            lanes
+                .swizzle(value, source)
+                .expect_err("strips have no swizzle")
+        });
+
+        for error in [narrow, strip_mined] {
+            let named = matches!(
+                error,
+                LaneError::NoSuchForm {
+                    operation: "swizzle",
+                    ..
+                }
+            );
+            assert!(
+                named,
+                "a swizzle that cannot be built has to refuse by its own name, and this said                  {error} instead"
+            );
+        }
+    }
+
+    #[test]
+    fn the_two_refusals_a_swizzle_makes_give_two_different_reasons() {
+        let mut module = Module::new(Version::V1_3);
+        let mut lanes = Lanes::new(&mut module, 32).expect("built");
+
+        let narrow_value = lanes.splat_bits::<F32, 8>(0).expect("splat");
+        let narrow_index = lanes.position::<8>().expect("index");
+        let wide_value = lanes.splat_bits::<F32, 64>(0).expect("splat");
+        let wide_index = lanes.position::<64>().expect("index");
+
+        let narrow = lanes
+            .swizzle(narrow_value, narrow_index)
+            .expect_err("refused");
+        let strip_mined = lanes.swizzle(wide_value, wide_index).expect_err("refused");
+
+        assert_ne!(
+            narrow.to_string(),
+            strip_mined.to_string(),
+            "a cluster and a strip are refused for different reasons, and saying the same thing              twice would send a reader to the wrong fix"
+        );
+    }
+
+    #[test]
+    fn a_swizzle_declares_the_shuffle_capability_and_not_the_relative_one() {
+        let mut module = Module::new(Version::V1_3);
+        let mut lanes = Lanes::new(&mut module, 32).expect("built");
+        let value = lanes.splat_bits::<F32, 32>(0).expect("splat");
+        let source = lanes.position::<32>().expect("index");
+
+        lanes.swizzle(value, source).expect("swizzled");
+
+        let words = module.finish();
+        let declared: Vec<u32> = decode::body(&words)
+            .filter(|instruction| instruction.opcode() == op::CAPABILITY)
+            .filter_map(|instruction| instruction.operands().first().copied())
+            .collect();
+
+        assert!(declared.contains(&Capability::GroupNonUniformShuffle.word()));
+        assert!(
+            !declared.contains(&Capability::GroupNonUniformShuffleRelative.word()),
+            "nothing here is relative to the reading lane"
+        );
     }
 }

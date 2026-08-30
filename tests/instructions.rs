@@ -751,3 +751,58 @@ fn the_bitwise_reductions_and_the_product_are_valid_spirv() {
     expect_valid(&unsigned, "kernel-reduce-bitwise", VULKAN_1_1);
     expect_valid(&float, "kernel-reduce-product", VULKAN_1_1);
 }
+
+#[test]
+fn the_saturating_arithmetic_is_valid_spirv_for_both_signednesses() {
+    let build = |signed: bool| {
+        if signed {
+            let mut kernel = Kernel::<I32>::new(shape()).expect("built");
+            let value = kernel.load::<32>(0).expect("loaded");
+            let total = {
+                let mut lanes = kernel.lanes().expect("lanes");
+                let step = lanes.splat_bits::<I32, 32>(7).expect("step");
+                let up = lanes.saturating_add(value, step).expect("add");
+                let down = lanes.saturating_sub(up, step).expect("sub");
+                lanes.reduce_sum(down).expect("summed")
+            };
+            kernel.store_scalar(1, total).expect("stored");
+            kernel.finish().expect("finished")
+        } else {
+            let mut kernel = Kernel::<U32>::new(shape()).expect("built");
+            let value = kernel.load::<32>(0).expect("loaded");
+            let total = {
+                let mut lanes = kernel.lanes().expect("lanes");
+                let step = lanes.splat_bits::<U32, 32>(7).expect("step");
+                let up = lanes.saturating_add(value, step).expect("add");
+                let down = lanes.saturating_sub(up, step).expect("sub");
+                lanes.reduce_sum(down).expect("summed")
+            };
+            kernel.store_scalar(1, total).expect("stored");
+            kernel.finish().expect("finished")
+        }
+    };
+
+    expect_valid(&build(true), "kernel-saturating-i32", VULKAN_1_1);
+    expect_valid(&build(false), "kernel-saturating-u32", VULKAN_1_1);
+}
+
+#[test]
+fn a_swizzle_is_valid_spirv() {
+    let mut kernel = Kernel::<F32>::new(shape()).expect("built");
+    let value = kernel.load::<32>(0).expect("loaded");
+
+    let moved = {
+        let mut lanes = kernel.lanes().expect("lanes");
+        let lane = lanes.position::<32>().expect("lane index");
+        let last = lanes.splat_bits::<U32, 32>(31).expect("last");
+        let opposite = lanes.sub(last, lane).expect("opposite");
+        lanes.swizzle(value, opposite).expect("swizzled")
+    };
+
+    kernel.store(1, moved).expect("stored");
+    expect_valid(
+        &kernel.finish().expect("finished"),
+        "kernel-swizzle",
+        VULKAN_1_1,
+    );
+}

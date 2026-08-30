@@ -47,10 +47,23 @@ pub trait Signed: Element {
     const NEGATE: u16;
 }
 
-pub trait Integer: Element {}
+pub trait Integer: Element {
+    /// Whether the top bit is a sign. It decides which sequence saturation
+    /// takes: an unsigned one clamps with a complement, a signed one has to
+    /// know which end it overflowed towards.
+    const SIGNED: bool;
 
-impl Integer for I32 {}
-impl Integer for U32 {}
+    /// The width of the type in bits, from the stride it occupies.
+    const BITS: u32 = Self::STRIDE * 8;
+}
+
+impl Integer for I32 {
+    const SIGNED: bool = true;
+}
+
+impl Integer for U32 {
+    const SIGNED: bool = false;
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct F32;

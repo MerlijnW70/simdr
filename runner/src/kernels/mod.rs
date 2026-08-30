@@ -238,6 +238,101 @@ fn lane_bitwise_with_at<const LANES: u32>(
     kernel.finish()
 }
 
+/// `x` saturating-added to `rhs`, where `rhs` arrives as the bits the element
+/// type reads it from, so one kernel serves both signednesses.
+pub fn lane_saturating_add<T: simdr::lanes::Integer, const LANES: u32>(
+    subgroup: u32,
+    rhs: u32,
+) -> Result<Vec<u32>, LaneError> {
+    let mut kernel = Kernel::<T>::new(shape(subgroup))?;
+    let value = kernel.load::<LANES>(0)?;
+    let saturated = {
+        let mut lanes = kernel.lanes()?;
+        let rhs = lanes.splat_bits::<T, LANES>(rhs)?;
+        lanes.saturating_add(value, rhs)?
+    };
+    kernel.store(1, saturated)?;
+    kernel.finish()
+}
+
+pub fn lane_saturating_sub<T: simdr::lanes::Integer, const LANES: u32>(
+    subgroup: u32,
+    rhs: u32,
+) -> Result<Vec<u32>, LaneError> {
+    let mut kernel = Kernel::<T>::new(shape(subgroup))?;
+    let value = kernel.load::<LANES>(0)?;
+    let saturated = {
+        let mut lanes = kernel.lanes()?;
+        let rhs = lanes.splat_bits::<T, LANES>(rhs)?;
+        lanes.saturating_sub(value, rhs)?
+    };
+    kernel.store(1, saturated)?;
+    kernel.finish()
+}
+
+pub fn lane_saturating_add_whole<T: simdr::lanes::Integer>(
+    subgroup: u32,
+    rhs: u32,
+) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup_of!(T, subgroup, lane_saturating_add, rhs)
+}
+
+pub fn lane_saturating_sub_whole<T: simdr::lanes::Integer>(
+    subgroup: u32,
+    rhs: u32,
+) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup_of!(T, subgroup, lane_saturating_sub, rhs)
+}
+
+/// Every lane reads the lane opposite it, which is the swizzle that is wrong in
+/// the most visible way if the index is off by one.
+pub fn lane_reverse(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup!(subgroup, lane_reverse_at)
+}
+
+fn lane_reverse_at<const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    use simdr::lanes::{F32, U32};
+
+    let mut kernel = Kernel::<F32>::new(shape(subgroup))?;
+    let value = kernel.load::<LANES>(0)?;
+    let reversed = {
+        let mut lanes = kernel.lanes()?;
+        let lane = lanes.position::<LANES>()?;
+        let last = lanes.splat_bits::<U32, LANES>(subgroup.saturating_sub(1))?;
+        let opposite = lanes.sub(last, lane)?;
+        lanes.swizzle(value, opposite)?
+    };
+    kernel.store(1, reversed)?;
+    kernel.finish()
+}
+
+/// A rotation written as a swizzle rather than as `rotate_up`, so the two can be
+/// held against each other.
+pub fn lane_rotate_by_swizzle(subgroup: u32, delta: u32) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup!(subgroup, lane_rotate_by_swizzle_at, delta)
+}
+
+fn lane_rotate_by_swizzle_at<const LANES: u32>(
+    subgroup: u32,
+    delta: u32,
+) -> Result<Vec<u32>, LaneError> {
+    use simdr::lanes::U32;
+
+    let mut kernel = Kernel::<U32>::new(shape(subgroup))?;
+    let value = kernel.load::<LANES>(0)?;
+    let rotated = {
+        let mut lanes = kernel.lanes()?;
+        let lane = lanes.position::<LANES>()?;
+        let back = lanes.splat_bits::<U32, LANES>(subgroup.saturating_sub(delta))?;
+        let wrap = lanes.splat_bits::<U32, LANES>(subgroup.saturating_sub(1))?;
+        let moved = lanes.add(lane, back)?;
+        let within = lanes.and(moved, wrap)?;
+        lanes.swizzle(value, within)?
+    };
+    kernel.store(1, rotated)?;
+    kernel.finish()
+}
+
 pub fn lane_affine<const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
     use simdr::lanes::F32;
 
