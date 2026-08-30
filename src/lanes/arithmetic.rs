@@ -1,22 +1,8 @@
-//! Elementwise operations — the ones that cost nothing across lanes.
-//!
-//! Each lane already holds its own element, so `a + b` over a subgroup-wide vector is one scalar
-//! instruction. A strip-mined vector costs one *per strip*, which is the same count a hand-written
-//! loop would emit and no more.
-//!
-//! The lane count never reaches an instruction. It lives in the type, so `Vector<F32, 8>` and
-//! `Vector<F32, 32>` do not combine, and neither do `Vector<F32, 8>` and `Vector<I32, 8>`.
-
 use super::vector::Strips;
 use super::{Element, Integer, LaneError, Lanes, Vector};
 use crate::module::{Id, op};
 
 impl Lanes<'_> {
-    /// `a + b`, elementwise.
-    ///
-    /// # Errors
-    ///
-    /// [`LaneError`] if the instructions cannot be emitted.
     pub fn add<T: Element, const LANES: u32>(
         &mut self,
         left: Vector<T, LANES>,
@@ -25,11 +11,6 @@ impl Lanes<'_> {
         self.zip(T::ADD, left, right)
     }
 
-    /// `a * b`, elementwise.
-    ///
-    /// # Errors
-    ///
-    /// [`LaneError`] if the instructions cannot be emitted.
     pub fn mul<T: Element, const LANES: u32>(
         &mut self,
         left: Vector<T, LANES>,
@@ -38,14 +19,6 @@ impl Lanes<'_> {
         self.zip(T::MUL, left, right)
     }
 
-    /// `a > b`, elementwise, yielding a boolean per element.
-    ///
-    /// For floats the comparison is *ordered*: a NaN on either side gives false. For integers the
-    /// signed and unsigned forms are different instructions, which [`Element`] carries.
-    ///
-    /// # Errors
-    ///
-    /// [`LaneError`] if the instructions cannot be emitted.
     pub fn greater_than<T: Element, const LANES: u32>(
         &mut self,
         left: Vector<T, LANES>,
@@ -54,21 +27,6 @@ impl Lanes<'_> {
         self.compare(T::GREATER_THAN, left, right)
     }
 
-    /// `a == b`, elementwise, yielding a boolean per element — `Simd::simd_eq`.
-    ///
-    /// **Ordered for floats, which is the whole of what the word "ordered" buys**: a NaN is equal
-    /// to nothing, itself included, so `equal(x, x)` is a NaN test written backwards. The integers
-    /// have no such case and both families share one instruction — see [`Element::EQUAL`], which
-    /// is the only place in this trait where the signed and unsigned paths do.
-    ///
-    /// Added because the lane API had `greater_than` and no equality at all, which is the
-    /// comparison a `Simd` layer is asked for first — and because a strip-mined
-    /// [`Lanes::all_equal`] cannot be built without one: one vote per strip says each strip is
-    /// uniform, and saying the strips agree with *each other* is exactly this.
-    ///
-    /// # Errors
-    ///
-    /// [`LaneError`] if the instructions cannot be emitted.
     pub fn equal<T: Element, const LANES: u32>(
         &mut self,
         left: Vector<T, LANES>,
@@ -77,22 +35,6 @@ impl Lanes<'_> {
         self.compare(T::EQUAL, left, right)
     }
 
-    /// `a ^ b`, elementwise: the bits set in one side or the other but not in both.
-    ///
-    /// [`Integer`] rather than [`Element`], for [`Lanes::shift_left`]'s reason and not a weaker
-    /// one: SPIR-V's bitwise instructions take integer operands, so a float here builds a module
-    /// `spirv-val` rejects rather than one that means something surprising. The bound is how that
-    /// is said, because there is no answer a `LaneError` could give at run time that the type
-    /// system cannot give before anything runs.
-    ///
-    /// **The odd one out of the three bitwise instructions, and the reason it is here.** `and` and
-    /// `or` are emitted inside [`Lanes::butterfly`]'s address arithmetic and reach no caller;
-    /// `xor` is what a caller wants directly — a parity, a mask flipped, a lane's partner in a
-    /// butterfly written by hand rather than by [`Lanes::butterfly`].
-    ///
-    /// # Errors
-    ///
-    /// [`LaneError`] if the instructions cannot be emitted.
     pub fn xor<T: Integer, const LANES: u32>(
         &mut self,
         left: Vector<T, LANES>,
@@ -101,14 +43,6 @@ impl Lanes<'_> {
         self.zip(op::BITWISE_XOR, left, right)
     }
 
-    /// Pick `when_true` or `when_false` per element, according to `predicate`.
-    ///
-    /// A per-element select, not a branch: nothing diverges, so there is no reconvergence for the
-    /// scheduler to arrange.
-    ///
-    /// # Errors
-    ///
-    /// [`LaneError`] if the instructions cannot be emitted.
     pub fn select<T: Element, const LANES: u32>(
         &mut self,
         predicate: Predicate<LANES>,
@@ -130,11 +64,6 @@ impl Lanes<'_> {
         self.from_strips(&ids)
     }
 
-    /// Any comparison, strip by strip: the same shape as [`Lanes::zip`] with a boolean result.
-    ///
-    /// One function rather than one per comparison, for the reason `Module::binary` takes an
-    /// opcode: what differs between `>` and `==` is a number the [`Element`] holds, and writing the
-    /// loop twice would be two places for the result type to stop being `bool`.
     fn compare<T: Element, const LANES: u32>(
         &mut self,
         opcode: u16,
@@ -148,7 +77,6 @@ impl Lanes<'_> {
             ids.push(self.module().binary(opcode, boolean, a, b)?);
         }
 
-        // `ids` came from a vector's own strips, so it is already between one and `MAX_STRIPS`.
         Strips::new(&ids)
             .map(|strips| Predicate { strips })
             .ok_or(LaneError::TooManyStrips {
@@ -157,7 +85,6 @@ impl Lanes<'_> {
             })
     }
 
-    /// Apply a two-operand instruction strip by strip.
     fn zip<T: Element, const LANES: u32>(
         &mut self,
         opcode: u16,
@@ -175,19 +102,12 @@ impl Lanes<'_> {
     }
 }
 
-/// A boolean per element — what a comparison yields, and what `Mask<T, N>` is.
-///
-/// Strip-shaped like a [`Vector`], because a comparison of a strip-mined vector produces one
-/// boolean per element and not one per lane. It shares its strip storage with `Vector` rather
-/// than keeping a second copy: the duplicate had a duplicate bounds check, only one of the two
-/// was reachable, and the prober noticed before a reader would have.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Predicate<const LANES: u32> {
     strips: Strips,
 }
 
 impl<const LANES: u32> Predicate<LANES> {
-    /// The booleans this is made of, one per strip.
     #[must_use]
     pub fn strips(&self) -> &[Id] {
         self.strips.as_slice()
@@ -196,7 +116,6 @@ impl<const LANES: u32> Predicate<LANES> {
 
 #[cfg(test)]
 mod tests {
-    // A test may panic — that is how it reports.
     #![allow(clippy::expect_used, clippy::indexing_slicing)]
 
     use super::*;
@@ -204,14 +123,12 @@ mod tests {
     use crate::lanes::{F32, I32, U32};
     use crate::module::{Module, Version, op};
 
-    /// How many instructions carrying `opcode` a freshly built module ends up with.
     fn count(words: &[u32], opcode: u16) -> usize {
         decode::body(words)
             .filter(|instruction| instruction.opcode() == opcode)
             .count()
     }
 
-    /// How many `OpFAdd` an add of `LANES` lanes emits on a 32-wide subgroup.
     fn adds_emitted<const LANES: u32>() -> usize {
         let mut module = Module::new(Version::V1_3);
         let mut lanes = Lanes::new(&mut module, 32).expect("built");
@@ -225,9 +142,6 @@ mod tests {
 
     #[test]
     fn equality_is_one_instruction_for_both_integer_families_and_its_own_for_floats() {
-        // The claim `Element::EQUAL` makes, checked. `greater_than` is three instructions across
-        // the three types because `OpSGreaterThan` and `OpUGreaterThan` disagree above 2³¹;
-        // equality is two, because two bit patterns are equal or they are not.
         let emitted = |compare: fn(&mut Lanes<'_>) -> ()| {
             let mut module = Module::new(Version::V1_3);
             let mut lanes = Lanes::new(&mut module, 32).expect("built");
@@ -263,8 +177,6 @@ mod tests {
 
     #[test]
     fn a_strip_mined_equality_compares_every_strip() {
-        // One instruction per strip, the same as every other elementwise operation — and a
-        // `Predicate` with a boolean per element rather than per lane.
         let mut module = Module::new(Version::V1_3);
         let mut lanes = Lanes::new(&mut module, 32).expect("built");
         let wide = lanes
@@ -279,9 +191,6 @@ mod tests {
 
     #[test]
     fn an_add_within_the_subgroup_is_one_instruction_whatever_the_lane_count() {
-        // The claim that makes this mapping worth having: four lanes, eight, and the full
-        // thirty-two all emit the same single scalar add, because each lane already holds its own
-        // element and the lane count never reaches an instruction.
         assert_eq!(adds_emitted::<4>(), 1);
         assert_eq!(adds_emitted::<8>(), 1);
         assert_eq!(adds_emitted::<32>(), 1);

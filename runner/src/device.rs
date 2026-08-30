@@ -1,5 +1,3 @@
-//! Finding a device and opening it.
-
 mod narrow;
 
 pub use narrow::Narrow;
@@ -13,80 +11,26 @@ use ash::vk;
 use simdr::spec::Capability;
 use std::ffi::{CStr, c_char};
 
-/// What a device reports about itself.
-///
-/// `subgroup_size` is the number the whole project turns on: it is how many lanes a `Simd<T, N>`
-/// can map onto, it is decided by the implementation rather than by us, and it is only knowable at
-/// runtime. Measured here: 32 on an NVIDIA RTX 4080, 64 on an integrated AMD Radeon, and 8 on
-/// Mesa's lavapipe, which runs on the CPU.
 #[derive(Debug, Clone)]
 pub struct Limits {
-    /// The device's own name, as the driver spells it.
     pub name: String,
-    /// How many invocations a subgroup holds.
     pub subgroup_size: u32,
-    /// Whether the subgroup instructions exist at all — `GroupNonUniform`, Vulkan's `BASIC` bit.
-    ///
-    /// **Every kernel here that touches a lane declares this capability**, and nothing reported it
-    /// until the capabilities and the feature bits were laid side by side. It is offered by every
-    /// device that offers any of the others, which is exactly why it went unnoticed.
     pub subgroup_basic: bool,
-    /// Whether `GroupNonUniformArithmetic` — reductions and scans — is usable in compute.
     pub subgroup_arithmetic: bool,
-    /// Whether clustered reductions are usable.
     pub subgroup_clustered: bool,
-    /// Whether the arbitrary shuffles are usable — `OpGroupNonUniformShuffle` and `ShuffleXor`.
     pub subgroup_shuffle: bool,
-    /// Whether the **relative** shuffles are usable — up and down by a delta.
-    ///
-    /// A separate feature bit and a separate capability, and the one the whole scan rests on: the
-    /// clustered ladder is `log2(cluster)` `ShuffleUp`s, and `Lanes::shift_up`/`shift_down` are
-    /// nothing else. This was missing while every one of those kernels declared
-    /// `GroupNonUniformShuffleRelative` and their tests gated on the *arbitrary* shuffle.
     pub subgroup_shuffle_relative: bool,
-    /// Whether `ballot` is usable.
-    ///
-    /// A kernel using it declares `GroupNonUniformBallot`, and a *surplus* capability declaration
-    /// fails at pipeline creation rather than at validation — so a test that skips on this is
-    /// skipping for a real reason rather than being cautious.
     pub subgroup_ballot: bool,
-    /// Whether the **votes** are usable — `any`, `all`, and the vote about a value.
-    ///
-    /// A separate feature bit from the ballot, and a separate capability:
-    /// `GroupNonUniformVote` against `GroupNonUniformBallot`. This was missing from these limits
-    /// while three kernels used votes and their tests gated on the ballot instead — right on every
-    /// device here, because no implementation offers one without the other, and a claim about the
-    /// wrong feature all the same.
     pub subgroup_vote: bool,
-    /// What the device offers for elements narrower than 32 bits.
     pub narrow: Narrow,
-    /// The most invocations one workgroup may hold — `maxComputeWorkGroupInvocations`.
-    ///
-    /// The ceiling on `Shape::workgroup`, and on `workgroup × rows` for a grid. Asking for more
-    /// fails at pipeline creation with no useful message, which is why it is reported here rather
-    /// than discovered: a caller sweeping workgroup sizes needs to know where to stop.
     pub max_workgroup_invocations: u32,
-    /// Nanoseconds per timestamp tick, or zero when the device cannot be asked.
-    ///
-    /// Non-zero means [`crate::Gpu::time`] reports what the *device* spent rather than what the
-    /// host observed between a submit and a fence. The difference between the two is scheduling
-    /// this harness has no view of, and at a few microseconds of work it dominates.
     pub timestamp_period_ns: f32,
 }
 
 impl Limits {
-    /// Whether this device offers what `capability` needs.
-    ///
-    /// **The correspondence, written down once.** A module declares capabilities; a device offers
-    /// feature bits; and until this existed the two were matched by whoever wrote each test —
-    /// which is how three kernels using votes came to be gated on the *ballot*, and how every
-    /// kernel in the library declared `GroupNonUniform` while nothing reported whether the device
-    /// had it. Both were right on all three devices here, because no implementation offers one of
-    /// these without the others. Being right by luck is what the audit was looking for.
     #[must_use]
     pub const fn supports(&self, capability: Capability) -> bool {
         match capability {
-            // Any device that runs compute at all.
             Capability::Shader => true,
             Capability::GroupNonUniform => self.subgroup_basic,
             Capability::GroupNonUniformVote => self.subgroup_vote,
@@ -106,13 +50,6 @@ impl Limits {
         }
     }
 
-    /// Whether this device offers every subgroup feature the generated programs can reach.
-    ///
-    /// **The gate the fuzzer needs, and the one it was writing by hand.** A generated program may
-    /// end in a reduction (`Arithmetic`), fold a cluster (`Clustered`), butterfly (`Shuffle`),
-    /// shift (`ShuffleRelative`) or vote (`Vote`) — and the gate named the first three. The two it
-    /// left out are offered by every device here, which is why nothing noticed; naming them is the
-    /// difference between a gate that is right and one that is lucky.
     #[must_use]
     pub const fn subgroup_surface(&self) -> bool {
         self.subgroup_basic
@@ -123,18 +60,6 @@ impl Limits {
             && self.subgroup_vote
     }
 
-    /// What `spirv` declares that this device does not offer.
-    ///
-    /// Read out of the module rather than out of the caller's memory: `OpCapability` is the
-    /// module's own statement of what it needs, and a pipeline built from a module the device
-    /// cannot satisfy fails with a message naming neither the capability nor the kernel.
-    ///
-    /// Empty means every declared capability is offered — *not* that the dispatch will work, since
-    /// a feature can be present and the module still wrong. It is the necessary half of the
-    /// condition, and the half a test can check before it decides to skip.
-    ///
-    /// A capability this crate does not know is ignored rather than reported: it cannot have been
-    /// declared by this emitter, so it came from somewhere with its own reasons.
     #[must_use]
     pub fn unsupported_in(&self, spirv: &[u32]) -> Vec<Capability> {
         let mut missing = Vec::new();
@@ -157,37 +82,6 @@ impl Limits {
 }
 
 impl Gpu {
-    /// Open a device whose name contains `pattern`, case-insensitively.
-    ///
-    /// The reason this exists: a machine with two GPUs has two *subgroup widths*, and the whole
-    /// lane API turns on that number. `decisions/DR-0002` argues that a module is built for one
-    /// width, and until there was a way to ask for the other device, only one width had ever run.
-    ///
-    /// `None` keeps the old behaviour — prefer a discrete GPU — and [`Gpu::open`] passes whatever
-    /// `SIMDR_DEVICE` holds, so an entire test run can be pointed at the other device without a
-    /// line of it knowing.
-    ///
-    /// Three outcomes, and each of them used to mean more than one thing:
-    ///
-    /// * `Ok(None)` — there is no Vulkan loader at all. The environment is bare, not broken, which
-    ///   is a normal state for a test suite to find rather than an error to fail on.
-    /// * [`Error::NoComputeDevice`] — a loader, and nothing behind it that can compute.
-    /// * [`Error::NoSuchDevice`] — devices, and none of them the one `pattern` named.
-    ///
-    /// **The third was the first**, under a comment calling a machine "without the part being asked
-    /// for" a normal state. But naming a device is *asserting* one is here, and the assertion being
-    /// wrong is a typo, an ICD path that was never exported, a driver that did not install — and
-    /// every one of those looked exactly like having no GPU. `SIMDR_DEVICE=llvmpipe` on the author's
-    /// machine, whose two devices are called something else, skipped 157 tests and exited zero. The
-    /// error names what *is* here, so the next line tells the caller what to have typed.
-    ///
-    /// The second used to depend on `pattern` too — an error without one and `Ok(None)` with one,
-    /// for a machine state neither the pattern nor its absence has any bearing on. That guard
-    /// existed only to reach the case above, and went with it.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Vulkan`] if a call fails, and the two device variants above.
     pub fn open_matching(pattern: Option<&str>) -> Result<Option<Self>, Error> {
         // SAFETY: `load` only reads the loader library from the usual platform location. It is
         // unsafe because dynamic loading is, not because of anything we pass it.
@@ -208,16 +102,6 @@ impl Gpu {
         unsafe { open_on(&entry, Guard::new(instance), pattern) }.map(Some)
     }
 
-    /// The names of every device that could run compute work here.
-    ///
-    /// What `simdr list` prints, and what a caller needs before it can pass one of them to
-    /// [`Gpu::open_matching`]. (It said `simdr probe --all` for as long as that spelling had not
-    /// existed — the subcommand was `list` from the day it was written.)
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Vulkan`] if a call fails. A machine with no loader gives an empty list rather than
-    /// an error, for the same reason [`Gpu::open`] gives `Ok(None)`.
     pub fn names() -> Result<Vec<String>, Error> {
         // SAFETY: as in `open_matching`.
         let entry = match unsafe { ash::Entry::load() } {
@@ -255,29 +139,12 @@ impl Gpu {
         Ok(names)
     }
 
-    /// Open the first device that can run compute work, or the one `SIMDR_DEVICE` names.
-    ///
-    /// The whole suite goes through here, which is what lets a run be pointed at the other device
-    /// in this machine without a line of it knowing: `SIMDR_DEVICE=radeon` matches a substring,
-    /// case-insensitively, and `simdr list` names what there is to match.
-    ///
-    /// # Errors
-    ///
-    /// As [`Gpu::open_matching`].
     pub fn open() -> Result<Option<Self>, Error> {
-        // Vulkan 1.1 is the floor: it is where subgroup operations and
-        // `VkPhysicalDeviceSubgroupProperties` became core, and this crate exists to exercise
-        // those. `open_matching` is where that is asked for.
         let wanted = std::env::var("SIMDR_DEVICE").ok();
         Self::open_matching(wanted.as_deref())
     }
 }
 
-/// Owns an instance until a [`Gpu`] takes it over, and destroys it if one never does.
-///
-/// Every early return between creating an instance and building the device around it has to
-/// release it, and the version of this that threaded the instance back through the error type
-/// worked but made `Result`'s error variant enormous — clippy was right to object.
 struct Guard {
     instance: Option<ash::Instance>,
 }
@@ -289,7 +156,6 @@ impl Guard {
         }
     }
 
-    /// Hand the instance over, disarming the guard.
     fn release(mut self) -> ash::Instance {
         self.instance
             .take()
@@ -317,15 +183,6 @@ impl Drop for Guard {
     }
 }
 
-/// What a device calls itself, or a stand-in when it will not say.
-///
-/// Shared by the enumeration `simdr list` prints and by the name filter, which is the point: the
-/// list a caller reads and the strings it is matched against are now produced by one function
-/// rather than two copies that could describe the same device differently.
-///
-/// # Safety
-///
-/// `instance` must hold a live instance, and `physical` must be a handle it enumerated.
 unsafe fn name_of(instance: &ash::Instance, physical: vk::PhysicalDevice) -> String {
     // SAFETY: the caller's contract, and a physical device handle needs no destruction — it is
     // owned by the instance rather than by this.
@@ -336,13 +193,6 @@ unsafe fn name_of(instance: &ash::Instance, physical: vk::PhysicalDevice) -> Str
         .unwrap_or_else(|_| String::from("<unnamed device>"))
 }
 
-/// Pick a device on `instance` and build a [`Gpu`] around it.
-///
-/// The guard destroys the instance on any early return, so nothing here has to remember to.
-///
-/// # Safety
-///
-/// `instance` must hold a live instance the caller has not destroyed.
 unsafe fn open_on(
     entry: &ash::Entry,
     instance: Guard,
@@ -353,10 +203,6 @@ unsafe fn open_on(
     let candidates = unsafe { instance.enumerate_physical_devices() }?;
     let wanted = pattern.map(str::to_lowercase);
 
-    // Collected rather than filtered straight through, so that "there is no device" and "there is
-    // no device *by that name*" can be told apart below. They used to be the same `NoComputeDevice`
-    // and then the same `Ok(None)`, and a suite that skipped every test over a misspelt
-    // `SIMDR_DEVICE` said `no Vulkan device` beside two Vulkan devices.
     let compute: Vec<(vk::PhysicalDevice, u32)> = candidates
         .into_iter()
         .filter_map(|physical| {
@@ -381,23 +227,17 @@ unsafe fn open_on(
         .iter()
         .copied()
         .filter(|&(physical, _)| {
-            // A name filter, when there is one. Substring rather than exact: nobody types
-            // "AMD Radeon(TM) Graphics" correctly twice.
             let Some(wanted) = wanted.as_deref() else {
                 return true;
             };
             named(physical).to_lowercase().contains(wanted)
         })
-        // Prefer a discrete GPU when nothing was asked for. With a pattern this still applies, and
-        // only among the devices that matched it.
         .max_by_key(|&(physical, _)| {
             // SAFETY: as above.
             let properties = unsafe { instance.get_physical_device_properties(physical) };
             u8::from(properties.device_type == vk::PhysicalDeviceType::DISCRETE_GPU)
         })
     else {
-        // Only reachable with a pattern: without one the filter passes everything, and `compute`
-        // is not empty by the check above.
         return Err(Error::NoSuchDevice {
             wanted: pattern.unwrap_or_default().to_owned(),
             present: compute
@@ -410,9 +250,6 @@ unsafe fn open_on(
     // SAFETY: live instance, and `physical` is one of the handles it enumerated.
     let memory_properties = unsafe { instance.get_physical_device_memory_properties(physical) };
 
-    // Which of the narrow-type extensions this device has. Enabling one it does not have is a
-    // failed `create_device`, so the list is filtered rather than assumed — and the same query
-    // decides what `Limits` reports, so the two cannot drift apart.
     // SAFETY: as above. The device has not been created yet, which is exactly when this must be
     // asked — enabling an extension the device does not have is a failed `create_device`.
     let available = unsafe { instance.enumerate_device_extension_properties(physical) }?;
@@ -424,11 +261,6 @@ unsafe fn open_on(
     let wanted: Vec<&CStr> = WANTED.into_iter().filter(|name| offers(name)).collect();
     let names: Vec<*const c_char> = wanted.iter().map(|name| name.as_ptr()).collect();
 
-    // Asked for in its own scope, then *asked for again* as an enable list below. The alternative
-    // — filling one set of structs from the query and handing the same ones to `create_device` —
-    // is fewer lines and does not compile: the chain holds a mutable borrow of each struct for as
-    // long as the chain lives, so nothing can read a flag out of one until the create call is
-    // done with it.
     // SAFETY: both ask only that `physical` belong to a live `instance`, which is this function's
     // own precondition and the guard's job for as long as it holds one.
     let narrow = unsafe { narrow::supported(&instance, physical, &offers) };
@@ -464,8 +296,6 @@ unsafe fn open_on(
     let device_info = vk::DeviceCreateInfo::default()
         .queue_create_infos(&queue_infos)
         .enabled_extension_names(&names)
-        // `push_next` of a `PhysicalDeviceFeatures2` is how the core features are passed when a
-        // chain is used; `enabled_features` must stay null, and setting both is invalid.
         .push_next(&mut features);
 
     // SAFETY: the instance is live, `physical` is one of its devices, and every extension named
@@ -482,17 +312,11 @@ unsafe fn open_on(
         queue_family,
         memory_properties,
         limits,
-        // Only now, once nothing left can fail: from here the `Gpu`'s own `Drop` owns it.
         instance: instance.release(),
         _entry: entry.clone(),
     })
 }
 
-/// Read the properties this crate cares about off a physical device.
-///
-/// # Safety
-///
-/// `physical` must belong to `instance`.
 unsafe fn describe(
     instance: &ash::Instance,
     physical: vk::PhysicalDevice,
@@ -505,8 +329,6 @@ unsafe fn describe(
     // `properties` holds the subgroup struct alive through the `push_next` chain for the call.
     unsafe { instance.get_physical_device_properties2(physical, &mut properties) };
 
-    // Copied out first: `push_next` keeps `properties` holding a mutable borrow of `subgroup`, so
-    // nothing can read the subgroup fields until `properties` is last used — which is here.
     let core = properties.properties;
 
     let name = core
@@ -514,8 +336,6 @@ unsafe fn describe(
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|_| String::from("<unnamed device>"));
 
-    // A subgroup operation is only usable if the *compute* stage is among the supported ones —
-    // a device may report the operation and not offer it where we need it.
     let in_compute = subgroup
         .supported_stages
         .contains(vk::ShaderStageFlags::COMPUTE);
@@ -523,9 +343,6 @@ unsafe fn describe(
         in_compute && subgroup.supported_operations.contains(operation)
     };
 
-    // Timestamps need two things and both are optional: a non-zero period on the device, and a
-    // queue family that reports valid bits. A queue with zero valid bits accepts the write and
-    // returns nothing useful, which is worse than refusing.
     // SAFETY: as above — the device belongs to the instance and the query allocates nothing this
     // has to release.
     let families = unsafe { instance.get_physical_device_queue_family_properties(physical) };
@@ -555,22 +372,18 @@ unsafe fn describe(
 }
 
 impl Gpu {
-    /// The queue family this device's queue came from.
     pub(crate) const fn queue_family(&self) -> u32 {
         self.queue_family
     }
 
-    /// The queue kernels are submitted on.
     pub(crate) const fn queue(&self) -> vk::Queue {
         self.queue
     }
 
-    /// The logical device.
     pub(crate) const fn device(&self) -> &ash::Device {
         &self.device
     }
 
-    /// The memory types this device offers.
     pub(crate) const fn memory_properties(&self) -> &vk::PhysicalDeviceMemoryProperties {
         &self.memory_properties
     }

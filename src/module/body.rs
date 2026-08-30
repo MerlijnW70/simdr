@@ -1,19 +1,7 @@
-//! Instructions inside a function.
-//!
-//! Every one of these appends to [`Section::Function`], so the caller's call order *is* the
-//! program order. There is no block or dominance tracking here yet: the validator is what says a
-//! sequence is well-formed, and until there is a reason to duplicate its judgement, it can keep
-//! saying so.
-
 use super::{BuildError, Id, Module, Section, op};
 use crate::spec::FunctionControl;
 
 impl Module {
-    /// Open a function definition.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError`] if the instruction cannot be emitted.
     pub fn begin_function(
         &mut self,
         returns: Id,
@@ -33,13 +21,6 @@ impl Module {
         )
     }
 
-    /// Open a block and yield its label.
-    ///
-    /// Every block starts with one of these, and the first block of a function is its entry.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError`] if the instruction cannot be emitted.
     pub fn label(&mut self) -> Result<Id, BuildError> {
         let id = self.alloc_id()?;
         self.emit(Section::Function, op::LABEL, &[id.word()])?;
@@ -47,40 +28,20 @@ impl Module {
         Ok(id)
     }
 
-    /// Return from a function whose return type is void.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError`] if the instruction cannot be emitted.
     pub fn return_void(&mut self) -> Result<(), BuildError> {
         self.emit(Section::Function, op::RETURN, &[])?;
         self.leave_block();
         Ok(())
     }
 
-    /// Close the open function definition.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError`] if the instruction cannot be emitted.
     pub fn end_function(&mut self) -> Result<(), BuildError> {
         self.emit(Section::Function, op::FUNCTION_END, &[])
     }
 
-    /// Read through `pointer`.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError`] if the instruction cannot be emitted.
     pub fn load(&mut self, result_type: Id, pointer: Id) -> Result<Id, BuildError> {
         self.result_instruction(op::LOAD, result_type, &[pointer.word()])
     }
 
-    /// Write `value` through `pointer`.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError`] if the instruction cannot be emitted.
     pub fn store(&mut self, pointer: Id, value: Id) -> Result<(), BuildError> {
         self.emit(
             Section::Function,
@@ -89,15 +50,6 @@ impl Module {
         )
     }
 
-    /// Walk into an aggregate and yield a pointer to the part `indices` names.
-    ///
-    /// The indices are *ids of constants*, not literals — which is the usual first surprise, and
-    /// the reason a buffer access needs a `constant_u32(0)` for the struct member before the
-    /// index that varies per invocation.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError`] if the instruction cannot be emitted.
     pub fn access_chain(
         &mut self,
         result_type: Id,
@@ -109,14 +61,6 @@ impl Module {
         self.result_instruction(op::ACCESS_CHAIN, result_type, &operands)
     }
 
-    /// Pull one component out of a composite.
-    ///
-    /// Here the indices *are* literals, unlike [`Module::access_chain`] — the specification is
-    /// inconsistent about this and the validator is unforgiving about it.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError`] if the instruction cannot be emitted.
     pub fn composite_extract(
         &mut self,
         result_type: Id,
@@ -128,12 +72,6 @@ impl Module {
         self.result_instruction(op::COMPOSITE_EXTRACT, result_type, &operands)
     }
 
-    /// Emit an instruction shaped `<result type> <result id> <operands…>` and yield its id.
-    ///
-    /// Nearly every value-producing instruction has that shape, which is why it is worth naming
-    /// once rather than repeating the two-word prefix at every call site.
-    ///
-    /// Visible to the sibling modules because the subgroup instructions have it too.
     pub(super) fn result_instruction(
         &mut self,
         opcode: u16,
@@ -150,7 +88,6 @@ impl Module {
 
 #[cfg(test)]
 mod tests {
-    // A test may panic — that is how it reports.
     #![allow(clippy::expect_used, clippy::indexing_slicing)]
 
     use super::*;
@@ -158,10 +95,6 @@ mod tests {
     use crate::encode::Word;
     use crate::module::Version;
 
-    /// The operands of the one instruction in `words` carrying `opcode`.
-    ///
-    /// Assertions used to index the word stream by hand, and two of them were wrong about how
-    /// long an instruction is rather than about what it held. Offsets are the encoder's business.
     fn operands_of(words: &[Word], opcode: u16) -> Vec<Word> {
         decode::body(words)
             .find(|instruction| instruction.opcode() == opcode)

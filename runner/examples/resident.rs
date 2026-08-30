@@ -1,24 +1,7 @@
-//! Where the buffers land when all of them are there at once.
-//!
-//! Three sightings of a large-working-set cliff are recorded in `notes/FINDINGS.md` and two
-//! explanations have been tested and refuted — L2 capacity, and eviction under a *single*
-//! allocation. What survived was a gap the code wrote into its own documentation: `probe_memory`
-//! answers for one buffer, and a run holds three.
-//!
-//! This asks the question properly. `Gpu::run` allocates a staging buffer and two device-local
-//! ones, so a working set of *n* bytes puts three *n*-byte allocations on the device together. If
-//! the driver starts placing the second or third in host memory, a kernel reading it crosses the
-//! bus on every access and the collapse would look exactly as it does.
-//!
-//! A negative result settles as much as a positive one. If all three land device-local at a size
-//! where the timing has already fallen apart, that hypothesis is dead as well.
-
 use runner::Gpu;
 
-/// Working-set sizes in megabytes, spanning the sizes where measurements stopped being steady.
 const SIZES_MB: [u64; 10] = [1, 8, 32, 48, 56, 64, 128, 256, 512, 1_024];
 
-/// How many buffers of that size a run actually holds: staging, source, destination.
 const PER_RUN: u32 = 3;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -61,7 +44,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// What a probe came to, in one word.
 fn describe(placement: Result<runner::Placement, runner::Error>) -> String {
     match placement {
         Ok(placement) if placement.device_local => "device-local".to_owned(),

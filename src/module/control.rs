@@ -1,14 +1,3 @@
-//! Blocks, branches and the merge instructions that make them structured.
-//!
-//! SPIR-V does not accept arbitrary jumps. Every conditional has to declare, *before* it
-//! branches, where its arms rejoin — the merge block — and every loop has to declare both its
-//! merge and its continue target. That is what makes a module's control flow a tree the driver
-//! can reason about, and it is why these instructions come in pairs rather than singly.
-//!
-//! Nothing here checks that the pairs are well formed; `spirv-val` does, and duplicating its
-//! judgement would mean maintaining a second opinion about a specification that already has one.
-//! What this layer offers is the vocabulary, in an order that makes the pairing hard to forget.
-
 mod barrier;
 
 use super::{BuildError, Id, Module, Section, op};
@@ -16,15 +5,6 @@ use crate::encode::Word;
 use crate::spec::{LoopControl, SelectionControl};
 
 impl Module {
-    /// Declare where a selection's arms rejoin, immediately before branching.
-    ///
-    /// Must be the second-to-last instruction of its block, with the branch after it. SPIR-V
-    /// spells the rule that way round because a consumer needs the merge target before it has
-    /// walked either arm.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError`] if the instruction cannot be emitted.
     pub fn selection_merge(
         &mut self,
         merge: Id,
@@ -37,11 +17,6 @@ impl Module {
         )
     }
 
-    /// Declare a loop's merge block and continue target, immediately before branching into it.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError`] if the instruction cannot be emitted.
     pub fn loop_merge(
         &mut self,
         merge: Id,
@@ -55,22 +30,12 @@ impl Module {
         )
     }
 
-    /// Jump unconditionally to `target`.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError`] if the instruction cannot be emitted.
     pub fn branch(&mut self, target: Id) -> Result<(), BuildError> {
         self.emit(Section::Function, op::BRANCH, &[target.word()])?;
         self.leave_block();
         Ok(())
     }
 
-    /// Jump to one label or the other according to `condition`.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError`] if the instruction cannot be emitted.
     pub fn branch_conditional(
         &mut self,
         condition: Id,
@@ -86,44 +51,17 @@ impl Module {
         Ok(())
     }
 
-    /// Which block instructions are currently being emitted into, if any.
-    ///
-    /// An `OpPhi` names the block each of its values *arrived through*, and for a value computed
-    /// inside a branch that is wherever the body happened to end — not the block the branch
-    /// opened, because the body may have branched again. Tracking it here is the only way a
-    /// nesting helper can get it right; asking the caller to remember would be asking them to
-    /// re-derive what this file already knows.
-    ///
-    /// `None` after a branch or a return, when no block is open.
     #[must_use]
     pub const fn current_block(&self) -> Option<Id> {
         self.current_block
     }
 
-    /// Open a block with a known label, rather than allocating a new one.
-    ///
-    /// A branch has to name its targets before they exist, so their labels are allocated first
-    /// and opened later — which is what this is for. [`Module::label`] is the other way round and
-    /// suits a block nothing jumps to by name.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError`] if the instruction cannot be emitted.
     pub fn label_at(&mut self, id: Id) -> Result<(), BuildError> {
         self.emit(Section::Function, op::LABEL, &[id.word()])?;
         self.enter_block(id);
         Ok(())
     }
 
-    /// A phi at an id allocated earlier.
-    ///
-    /// A loop's carried value has to be named in its own phi's incoming list — the value the body
-    /// produces flows back to the header — so the id exists before either the phi or the value
-    /// does. That is circular by nature and this is how SPIR-V expects it to be written.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError`] if the instruction cannot be emitted.
     pub fn phi_at(
         &mut self,
         id: Id,
@@ -138,14 +76,6 @@ impl Module {
         self.emit(Section::Function, op::PHI, &operands)
     }
 
-    /// Copy `value` to an id allocated earlier.
-    ///
-    /// The other half of closing a loop's cycle: the body's result has to arrive under the name
-    /// its phi was promised.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError`] if the instruction cannot be emitted.
     pub fn copy_object_at(&mut self, id: Id, result_type: Id, value: Id) -> Result<(), BuildError> {
         self.emit(
             Section::Function,
@@ -154,11 +84,6 @@ impl Module {
         )
     }
 
-    /// Integer add into an id allocated earlier.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError`] if the instruction cannot be emitted.
     pub fn i_add_at(
         &mut self,
         id: Id,
@@ -173,19 +98,7 @@ impl Module {
         )
     }
 
-    /// A value chosen by which block control arrived from.
-    ///
-    /// `sources` pairs each incoming value with the label it came through, and every predecessor
-    /// of the current block must appear exactly once. It is the only way a value computed inside
-    /// a branch survives the merge, because SPIR-V has no mutable locals in the logical addressing
-    /// model this crate emits.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError`] if the instruction cannot be emitted.
     pub fn phi(&mut self, result_type: Id, sources: &[(Id, Id)]) -> Result<Id, BuildError> {
-        // No capacity hint: it is not observable, so no test can pin it, and an unkillable mutant
-        // is worse than the allocation it saves.
         let mut operands: Vec<Word> = Vec::new();
         for &(value, from) in sources {
             operands.push(value.word());
@@ -197,7 +110,6 @@ impl Module {
 
 #[cfg(test)]
 mod tests {
-    // A test may panic — that is how it reports.
     #![allow(clippy::expect_used, clippy::indexing_slicing)]
 
     use super::*;
@@ -263,7 +175,6 @@ mod tests {
 
     #[test]
     fn a_label_can_be_opened_at_an_id_allocated_earlier() {
-        // Which is what a forward branch needs: the target has to be nameable before it exists.
         let mut module = Module::new(Version::V1_3);
         let target = module.alloc_id().expect("%1");
 
@@ -317,11 +228,6 @@ mod tests {
 
     #[test]
     fn the_forms_that_write_into_an_id_allocated_earlier_name_that_id_as_their_result() {
-        // **The half of `phi` that nothing else can do.** A phi has to name ids that do not exist
-        // yet when the block it merges is written, so the id is allocated first and the
-        // instruction written into it — and the whole family shares that shape. An `*_at` that
-        // allocated a fresh id instead would emit a perfectly valid instruction whose result
-        // nobody holds, and the branch it belongs to would read whatever was there before.
         let mut module = Module::new(Version::V1_3);
         let uint = module.type_int(32, false).expect("u32");
         let left = module.constant_u32(1).expect("1");
@@ -351,8 +257,6 @@ mod tests {
             operands_of(&words, op::I_ADD),
             vec![uint.word(), summed.word(), left.word(), right.word()]
         );
-        // The interleaving of a phi's sources is `a_phi_interleaves_each_value_with_the_block_it_came_from`,
-        // which asks it of `phi`. What is left to ask of `phi_at` is the id, and only the id.
         assert_eq!(
             operands_of(&words, op::PHI),
             vec![uint.word(), merged.word(), left.word(), from_entry.word()]

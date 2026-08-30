@@ -1,36 +1,9 @@
-//! Writing to a slot the *data* chooses, rather than one the invocation index chooses.
-//!
-//! Every other access in [`super::access`] computes its address from the invocation index, so no
-//! two invocations ever touch the same element. That is what makes a dispatch need no bounds test
-//! and no synchronisation, and it is also the limit: a histogram's slot comes from the value being
-//! counted, and two invocations counting the same value must both be counted.
-//!
-//! # The index is a value, and that changes two things
-//!
-//! It has to be **in range**, and nothing here can check it. A `Kernel` binds a runtime array
-//! whose length is whatever buffer the caller supplies, and an out-of-range index into a storage
-//! buffer is undefined behaviour rather than an error — robust access may clamp it, or it may not.
-//! So the caller keeps the index inside the buffer, and the kernels in `runner/src/kernels` do it
-//! by clamping with `Lanes::min` before scattering.
-//!
-//! And the write has to be **atomic**, or two invocations reading, adding and writing back lose
-//! one of the two contributions. That is what the rest of this module is.
-
 use super::Kernel;
 use crate::lanes::{Element, LaneError};
 use crate::module::Id;
 use crate::spec::{MemorySemantics, Scope};
 
 impl<T: Element> Kernel<T> {
-    /// A pointer to element `index` of buffer `binding`, where `index` is a value.
-    ///
-    /// The escape hatch from the invocation-derived addressing the rest of the kernel uses. What
-    /// the caller does with the pointer is its own business — an atomic, usually, because a slot
-    /// the data chose is a slot another invocation may also have chosen.
-    ///
-    /// # Errors
-    ///
-    /// [`LaneError::NoSuchBuffer`] if `binding` was not bound.
     pub fn element_pointer_to(&mut self, binding: u32, index: Id) -> Result<Id, LaneError> {
         let buffer = self.buffer(binding)?;
         let element_pointer = self.element_pointer();
@@ -40,21 +13,6 @@ impl<T: Element> Kernel<T> {
             .access_chain(element_pointer, buffer, &[zero, index])?)
     }
 
-    /// Add `value` to element `index` of buffer `binding`, atomically.
-    ///
-    /// The histogram primitive: several invocations may name the same `index` and every one of
-    /// their contributions lands. Yields what the slot held before, which is what makes the same
-    /// instruction serve as an allocator — each invocation gets a different answer and the
-    /// answers are consecutive.
-    ///
-    /// The scope is the **device**, not the workgroup: invocations in different workgroups reach
-    /// the same buffer, and a workgroup-scoped atomic orders only the ones that share a workgroup.
-    /// The semantics are `None`, which is right when nothing is published besides the counter
-    /// itself — see [`crate::module::Module::atomic`] for when that is not enough.
-    ///
-    /// # Errors
-    ///
-    /// [`LaneError::NoSuchBuffer`] if `binding` was not bound.
     pub fn atomic_add_at(&mut self, binding: u32, index: Id, value: Id) -> Result<Id, LaneError> {
         let pointer = self.element_pointer_to(binding, index)?;
         let element = self.element();
@@ -66,26 +24,6 @@ impl<T: Element> Kernel<T> {
             .atomic_i_add(element, pointer, scope, semantics, value)?)
     }
 
-    /// Put `value` in element `index` of buffer `binding`, atomically, and yield what was there.
-    ///
-    /// **The primitive that publishes and learns in one instruction.** An add accumulates and a
-    /// store overwrites without saying what it replaced; this replaces *and* reports, which is what
-    /// a claim needs — the invocation that gets back the empty marker is the one that won the slot,
-    /// and every other gets the winner's value rather than a second chance.
-    ///
-    /// `Module::atomic_exchange` had been in this crate since the atomics landed with nothing able
-    /// to reach it: no `Kernel` path, no test, no validator. An audit of the public surface found
-    /// it beside [`Kernel::atomic_load_at`] and `Lanes::all_equal`.
-    ///
-    /// Same scope and semantics as [`Kernel::atomic_add_at`], and the same warning applies to
-    /// both: `MemorySemantics::None` orders nothing but the location itself. An exchange that
-    /// publishes a *pointer to* data another invocation then reads needs
-    /// `MemorySemantics::AcquireReleaseBuffer`, which this does not use because nothing here
-    /// publishes anything but the value.
-    ///
-    /// # Errors
-    ///
-    /// [`LaneError::NoSuchBuffer`] if `binding` was not bound.
     pub fn atomic_exchange_at(
         &mut self,
         binding: u32,
@@ -102,17 +40,6 @@ impl<T: Element> Kernel<T> {
             .atomic_exchange(element, pointer, scope, semantics, value)?)
     }
 
-    /// Read element `index` of buffer `binding`, atomically.
-    ///
-    /// **Not the same instruction as a load, and not the same claim.** `Kernel::load` reads an
-    /// address derived from the invocation index, which no other invocation touches; this reads an
-    /// address the *data* chose, which another invocation may be writing at the same moment. A
-    /// plain `OpLoad` there is a data race — undefined, not merely stale — and this is the read
-    /// that is not.
-    ///
-    /// # Errors
-    ///
-    /// [`LaneError::NoSuchBuffer`] if `binding` was not bound.
     pub fn atomic_load_at(&mut self, binding: u32, index: Id) -> Result<Id, LaneError> {
         let pointer = self.element_pointer_to(binding, index)?;
         let element = self.element();
@@ -124,14 +51,6 @@ impl<T: Element> Kernel<T> {
             .atomic_load(element, pointer, scope, semantics)?)
     }
 
-    /// Add one to element `index` of buffer `binding`, atomically.
-    ///
-    /// `OpAtomicIIncrement` rather than an add of a constant one: it is a different instruction
-    /// with no value operand, and a counter is common enough to be worth reaching directly.
-    ///
-    /// # Errors
-    ///
-    /// As [`Kernel::atomic_add_at`].
     pub fn atomic_increment_at(&mut self, binding: u32, index: Id) -> Result<Id, LaneError> {
         let pointer = self.element_pointer_to(binding, index)?;
         let element = self.element();
@@ -146,7 +65,6 @@ impl<T: Element> Kernel<T> {
 
 #[cfg(test)]
 mod tests {
-    // A test may panic — that is how it reports.
     #![allow(clippy::expect_used, clippy::indexing_slicing)]
 
     use crate::decode;
@@ -171,8 +89,6 @@ mod tests {
         let words = kernel.finish().expect("finished");
         assert_eq!(count(&words, op::ATOMIC_I_ADD), 1);
 
-        // The chain the atomic uses names the *loaded value* as its index, which is the whole
-        // difference from every other write in this kernel.
         let chains: Vec<Vec<u32>> = decode::body(&words)
             .filter(|instruction| instruction.opcode() == op::ACCESS_CHAIN)
             .map(|instruction| instruction.operands().to_vec())
@@ -187,9 +103,6 @@ mod tests {
 
     #[test]
     fn an_exchange_takes_a_value_and_a_load_does_not() {
-        // Two instructions with the same shape as the add and the increment, and the same
-        // distinction between them. Both had been emittable and unreachable since the atomics
-        // landed: no `Kernel` path, no test, no validator.
         let mut kernel = Kernel::<U32>::new(Shape::new(32, 64, 2)).expect("built");
         let value = kernel.load::<32>(0).expect("loaded");
         let seven = kernel.module().constant_u32(7).expect("7");
@@ -210,7 +123,6 @@ mod tests {
                 .operands()
                 .to_vec()
         };
-        // Result type, pointer, scope, semantics — and the exchange's value after them.
         assert_eq!(operands(op::ATOMIC_EXCHANGE).len(), 6);
         assert_eq!(
             operands(op::ATOMIC_LOAD).len(),
@@ -221,9 +133,6 @@ mod tests {
 
     #[test]
     fn an_atomic_load_reads_the_index_the_data_chose() {
-        // The distinction that makes it worth having at all: `Kernel::load` addresses by
-        // invocation, and this addresses by value. A version that read the invocation's own slot
-        // would agree with a plain load and be a different instruction for no reason.
         let mut kernel = Kernel::<U32>::new(Shape::new(32, 64, 2)).expect("built");
         let value = kernel.load::<32>(0).expect("loaded");
 
@@ -254,9 +163,6 @@ mod tests {
 
     #[test]
     fn the_scope_is_the_device_and_not_the_workgroup() {
-        // Invocations in different workgroups reach the same buffer. A workgroup-scoped atomic
-        // orders only the ones sharing a workgroup, which is a histogram that is right whenever
-        // the dispatch happens to be one workgroup — the size every test here uses.
         use crate::spec::Scope;
 
         let mut kernel = Kernel::<U32>::new(Shape::new(32, 64, 2)).expect("built");
@@ -269,7 +175,6 @@ mod tests {
             .expect("emitted")
             .operands()[3];
 
-        // The operand is an id; find the constant it names and read its value.
         let scope_value = decode::body(&words)
             .filter(|instruction| instruction.opcode() == op::CONSTANT)
             .find(|instruction| instruction.operands()[1] == scope_operand)

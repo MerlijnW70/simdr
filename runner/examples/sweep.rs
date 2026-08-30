@@ -1,22 +1,7 @@
-//! Where the strip-mined reduction falls off, and whether the measurement can be believed.
-//!
-//! The benchmark showed a four-strip kernel collapsing somewhere past 48 MB, and the first
-//! explanation offered — the 4080's 64 MB L2 — was refuted by running two kernels over the same
-//! working sets and finding they broke in different places. The second run then moved one of the
-//! cliffs by 8 MB, which said the measurement itself was not steady.
-//!
-//! So this reports a **spread** rather than a number, and checks where the memory actually went
-//! before reporting anything at all. A row marked `!` disagreed with itself across repeats and is
-//! not evidence of anything.
-//!
-//! The discriminator is unchanged: a two-strip kernel reaches any given number of megabytes at
-//! twice the workgroup count, so a cache-capacity cliff would land at the same megabytes for both.
-
 use runner::kernels::{self, WORKGROUP_SIZE};
 use runner::{Gpu, Timing};
 use simdr::lanes::F32;
 
-/// Dispatches timed together per repeat, and how many repeats.
 const ITERATIONS: u32 = 20;
 const REPEATS: u32 = 5;
 
@@ -35,11 +20,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // Working sets bracketing the suspected cliff, in megabytes.
     const SETS: [usize; 9] = [8, 16, 32, 48, 56, 64, 72, 80, 96];
 
-    // Before any timing: did the buffers land where the harness assumed? The largest set below
-    // needs three buffers of that size, so probe at the top rather than the bottom.
     let largest = SETS.iter().copied().max().unwrap_or(96);
     let placement = gpu.probe_memory((largest * 1024 * 1024) as u64)?;
     println!(
@@ -78,7 +60,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Time one kernel across a range of working-set sizes.
 fn sweep(
     gpu: &Gpu,
     label: &str,
@@ -96,13 +77,11 @@ fn sweep(
     );
 
     for &target in megabytes {
-        // A workgroup reads `WORKGROUP_SIZE * strips` elements of four bytes each.
         let per_workgroup = WORKGROUP_SIZE as usize * strips * 4;
         let workgroups = (target * 1024 * 1024 / per_workgroup) as u32;
         let elements = workgroups as usize * WORKGROUP_SIZE as usize * strips;
         let input = vec![1_u32; elements];
 
-        // One untimed pass so the driver's lazy work does not land in the measurement.
         gpu.time(&spirv, &input, workgroups, 1)?;
 
         let timing: Timing = gpu.time_repeated(&spirv, &input, workgroups, ITERATIONS, REPEATS)?;

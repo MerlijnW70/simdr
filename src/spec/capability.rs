@@ -1,74 +1,25 @@
-//! What a module declares it needs.
-
 use crate::encode::Word;
 
-/// A capability a module declares it needs (`OpCapability`).
-///
-/// A consumer refuses a module that uses a feature without declaring the capability for it, so
-/// these are not documentation — leaving one out is a validation failure. Declaring a *surplus*
-/// one is worse: a module that names `GroupNonUniformClustered` will not run on a device that
-/// does not offer it, even if nothing in the module would have used it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Capability {
-    /// Shaders: the baseline for anything running under Vulkan.
     Shader,
-    /// The subgroup instructions exist at all.
     GroupNonUniform,
-    /// Subgroup vote: `OpGroupNonUniformAll`, `Any`, `AllEqual`.
     GroupNonUniformVote,
-    /// Subgroup reductions and scans — what `Simd::reduce_sum` lowers to.
     GroupNonUniformArithmetic,
-    /// Subgroup ballot and broadcast — what a `Mask` lowers to.
     GroupNonUniformBallot,
-    /// Arbitrary subgroup shuffles — what `simd_swizzle!` lowers to.
     GroupNonUniformShuffle,
-    /// Relative shuffles: up and down by a delta, so a rotate costs one instruction.
     GroupNonUniformShuffleRelative,
-    /// Clustered reductions: several independent vectors packed into one subgroup, which is how
-    /// a lane count below the subgroup width avoids idling the rest of the hardware.
     GroupNonUniformClustered,
-    /// 8-bit integers exist as a type.
-    ///
-    /// Core SPIR-V since 1.0 and needs no extension — but Vulkan gates it behind the `shaderInt8`
-    /// feature, so a device may validate a module it will not run.
     Int8,
-    /// 16-bit integers exist as a type. Vulkan's `shaderInt16`.
     Int16,
-    /// 16-bit floats exist as a type. Vulkan's `shaderFloat16`.
     Float16,
-    /// A storage buffer may hold 8-bit types.
-    ///
-    /// Separate from [`Capability::Int8`], and the separation is the whole point of the narrow
-    /// types: 8-bit *arithmetic* is one capability and 8-bit *memory* is another, and it is the
-    /// second one that makes a buffer a quarter of the size. Needs `SPV_KHR_8bit_storage` below
-    /// SPIR-V 1.5, which is every module this crate emits.
     StorageBuffer8BitAccess,
-    /// A storage buffer may hold 16-bit types.
-    ///
-    /// Core in SPIR-V 1.3 — unlike its 8-bit counterpart, which arrived two versions later — so a
-    /// module emitting this declares no extension for it.
     StorageBuffer16BitAccess,
-    /// The integer dot-product instructions exist.
-    ///
-    /// `OpSDot` and its relatives: several narrow products summed into one wider accumulator, in
-    /// a single instruction. This says the *instructions* exist; a second capability says which
-    /// input formats they accept.
     DotProduct,
-    /// A dot product may take its four 8-bit inputs **packed into a 32-bit integer**.
-    ///
-    /// The form both devices here report as accelerated. Note what it is not: this does not make
-    /// `Simd<i8, N>` four elements per lane — `decisions/DR-0004` is unchanged. The packing is in
-    /// the *instruction's operands*, which happen to be 32-bit integers whose bytes it reads.
     DotProductInput4x8BitPacked,
 }
 
 impl Capability {
-    /// Every capability this crate can declare.
-    ///
-    /// Here rather than only in the tests because a consumer needs it: `runner` reads the
-    /// `OpCapability` instructions back out of a finished module and asks the device whether it
-    /// offers each one, which is a loop over this list — and a capability added to the enum and
-    /// not to it would be a module requirement nothing checks.
     pub const ALL: [Self; 15] = [
         Self::Shader,
         Self::GroupNonUniform,
@@ -87,17 +38,11 @@ impl Capability {
         Self::DotProductInput4x8BitPacked,
     ];
 
-    /// The capability a word names, or `None` for one this crate does not know.
-    ///
-    /// The inverse of [`Capability::word`], and the reason a module can be read back: a device
-    /// refuses a pipeline whose module declares something it does not offer, with a message that
-    /// names neither. Decoding the declaration is how a caller can be told which one.
     #[must_use]
     pub fn from_word(word: Word) -> Option<Self> {
         Self::ALL.into_iter().find(|known| known.word() == word)
     }
 
-    /// The word this encodes to.
     #[must_use]
     pub const fn word(self) -> Word {
         match self {
@@ -119,17 +64,10 @@ impl Capability {
         }
     }
 
-    /// The SPIR-V extension this capability needs, in the versions this crate emits.
-    ///
-    /// **Version-dependent, and stated for SPIR-V 1.3.** The 16-bit storage capability was
-    /// promoted to core in 1.3 and the 8-bit one only in 1.5, so at the version this crate emits
-    /// exactly one of the two still needs an `OpExtension`. Declaring it at 1.5 would be harmless;
-    /// leaving it out at 1.3 is a rejected module.
     #[must_use]
     pub const fn extension(self) -> Option<&'static str> {
         match self {
             Self::StorageBuffer8BitAccess => Some("SPV_KHR_8bit_storage"),
-            // Core only in SPIR-V 1.6, which is three versions above what this crate emits.
             Self::DotProduct | Self::DotProductInput4x8BitPacked => {
                 Some("SPV_KHR_integer_dot_product")
             }
@@ -168,9 +106,6 @@ mod tests {
 
     #[test]
     fn every_capability_is_named_by_its_own_word() {
-        // The inverse a consumer reads a module back with. A capability missing from `ALL` would
-        // decode to `None` and be reported as a module requirement nobody can name — which is the
-        // failure this exists to prevent, so the check is that the round trip is total.
         for capability in Capability::ALL {
             assert_eq!(
                 Capability::from_word(capability.word()),
@@ -211,9 +146,6 @@ mod tests {
 
     #[test]
     fn a_capability_names_the_extension_it_needs_at_this_version() {
-        // The asymmetry that would be easy to get wrong in either direction: 16-bit storage is
-        // core in SPIR-V 1.3, 8-bit only in 1.5, and the dot product only in 1.6. This crate emits
-        // 1.3, so two of the three need an `OpExtension` beside them and one does not.
         assert_eq!(
             Capability::StorageBuffer8BitAccess.extension(),
             Some("SPV_KHR_8bit_storage")
@@ -242,9 +174,6 @@ mod tests {
 
     #[test]
     fn the_type_capabilities_are_separate_from_the_storage_ones() {
-        // Declaring `Int8` says the module computes in 8-bit integers; declaring
-        // `StorageBuffer8BitAccess` says a buffer holds them. A device can offer the first and
-        // not the second, so a module that conflated them would refuse to run on it.
         assert_ne!(
             Capability::Int8.word(),
             Capability::StorageBuffer8BitAccess.word()

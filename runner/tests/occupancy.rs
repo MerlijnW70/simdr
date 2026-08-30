@@ -1,28 +1,12 @@
-//! The kernels whose workgroup size is an argument, on a real device.
-//!
-//! `runner/examples/occupancy.rs` times these across every workgroup size a device will run. A
-//! benchmark that is wrong is worse than no benchmark, and two of the three kernels below have
-//! already been wrong in a way that made the numbers meaningless — see
-//! `kernels::occupancy::sized_repeated_scale`, whose loop was folded away twice before it stopped
-//! being.
-//!
-//! So these check the answers. **The arithmetic one is checked at two loop lengths**, because the
-//! failure that mattered was not a wrong answer — it was a right answer arriving too fast.
-
 mod common;
 
 use common::device;
 use runner::kernels::{self, occupancy::LIMIT};
 
-/// The host's version of one iteration of `sized_repeated_scale`.
-///
-/// `wrapping_*` because `OpIMul` and `OpIAdd` wrap on overflow and nothing about the clamp changes
-/// that — the clamp happens after.
 fn step(running: u32, factor: u32, salt: u32) -> u32 {
     running.wrapping_mul(factor).wrapping_add(salt).min(LIMIT)
 }
 
-/// The whole chain, `times` iterations of it.
 fn chain(start: u32, factor: u32, times: u32) -> u32 {
     (0..times).fold(start, |running, salt| step(running, factor, salt))
 }
@@ -35,7 +19,6 @@ fn a_sized_kernel_computes_the_same_answer_at_every_workgroup_size() {
     let width = gpu.limits().subgroup_size;
     let ceiling = gpu.limits().max_workgroup_invocations;
 
-    // 512 elements covers every size below with whole workgroups.
     let input: Vec<u32> = (0..512).collect();
 
     for multiple in [1, 2, 4, 8] {
@@ -59,13 +42,6 @@ fn a_sized_kernel_computes_the_same_answer_at_every_workgroup_size() {
 
 #[test]
 fn the_arithmetic_kernel_runs_its_loop_rather_than_a_closed_form() {
-    // Two loop lengths, and the reference is the loop written out on the host. A driver that folds
-    // `times` iterations into one expression still gets the answer right — that is what folding
-    // means — so this cannot catch the fold directly. What it does catch is the loop having been
-    // built wrong, which is the other way the benchmark stops meaning anything.
-    //
-    // Whether the fold happened is a *timing* question, and `runner/examples/occupancy.rs` asks it
-    // the only way it can be asked: run 64 and run 512 and see whether the number moves.
     let Some(gpu) = device("occupancy-repeated") else {
         return;
     };
@@ -88,16 +64,11 @@ fn the_arithmetic_kernel_runs_its_loop_rather_than_a_closed_form() {
 
 #[test]
 fn the_clamp_actually_clamps_which_is_the_whole_reason_it_is_there() {
-    // A `min` that never fires is one a compiler deletes, and deleting it put the affine chain
-    // back and made the arithmetic-bound row read as memory-bound. So this asserts the property
-    // the benchmark depends on rather than the answer: after enough iterations of multiplying by
-    // three, every lane is at the limit.
     let Some(gpu) = device("occupancy-clamp") else {
         return;
     };
     let width = gpu.limits().subgroup_size;
 
-    // Start at 1 so nothing is already at the limit, and run long enough that 3^n passes it.
     let input: Vec<u32> = std::iter::repeat_n(1, width as usize).collect();
 
     let output = gpu
@@ -143,8 +114,6 @@ fn the_sized_reduction_sums_its_own_subgroup_at_every_workgroup_size() {
             )
             .expect("dispatched");
 
-        // Every invocation holds its own subgroup's total, whatever the workgroup size — that is
-        // the claim, and a workgroup size that leaked into the reduction would break it.
         let expected: Vec<u32> = (0..count)
             .map(|index| {
                 let base = (index / width) * width;

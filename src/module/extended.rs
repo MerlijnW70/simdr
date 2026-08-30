@@ -1,26 +1,7 @@
-//! Extended instruction sets: importing one, and reaching an instruction in it.
-//!
-//! Two instructions do the whole of it. `OpExtInstImport` names a set and yields an id;
-//! `OpExtInst` names that id, a literal instruction number, and the operands. Nothing else about
-//! a module changes — no capability, no `OpExtension`, and the result is an ordinary value.
-//!
-//! The literal number is the part with no safety net. `OpExtInst %float %r %set 40 %a %b` is a
-//! well-formed instruction whatever `40` means in the set that was imported, so the numbers come
-//! from [`crate::spec::Glsl`], which read them out of that set's own grammar.
-
 use super::{BuildError, Id, Module, Section, op};
 use crate::encode::{self, Word};
 
 impl Module {
-    /// Import an extended instruction set, or return the id it already has.
-    ///
-    /// A module may import a set once. Importing twice is not two sets — it is two ids naming the
-    /// same thing, which validates and then makes a reader wonder which one an instruction meant.
-    /// So this interns, exactly as types and constants do.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError`] if the instruction cannot be emitted.
     pub fn ext_inst_import(&mut self, name: &str) -> Result<Id, BuildError> {
         if let Some(&existing) = self.ext_imports.get(name) {
             return Ok(existing);
@@ -34,14 +15,6 @@ impl Module {
         Ok(id)
     }
 
-    /// Call `instruction` from the set `set` names.
-    ///
-    /// `set` is the id [`Module::ext_inst_import`] returned, and `instruction` is a literal from
-    /// that set's numbering — not from the core grammar's.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError`] if the instruction cannot be emitted.
     pub fn ext_inst(
         &mut self,
         result_type: Id,
@@ -57,7 +30,6 @@ impl Module {
 
 #[cfg(test)]
 mod tests {
-    // A test may panic — that is how it reports.
     #![allow(clippy::expect_used, clippy::indexing_slicing)]
 
     use super::*;
@@ -79,7 +51,6 @@ mod tests {
             .to_vec();
 
         assert_eq!(operands[0], set.word());
-        // "GLSL" as four bytes of one word, least significant first.
         assert_eq!(operands[1], u32::from_le_bytes(*b"GLSL"));
     }
 
@@ -135,7 +106,7 @@ mod tests {
                 float.word(),
                 largest.word(),
                 set.word(),
-                40, // FMax, a literal in the set's own numbering
+                40,
                 left.word(),
                 right.word()
             ]
@@ -144,10 +115,6 @@ mod tests {
 
     #[test]
     fn the_import_lands_in_its_own_section_ahead_of_the_memory_model() {
-        // §2.4 puts `OpExtInstImport` after the capabilities and extensions and before everything
-        // else. Emitting it from the middle of a function body — which is where the *call* is —
-        // would put it in the wrong section, and a validator reads that as a module whose layout
-        // is shuffled rather than as a misplaced instruction.
         let mut module = Module::new(Version::V1_3);
         let float = module.type_float(32).expect("f32");
         let one = module.constant_f32(1.0).expect("1.0");
@@ -173,9 +140,6 @@ mod tests {
 
     #[test]
     fn an_instruction_with_no_operands_at_all_still_encodes() {
-        // Nothing in GLSL.std.450 takes none, and the shape is still worth pinning: the two-word
-        // tail is the set and the number, and a length computed from the operand slice alone
-        // would be two words short.
         let mut module = Module::new(Version::V1_3);
         let void = module.type_void().expect("void");
         let set = module.ext_inst_import(Glsl::SET_NAME).expect("imported");

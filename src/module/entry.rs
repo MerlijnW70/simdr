@@ -1,21 +1,7 @@
-//! The entry point, and the interface list that is not closed until the module is.
-//!
-//! `OpEntryPoint` names every `Input` and `Output` variable the entry point's call tree reaches,
-//! and below SPIR-V 1.4 only those. Which variables those are is not known when the entry point is
-//! declared: a kernel that turns out to need [`crate::spec::BuiltIn::SubgroupLocalInvocationId`]
-//! learns that while its *body* is being built, long after the interface would have been written
-//! out — so the list is held as data and the instruction is rendered from it every time it changes.
-//!
-//! The alternative was to declare every built-in a kernel might want up front. That costs a module
-//! an `Input` variable and a capability it does not use, and a surplus capability is not free:
-//! `GroupNonUniform` on a kernel that only scales makes it refuse to run on a device that could
-//! have run it.
-
 use super::{BuildError, Id, Module, Section, op};
 use crate::encode::{self, Word};
 use crate::spec::ExecutionModel;
 
-/// The entry point a module declares, held as data rather than as emitted words.
 #[derive(Debug, Clone)]
 pub(super) struct Entry {
     model: Word,
@@ -24,14 +10,6 @@ pub(super) struct Entry {
 }
 
 impl Module {
-    /// Declare `function` as the module's entry point, under `name`.
-    ///
-    /// The instruction is rendered here and again whenever [`Module::require_interface`] adds to
-    /// it, so a caller may declare the entry point before the variables it will end up naming.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError::Encode`] if the name is long enough to overrun the instruction length.
     pub fn entry_point(
         &mut self,
         model: ExecutionModel,
@@ -46,19 +24,6 @@ impl Module {
         self.render_entry_point()
     }
 
-    /// Name `variable` in the entry point's interface, unless it is named already.
-    ///
-    /// Ordered by first request rather than by id, so the list reads in the order the module
-    /// declared the variables.
-    ///
-    /// **It records the id whether or not there is an entry point yet.** [`crate::lanes::Lanes`]
-    /// is handed a `&mut Module` and may be building a fragment that has none — and a caller that
-    /// declares its entry point afterwards must still get an interface naming what the fragment
-    /// used.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError::Encode`] if the instruction can no longer be encoded.
     pub fn require_interface(&mut self, variable: Id) -> Result<(), BuildError> {
         if self.interface.contains(&variable) {
             return Ok(());
@@ -67,11 +32,6 @@ impl Module {
         self.render_entry_point()
     }
 
-    /// Write the entry point instruction out, replacing whatever was there.
-    ///
-    /// The section holds this one instruction and nothing else, so replacing it is the whole
-    /// update. The words are built first and installed only once they encode, which keeps
-    /// [`Module::emit`]'s promise that a refused instruction leaves the section as it was.
     fn render_entry_point(&mut self) -> Result<(), BuildError> {
         let Some(entry) = self.entry.clone() else {
             return Ok(());
@@ -91,14 +51,12 @@ impl Module {
 
 #[cfg(test)]
 mod tests {
-    // A test may panic — that is how it reports.
     #![allow(clippy::expect_used, clippy::indexing_slicing)]
 
     use super::*;
     use crate::decode;
     use crate::module::Version;
 
-    /// The operands of the one `OpEntryPoint` in `module`.
     fn entry_operands(module: &Module) -> Vec<Word> {
         let words = module.finish();
         decode::body(&words)
@@ -127,10 +85,6 @@ mod tests {
 
     #[test]
     fn a_variable_declared_after_the_entry_point_still_reaches_its_interface() {
-        // The whole reason the instruction is rendered rather than emitted. A built-in a kernel
-        // turns out to need is declared while its body is being built, which is long after the
-        // entry point — and an interface missing a variable the body loads is what `spirv-val`
-        // rejects.
         let mut module = Module::new(Version::V1_3);
         let main = module.alloc_id().expect("%1");
         module
@@ -147,7 +101,6 @@ mod tests {
 
     #[test]
     fn a_variable_declared_before_the_entry_point_reaches_it_too() {
-        // `Lanes` is handed a module and may be building a fragment that has no entry point yet.
         let mut module = Module::new(Version::V1_3);
         let variable = module.alloc_id().expect("%1");
         module.require_interface(variable).expect("named");

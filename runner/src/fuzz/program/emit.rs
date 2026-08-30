@@ -1,48 +1,9 @@
-//! Turning one generated step into instructions.
-//!
-//! Split from the vocabulary in [`super`] so the enums stay readable: what an `Op` *is* fits on a
-//! screen, and what it *emits* does not. Every arm here is one step, and its CPU meaning lives in
-//! `interpret/steps.rs` — the two are meant to be read side by side, because a disagreement
-//! between them is what the fuzzer reports.
-//!
-//! # One bound differs, and that is why there is a trait
-//!
-//! Every step here was emitted by one function generic over [`Element`], and could be, because
-//! every instruction it reached exists for all eight domains. The three bit shifts do not: they
-//! take `T: Integer`, so `F32` cannot be asked for one.
-//!
-//! That bound is younger than this file. `Lanes::shift_left` took `T: Element` until preparing this
-//! pass, and a shift of a vector of floats compiled, built, and produced a module `spirv-val`
-//! rejects — `OpUDot`'s shape exactly. Making it `Integer` fixed the emitter and moved the problem
-//! here: the generator could not offer a shift, because the one place that emits a step could not
-//! express the difference between a domain that has one and a domain that does not.
-//!
-//! [`Emit`] is that difference, carried by the element type. The width ladder in [`super`] stays
-//! single — a second copy of it, one for integers and one for floats, is the relationship-decided-
-//! twice shape `notes/FINDINGS.md` catalogues more often than any other.
-
 use super::{BitShift, Domain, Missing, Op, ProgramError};
 use simdr::lanes::{
     Element, F16, F32, I8, I16, I32, Integer, LaneError, Lanes, Signed, U8, U16, U32, Vector,
 };
 
-/// What an element type can be asked to emit.
-///
-/// **Three methods, three memberships, and the default is a refusal.** The bit shifts reach six of
-/// the eight domains, the magnitude five, and the fused multiply-add exactly one — which is the
-/// whole argument for putting the gate on the element type rather than on the step. A trait whose
-/// default is *no* also means a ninth element type refuses everything until somebody writes the
-/// override, which is the direction `noha gate`'s fail-closed check exists to keep things pointing.
-///
-/// The alternative Rust will not take is `impl<T: Integer> Emit for T` beside `impl Emit for F32`:
-/// the compiler cannot know `F32` is not an `Integer`, so the impls conflict. Hence the table
-/// below, which has the merit of being readable as a table.
 pub trait Emit: Element {
-    /// Move each element's bits. `Lanes` gates the three shifts on `Integer`.
-    ///
-    /// # Errors
-    ///
-    /// [`ProgramError::NotInThisDomain`] unless this element overrides it.
     fn bit_shift<const LANES: u32>(
         lanes: &mut Lanes<'_>,
         kind: BitShift,
@@ -56,11 +17,6 @@ pub trait Emit: Element {
         })
     }
 
-    /// Each element's magnitude. `Lanes::abs` is gated on `Signed`.
-    ///
-    /// # Errors
-    ///
-    /// [`ProgramError::NotInThisDomain`] unless this element overrides it.
     fn absolute<const LANES: u32>(
         lanes: &mut Lanes<'_>,
         value: Vector<Self, LANES>,
@@ -72,11 +28,6 @@ pub trait Emit: Element {
         })
     }
 
-    /// One rounding for a multiply and an add. `Lanes::fma` takes `F32` concretely.
-    ///
-    /// # Errors
-    ///
-    /// [`ProgramError::NotInThisDomain`] unless this element overrides it.
     fn fused_mul_add<const LANES: u32>(
         lanes: &mut Lanes<'_>,
         value: Vector<Self, LANES>,
@@ -91,10 +42,6 @@ pub trait Emit: Element {
     }
 }
 
-/// The shift the lane API names, for an element that has one.
-///
-/// A free function rather than a body repeated in six impls, and generic over the bound that gates
-/// it — so this is the one place the `Integer` requirement is written down on this side.
 fn shifted<T: Integer, const LANES: u32>(
     lanes: &mut Lanes<'_>,
     kind: BitShift,
@@ -108,7 +55,6 @@ fn shifted<T: Integer, const LANES: u32>(
     })
 }
 
-/// The magnitude, for an element that has one.
 fn magnitude<T: Signed, const LANES: u32>(
     lanes: &mut Lanes<'_>,
     value: Vector<T, LANES>,
@@ -116,12 +62,6 @@ fn magnitude<T: Signed, const LANES: u32>(
     Ok(lanes.abs(value)?)
 }
 
-/// One impl of [`Emit`], listing what this element can do and inheriting a refusal for the rest.
-///
-/// **The invocations below are the membership table**, and are meant to be read as one: eight lines
-/// with the elements' names down the left and their capabilities across. A domain gaining an
-/// operation is a word on a line here, and losing one is a word deleted — which is the shape a
-/// table should have and a match on eight arms per operation would not.
 macro_rules! emit_for {
     ($element:ty $(, $capability:ident)* $(,)?) => {
         impl Emit for $element {
@@ -167,7 +107,6 @@ emit_for!(I16, shifts, magnitude);
 emit_for!(F32, magnitude, fused);
 emit_for!(F16, magnitude);
 
-/// Emit one step.
 pub(super) fn apply<T: Emit, const LANES: u32>(
     lanes: &mut Lanes<'_>,
     domain: Domain,
@@ -191,22 +130,13 @@ pub(super) fn apply<T: Emit, const LANES: u32>(
         Op::ShiftDown => lanes.shift_down(value, 0)?,
         Op::RotateUp(delta) => lanes.rotate_up(value, delta)?,
         Op::BroadcastLane(source) => lanes.broadcast(value, source)?,
-        // The one step whose instruction does not exist in every domain, and the only arm here that
-        // asks the element type rather than the `Lanes` in front of it.
         Op::BitShift { kind, by } => {
-            // **The width check is here rather than in the six impls**, because it is a property of
-            // the domain and not of the element type — and because six copies of one comparison is
-            // the shape this project spends most of its time deleting. SPIR-V leaves a shift by at
-            // least the operand's width undefined, and a reference cannot predict undefined.
             if by >= domain.bits() {
                 return Err(ProgramError::ShiftTooFar {
                     by,
                     bits: domain.bits(),
                 });
             }
-            // The amount is a vector of `u32` whatever the value's element type is — SPIR-V takes
-            // it as an operand rather than as a literal, so a constant shift is a splat and a
-            // per-lane one would be expressible without a second entry point.
             let amount = lanes.splat_bits::<U32, LANES>(by)?;
             T::bit_shift(lanes, kind, value, amount)?
         }
@@ -220,10 +150,6 @@ pub(super) fn apply<T: Emit, const LANES: u32>(
             when_all_above,
             add,
         } => {
-            // `all_uniform` rather than `any_uniform`, and they are different opcodes —
-            // `OpGroupNonUniformAll` against `OpGroupNonUniformAny`. Everything else about this arm
-            // is its neighbour's, deliberately: one vote, one select, and the only difference
-            // between the two programs is the word the hardware is asked.
             let limit = lanes.splat_bits::<T, LANES>(domain.encode(when_all_above))?;
             let above = lanes.greater_than(value, limit)?;
             let vote = lanes.all_uniform(above)?;
@@ -268,9 +194,6 @@ pub(super) fn apply<T: Emit, const LANES: u32>(
             lanes.select(same, replacement, value)?
         }
         Op::AddIfAllEqual { add } => {
-            // The other uniform branch, and the vote that asks about a value. Written as a select
-            // on the vote for the same reason the one below is: a branch cannot hand a value out
-            // across its merge without an `OpPhi`, and the vote is uniform so both readings agree.
             let vote = lanes.all_equal_uniform(value)?;
             let increment = lanes.splat_bits::<T, LANES>(domain.encode(add))?;
             let raised = lanes.add(value, increment)?;
@@ -295,9 +218,6 @@ pub(super) fn apply<T: Emit, const LANES: u32>(
             let above = lanes.greater_than(value, limit)?;
             let vote = lanes.any_uniform(above)?;
 
-            // A branch cannot hand a value out across its merge without an `OpPhi`, so the
-            // conditional part is done as a select on the vote instead: the vote is uniform, so
-            // both readings agree, and this one keeps the value in a register.
             let increment = lanes.splat_bits::<T, LANES>(domain.encode(add))?;
             let raised = lanes.add(value, increment)?;
 
@@ -316,7 +236,6 @@ pub(super) fn apply<T: Emit, const LANES: u32>(
         Op::RepeatAdd { times, add } => {
             let increment = lanes.splat_bits::<T, LANES>(domain.encode(add))?;
 
-            // One strip at a time: `repeat` threads a single id, and a vector is one id per strip.
             let mut carried = Vec::with_capacity(value.strip_count());
             for &strip in value.strips() {
                 carried.push(lanes.repeat(times, strip, |lanes, held, _| {
@@ -353,11 +272,6 @@ pub(super) fn apply<T: Emit, const LANES: u32>(
                     element,
                     strip,
                     |lanes, held, iteration| {
-                        // The counter is a `u32` whatever `T` is, so it is *converted* rather than
-                        // reinterpreted: `OpConvertUToF` for a float. Reading its bits instead
-                        // would make iteration 3 a denormal near zero, which is a wrong answer
-                        // that reads like a numerical problem. This op was unsigned-only until
-                        // the emitter could do the conversion.
                         let converted = lanes.convert_u32::<T>(iteration)?;
                         let one = lanes.from_lane_value::<T, 1>(held)?;
                         let step = lanes.from_lane_value::<T, 1>(converted)?;

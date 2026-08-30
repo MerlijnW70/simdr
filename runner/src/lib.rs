@@ -1,41 +1,3 @@
-//! Running `simdr`'s SPIR-V on a real device.
-//!
-//! Everything in the emitter proves modules are *valid*. Validity is not correctness: a kernel
-//! can satisfy `spirv-val` down to the last rule and still compute the wrong number. This crate
-//! is what closes that gap — it hands a module to a driver, dispatches it, and reads the answer
-//! back so it can be compared against a CPU reference.
-//!
-//! # Why this is a separate crate
-//!
-//! Vulkan is FFI, and FFI is `unsafe`. The emitter forbids `unsafe` outright and takes no
-//! dependencies; both hold because emitting a binary format needs neither. Running one needs
-//! both. So the boundary is drawn here, the arrow points `runner -> simdr`, and nothing in the
-//! emitter can ever reach back.
-//!
-//! # Why `ash` and not `wgpu`
-//!
-//! `wgpu` would be a fraction of the code, but it runs SPIR-V through naga, which re-parses and
-//! re-emits it. That would make this a test of naga's reading of our module. The whole point is
-//! to ask the *driver*, so `ash` hands the words to `vkCreateShaderModule` untouched.
-
-// What the emitter forbids outright, this crate cannot: Vulkan is FFI and FFI is `unsafe`. The
-// rest of the discipline still applies and was being followed by habit rather than by anything
-// checking — so it is checked now.
-//
-// `unsafe_op_in_unsafe_fn` is on by default in edition 2024 and is the one that matters most here:
-// an `unsafe fn` body is not automatically an unsafe block, so every FFI call names itself and
-// carries its own `SAFETY` note. That convention is why the audit of those notes was possible at
-// all, and why it found the one that had stopped being true.
-// `undocumented_unsafe_blocks` is the half of that convention which was not being checked. Every
-// `unsafe fn` here carried a `# Safety` clause and most of the blocks inside them carried nothing,
-// which is the wrong way round: the clause is what a *caller* owes, and the note is what the
-// callee's own reasoning was. There were 79 of the latter missing.
-//
-// The temptation was to collapse each function's blocks into one and write one note. That would
-// have deleted the granularity this crate says above is what made an audit of these possible at
-// all — and that audit found a note which had stopped being true. So the notes were written
-// instead, one per block, and where two calls share an argument they now share a block as well.
-#![deny(missing_docs)]
 #![deny(clippy::unwrap_used, clippy::panic)]
 #![deny(clippy::undocumented_unsafe_blocks)]
 
@@ -58,82 +20,29 @@ pub use reduction::{BadLength, Reducer, Reduction};
 pub use scan::Scanner;
 pub use timing::Timing;
 
-/// Something that stopped a kernel running.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
-    /// The Vulkan loader is not present, or refused to load.
     NoLoader(ash::LoadingError),
-    /// A Vulkan call failed.
     Vulkan(vk::Result),
-    /// The loader started but reported no physical device with a compute queue.
     NoComputeDevice,
-    /// Devices are here, and none of them is the one that was asked for by name.
-    ///
-    /// Apart from [`Error::NoComputeDevice`], and the distinction is the whole reason this variant
-    /// exists. A machine with no GPU is a normal state for a test suite to find and skip over. A
-    /// machine that *has* GPUs while `SIMDR_DEVICE` names one it does not have is somebody asserting
-    /// a device is present and being wrong — a typo, an unset ICD path, a driver that did not
-    /// install — and for as long as both were the same `Ok(None)` the second reported nothing.
-    ///
-    /// It cost a whole suite silently. `SIMDR_DEVICE=llvmpipe` on this machine, whose two devices
-    /// are called something else, skipped **157 tests and exited zero**, reporting `no Vulkan
-    /// device` beside two Vulkan devices.
     NoSuchDevice {
-        /// The substring that was asked for.
         wanted: String,
-        /// What was actually there to match, which is the half that makes the message actionable.
         present: Vec<String>,
     },
-    /// No memory type with the properties a buffer needed was available.
     NoHostVisibleMemory,
-    /// The host tried to read or write a buffer that lives only on the device.
-    ///
-    /// A caller bug rather than a device limitation: device-local buffers move through a staging
-    /// copy, and reaching for one directly means that copy was skipped.
     NotMappable,
-    /// The driver accepted the pipeline creation call but returned no pipeline.
     NoPipeline,
-    /// More words than the buffer holds.
-    ///
-    /// A caller bug, and one that used to be undefined behaviour rather than an error: the host
-    /// copies memcpy through a mapping sized when the buffer was allocated, and the length was
-    /// *assumed* because for a while only one caller existed and it always allocated exactly what
-    /// it wrote. `Session` takes a slice from outside and does not.
     TooLarge {
-        /// How many words were asked for.
         words: usize,
-        /// How many the buffer holds.
         capacity: usize,
     },
-    /// A dispatch would touch more of a buffer than the buffer holds.
-    ///
-    /// Apart from [`Error::TooLarge`], which is a *host copy* that would not fit — a failed memcpy,
-    /// caught before anything happens. This is a **kernel** reading or writing past the end of a
-    /// binding, which is undefined behaviour: an access violation on one device here and plausible
-    /// wrong numbers on another. `dispatch::extent` reads the module's own workgroup size, element
-    /// stride and address arithmetic and refuses the submission rather than making it.
     Overrun {
-        /// Which binding the kernel would run off the end of.
-        ///
-        /// `None` when the module's address arithmetic could not be read and the floor of one
-        /// element per invocation was used instead: there is no binding to name there.
         binding: Option<u32>,
-        /// How many words it must hold for this dispatch to stay inside it.
-        ///
-        /// The extent the kernel reaches rather than the count of words it touches. The two differ
-        /// for a buffer addressed as a plane, where the rows between the columns a dispatch covers
-        /// are skipped and still have to be there.
         needed: usize,
-        /// How many it holds.
         held: usize,
     },
-    /// A buffer was not a shape [`Gpu::sum`] can fold.
     BadLength(BadLength),
-    /// A pass could not be built.
-    ///
-    /// An emitter failure rather than a device one, which is worth keeping apart: nothing was
-    /// submitted, and the fix is in the kernel rather than on the machine.
     Emit(simdr::lanes::LaneError),
 }
 
@@ -200,13 +109,7 @@ impl From<vk::Result> for Error {
     }
 }
 
-/// An open compute device.
-///
-/// Opening one is expensive and running kernels on it is not, so a caller keeps this alive across
-/// however many dispatches it needs.
 pub struct Gpu {
-    // Field order is drop order, and Vulkan cares: the device must go before the instance, and
-    // the instance before the entry that loaded it.
     device: ash::Device,
     queue: vk::Queue,
     queue_family: u32,
@@ -217,7 +120,6 @@ pub struct Gpu {
 }
 
 impl Gpu {
-    /// What the device reports about itself — its name, and how wide a subgroup is.
     #[must_use]
     pub const fn limits(&self) -> &Limits {
         &self.limits

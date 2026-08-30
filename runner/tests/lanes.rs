@@ -1,22 +1,9 @@
-//! The lane API, run on a real device.
-//!
-//! `kernels::lane_sum` is four lines that name no reduction shape, no cluster size and no opcode:
-//! [`simdr::kernel::Kernel`] and [`simdr::lanes::Lanes`] derive all of them from the lane count
-//! against the device's width and from the element type. These are the tests where that stops
-//! being a design argument and becomes a number.
-
 mod common;
 
 use common::{device, grouped_sums, ramp, runnable};
 use runner::kernels::{self, WORKGROUP_SIZE};
 use simdr::lanes::{F32, U32};
 
-/// A reduction across the *whole workgroup*, through shared memory.
-///
-/// Every subgroup instruction stops at the subgroup, so combining two of them needs a handover
-/// nothing here could express until `Kernel::shared` and `Kernel::barrier` existed. The answer is
-/// the sum of all 64 invocations rather than of one 32-lane subgroup, and every invocation holds
-/// it — which is what makes a wrong barrier visible as a wrong number rather than as a hang.
 #[test]
 fn a_workgroup_reduction_crosses_between_subgroups() {
     let Some(gpu) = device("workgroup-sum") else {
@@ -24,8 +11,6 @@ fn a_workgroup_reduction_crosses_between_subgroups() {
     };
     let limits = gpu.limits().clone();
 
-    // **Both modules, and gated on what they declare rather than on a bit chosen here.** This test
-    // dispatches two kernels; a gate that named one of them would be a gate the other walked past.
     let workgroup = kernels::workgroup_sum::<F32>(limits.subgroup_size).expect("built");
     let per_subgroup = kernels::reduce::lane_sum_whole::<F32>(limits.subgroup_size).expect("built");
     if !runnable(&gpu, "workgroup-sum", &[&workgroup, &per_subgroup]) {
@@ -44,19 +29,7 @@ fn a_workgroup_reduction_crosses_between_subgroups() {
         "every invocation should hold the whole workgroup's total"
     );
 
-    // The discriminator that matters: a subgroup reduction over the same input gives a *different*
-    // answer, so this is not passing because the two happen to coincide.
-    //
-    // The **whole-subgroup** form, not `lane_sum::<F32, 32>`. A hard-coded 32 lanes is one element
-    // per invocation on a 32-wide subgroup and eight on a four-wide one, so on a narrow device that
-    // spelling read eight times this buffer — and it read a *different input* than the workgroup
-    // sum above, which is not the comparison this test claims to be making. It passed anyway,
-    // because the first 64 elements were right and the rest was off the end.
     let per_subgroup = gpu.run(&per_subgroup, &input, 1).expect("dispatched");
-    // **Whether they should differ depends on the device.** A workgroup holds
-    // `WORKGROUP_SIZE / width` subgroups, and on a 64-wide one that is exactly one — so there is
-    // nothing to cross between, and the two reductions are the same reduction. Asserting they
-    // differ would be asserting that this device is not the one it is.
     if limits.subgroup_size < WORKGROUP_SIZE {
         assert_ne!(
             output, per_subgroup,
@@ -71,7 +44,6 @@ fn a_workgroup_reduction_crosses_between_subgroups() {
     assert_eq!(output.first(), output.last(), "and it is uniform");
 }
 
-/// The same over integers, where the comparison is exact by construction.
 #[test]
 fn a_workgroup_reduction_is_exact_over_integers() {
     let Some(gpu) = device("workgroup-sum-u32") else {
@@ -93,22 +65,6 @@ fn a_workgroup_reduction_is_exact_over_integers() {
     assert_eq!(output, vec![whole; count]);
 }
 
-/// One source, every cluster size this subgroup can hold, a different answer for each.
-///
-/// # Why the sizes are a list rather than three calls
-///
-/// This test was three calls at 4, 8 and 32 lanes, ending in `assert_ne!` between each pair. Both
-/// halves of that broke on a narrow device, in opposite directions:
-///
-/// - At **four** lanes, `lane_sum::<F32, 8>` is not a cluster at all — eight is a *multiple* of
-///   four, so it strip-mines, reads twice the buffer it was given, and sums whatever was past the
-///   end.
-/// - At **four and eight** lanes, one of the sizes *is* the whole subgroup, so the discriminator
-///   asserted that a module differs from itself.
-///
-/// Collecting the sizes that this width can actually hold fixes both by construction: every entry
-/// is a real cluster, no two entries are the same size, and the count is asserted so the test
-/// cannot quietly end up with nothing to compare.
 #[test]
 fn the_lane_api_reduces_over_exactly_the_lanes_its_width_names() {
     let Some(gpu) = device("lane-sum") else {
@@ -120,17 +76,12 @@ fn the_lane_api_reduces_over_exactly_the_lanes_its_width_names() {
     let count = WORKGROUP_SIZE as usize;
     let input = ramp(count);
 
-    // Every module first, then one gate over all of them. Built before the loop because the check
-    // is about what this device can run, and a test that discovered that half way through would
-    // have already asserted on the half it ran.
     let mut built: Vec<(u32, Vec<u32>)> = Vec::new();
     for size in [2_u32, 4, 8, width] {
         if size > width || built.iter().any(|(had, _)| *had == size) {
             continue;
         }
 
-        // `LANES` is a const generic, so the sizes have to be written out. The last arm covers
-        // every width the macro in `kernels` knows, which is where the list belongs.
         let spirv = match size {
             2 => kernels::lane_sum::<F32, 2>(width),
             4 => kernels::lane_sum::<F32, 4>(width),
@@ -163,7 +114,6 @@ fn the_lane_api_reduces_over_exactly_the_lanes_its_width_names() {
         "only one cluster size was reachable at width {width}, so nothing below discriminates"
     );
 
-    // Distinct sizes must give distinct answers, or the lane count was being ignored.
     for (index, (size, output)) in runs.iter().enumerate() {
         for (other, theirs) in runs.iter().skip(index + 1) {
             assert_ne!(
@@ -175,11 +125,6 @@ fn the_lane_api_reduces_over_exactly_the_lanes_its_width_names() {
     }
 }
 
-/// A vector wider than the subgroup: each lane holds several elements, folded before the reduce.
-///
-/// The layout is the kernel's, not the caller's: workgroup `w` owns a contiguous run of
-/// `WORKGROUP_SIZE × strips` elements and strides within it. With one workgroup dispatched, that
-/// makes invocation `i` read `i` and `i + WORKGROUP_SIZE`.
 #[test]
 fn a_strip_mined_vector_reduces_over_more_elements_than_there_are_lanes() {
     let Some(gpu) = device("strip-mined") else {
@@ -207,7 +152,6 @@ fn a_strip_mined_vector_reduces_over_more_elements_than_there_are_lanes() {
 
     let output = gpu.run(&spirv, &input, 1).expect("dispatched");
 
-    // Each lane contributes both of its elements, and the subgroup reduces all of them.
     let expected: Vec<f32> = (0..count)
         .map(|lane| {
             let first = lane / width * width;
@@ -219,7 +163,6 @@ fn a_strip_mined_vector_reduces_over_more_elements_than_there_are_lanes() {
 
     assert_eq!(&output[..count], &expected[..count]);
 
-    // Discriminator: a kernel that ignored the second strip would give the plain subgroup sum.
     let one_strip_only: f32 = (0..width).map(|other| other as f32).sum();
     assert_ne!(
         output.first(),
@@ -228,10 +171,6 @@ fn a_strip_mined_vector_reduces_over_more_elements_than_there_are_lanes() {
     );
 }
 
-/// More than one workgroup, which is what the blocked layout exists for.
-///
-/// With two workgroups the second owns the run starting at `WORKGROUP_SIZE × strips`, so this is
-/// the test that would fail if the base were computed from a dispatch-wide stride instead.
 #[test]
 fn a_second_workgroup_reads_its_own_run_rather_than_the_first_ones() {
     let Some(gpu) = device("two-workgroups") else {
@@ -258,12 +197,8 @@ fn a_second_workgroup_reads_its_own_run_rather_than_the_first_ones() {
 
     let output = gpu.run(&spirv, &input, groups as u32).expect("dispatched");
 
-    // One strip, so the layout collapses to the plain global index and the reference is the same
-    // grouped sum as ever — over twice as many invocations.
     assert_eq!(output, grouped_sums(count, width));
 
-    // Discriminator: the last subgroup must differ from the first, or the second workgroup read
-    // the first one's data.
     assert_ne!(
         output.first(),
         output.last(),
@@ -271,7 +206,6 @@ fn a_second_workgroup_reads_its_own_run_rather_than_the_first_ones() {
     );
 }
 
-/// The same reduction over unsigned integers, which is a different instruction end to end.
 #[test]
 fn an_integer_reduction_uses_the_integer_instruction_and_still_adds_up() {
     let Some(gpu) = device("integer-sum") else {
@@ -307,7 +241,6 @@ fn an_integer_reduction_uses_the_integer_instruction_and_still_adds_up() {
     assert_eq!(output, expected);
 }
 
-/// `reduce_max`, whose strip fold has no core opcode and goes through compare-and-select.
 #[test]
 fn a_maximum_reduction_finds_the_largest_element_in_each_group() {
     let Some(gpu) = device("lane-max") else {
@@ -319,8 +252,6 @@ fn a_maximum_reduction_finds_the_largest_element_in_each_group() {
     let count = WORKGROUP_SIZE as usize;
     let input = ramp(count);
 
-    // Four, which is a divisor of every subgroup width a Vulkan implementation is known to report
-    // — so it is a cluster everywhere and this row runs on every device.
     let clusters_of_four = kernels::lane_max::<F32, 4>(width).expect("built");
     if !runnable(&gpu, "lane-max", &[&clusters_of_four]) {
         return;
@@ -330,8 +261,6 @@ fn a_maximum_reduction_finds_the_largest_element_in_each_group() {
     let expected: Vec<f32> = (0..count).map(|lane| (lane / 4 * 4 + 3) as f32).collect();
     assert_eq!(four, expected, "clusters of four");
 
-    // Eight is a cluster only from eight lanes up; below that the same call strip-mines and reads
-    // a buffer twice this size. See `the_lane_api_reduces_over_exactly_the_lanes_its_width_names`.
     if width >= 8 {
         let eight = gpu
             .run(
@@ -341,13 +270,11 @@ fn a_maximum_reduction_finds_the_largest_element_in_each_group() {
             )
             .expect("dispatched");
 
-        // A ramp's largest element in each group of eight is the last one.
         let expected: Vec<f32> = (0..count).map(|lane| (lane / 8 * 8 + 7) as f32).collect();
         assert_eq!(eight, expected, "clusters of eight");
     }
 }
 
-/// Elementwise work only, which should never reach a subgroup instruction.
 #[test]
 fn an_elementwise_kernel_computes_per_element_and_crosses_no_lane() {
     let Some(gpu) = device("affine") else { return };
@@ -368,7 +295,6 @@ fn an_elementwise_kernel_computes_per_element_and_crosses_no_lane() {
     assert_eq!(output, expected);
 }
 
-/// What the mapping still refuses, refused when the module is built rather than at run time.
 #[test]
 fn the_lane_api_refuses_the_lane_counts_that_have_no_mapping() {
     let Some(gpu) = device("no-mapping") else {
@@ -376,19 +302,10 @@ fn the_lane_api_refuses_the_lane_counts_that_have_no_mapping() {
     };
     let width = gpu.limits().subgroup_size;
 
-    // **Six**, and it has to be six rather than twelve. A count with no mapping must neither
-    // divide the width nor be a multiple of it, and twelve is a multiple of *four* — so on a
-    // four-wide subgroup the call this asserts must fail was a perfectly good three-strip vector.
-    // Six is coprime enough with every power of two: it divides none of them and none of them
-    // divides it, so it has no mapping at any width this can run on.
     assert!(
         kernels::lane_sum::<F32, 6>(width).is_err(),
         "6 lanes neither divide a subgroup of {width} nor are a multiple of it"
     );
-    // `MAX_STRIPS` is 8, so the count that overruns it depends on the width: 512 lanes is eight
-    // strips on a 64-wide subgroup and sixty-four on an 8-wide one. Stated as the relationship
-    // rather than as a number, because there are three widths to run on now and a fourth would
-    // break any of them written out.
     let strips = 512 / width.max(1);
     assert_eq!(
         kernels::lane_sum::<F32, 512>(width).is_ok(),
@@ -397,7 +314,6 @@ fn the_lane_api_refuses_the_lane_counts_that_have_no_mapping() {
         simdr::lanes::MAX_STRIPS
     );
 
-    // And a count past the limit at every width this can run on: 64 strips on the widest.
     assert!(
         kernels::lane_sum::<F32, 4096>(width).is_err(),
         "4096 lanes need more elements per lane than a vector holds inline, at any width"

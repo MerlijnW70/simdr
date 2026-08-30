@@ -1,24 +1,3 @@
-# Everything that can be checked without the two GPUs in the author's machine.
-#
-# Which is most of it. The emitter needs no device at all, and Mesa's lavapipe is a Vulkan
-# implementation that runs on the CPU — so `spirv-val`, the execution suite and the differential
-# fuzzer all run here, at three subgroup widths the hardware in that machine cannot report.
-#
-# What does NOT run here, and is stated rather than implied:
-#
-#   * widths 32 and 64, which need the RTX 4080 and the integrated Radeon;
-#   * the mutation gate, whose configuration is deliberately not in this repository — see
-#     `tests/integrity.rs`, whose config-dependent checks skip loudly when it is absent;
-#   * every measurement, none of which means anything on a shared runner.
-#
-# So a green run here is not the whole suite. It is the part that travels.
-#
-# **The third of those was listed here and running anyway.** `session.rs` asserted that a held
-# pipeline is three times faster than rebuilding one, which is true on all three implementations in
-# the author's machine and is two wall-clock numbers on a contended virtual machine: it came back
-# at 2.3× and failed a run whose predecessor had passed. `CI` is set here, the test reads it, and
-# the ratio is printed rather than asserted — because a check that fails for a reason unrelated to
-# the code is a check that teaches everyone to ignore red.
 name: CI
 
 on:
@@ -39,9 +18,6 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      # Denied rather than warned: the lint set in `runner/src/lib.rs` is part of the design, and
-      # a warning nobody reads is the state this project keeps finding things in. Not set for the
-      # MSRV job below, where an older compiler's warnings are not this repository's business.
       - name: formatting
         run: cargo fmt --all --check
 
@@ -50,34 +26,17 @@ jobs:
           RUSTFLAGS: -D warnings
         run: cargo clippy --workspace --all-targets
 
-      # `spirv-val` is what the emitter's own suite validates against, and it is in the distro.
       - name: install spirv-tools
         run: sudo apt-get update && sudo apt-get install -y spirv-tools
 
-      # `--nocapture` for the same reason as the device job below: a skip is printed with
-      # `eprintln!` and `libtest` swallows that from a passing test, so the skips this suite is
-      # written to report loudly were reaching nobody. `SPIRV_VAL` pointing at nothing used to be
-      # one of them — every validation in both test trees skipped over a typo — and is now a
-      # panic in `tests/common/spirv_val.rs` rather than a shrug.
       - name: emitter tests
         env:
           SPIRV_VAL: /usr/bin/spirv-val
         run: cargo test -p simdr -- --nocapture
 
-      # The paperwork checks. Four of them skip here because `noha.yaml` is not in the repository;
-      # the ones that run are the ones that need no configuration, and they are the interesting
-      # half — see `tests/integrity.rs`.
       - name: integrity
         run: cargo test --test integrity -- --nocapture
 
-      # **A broken doc link is a build failure, and nothing was making it one.** `README.md` has
-      # listed this command among the checks since before this workflow existed, and it had been
-      # failing the whole time: `broken_intra_doc_links` and `private_intra_doc_links` are warnings
-      # by default, so `cargo doc` exited zero over twelve dead links — one of them a public
-      # function whose return type could not be named.
-      #
-      # A check that is written down and not run is worse than one that is neither, because the
-      # writing down is what stops anybody adding it.
       - name: documentation
         env:
           RUSTDOCFLAGS: -D warnings
@@ -89,19 +48,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # llvmpipe's subgroup is its vector width over 32, and `minSubgroupSize` equals
-        # `maxSubgroupSize` at each setting — so the width is pinned rather than a default the
-        # driver may vary. 256 is the default and reports 8.
-        #
-        # `skips` is how many tests legitimately cannot run at that width — a kernel written for a
-        # 32-wide subgroup, a narrow type this width cannot hold. It is asserted below. See the
-        # step for why a number rather than a shrug.
-        #
-        # **One higher than the same run on a workstation**, and the difference is not a device
-        # difference: `session.rs` skips its speed *ratio* when `CI` is set, because a shared
-        # runner's wall clock is not evidence about setup cost. So these were measured here rather
-        # than assumed from a local sweep — which is how the first version of this check went red on
-        # its own first run, off by exactly that one.
         include:
           - vector: 128
             width: 4
@@ -121,13 +67,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y mesa-vulkan-drivers libvulkan1 vulkan-tools spirv-tools
 
-      # **Discovered, not assumed, and this is why.** The first version of this workflow pointed
-      # `VK_ICD_FILENAMES` at a hard-coded path and every lavapipe job died on
-      # `ERROR_INCOMPATIBLE_DRIVER` — which is what `vkCreateInstance` returns when the loader can
-      # see no ICD at all, including when the file it was told to use is not there.
-      #
-      # Failing here is deliberate. `common::device` skips loudly when no device opens, so a
-      # missing driver would leave every test below reporting green over nothing.
       - name: find the software driver
         run: |
           echo "ICDs installed:"
@@ -146,22 +85,6 @@ jobs:
       - name: which device
         run: cargo run -p simdr-cli -- list
 
-      # `--test-threads=1` is not optional at 128 or 512: lavapipe is unstable there under
-      # concurrent devices, and about 40% of parallel runs report a disagreement that does not
-      # reproduce. See README.
-      #
-      # **`--nocapture` is not cosmetic either.** `libtest` swallows `eprintln!` from a *passing*
-      # test, and a skip here is a pass — so a run that skipped every test printed exactly the
-      # summary of one that ran all of them. Every check for silent skipping made before this flag
-      # was added had been reading a channel that could not carry the answer.
-      #
-      # And the count is asserted rather than printed, because the step above already establishes
-      # the principle: it fails outright when no ICD is found, on the stated grounds that the tests
-      # would otherwise "skip and pass over nothing". That guards one way of ending up with no
-      # coverage. This guards the rest of them — a gate that starts over-skipping, a device that
-      # stops reporting a feature, a harness that quietly finds nothing to run. Adding a test that
-      # legitimately cannot run at some width means changing a number in the matrix above, in a
-      # diff somebody reads.
       - name: runner tests at subgroup ${{ matrix.width }}
         env:
           LP_NATIVE_VECTOR_WIDTH: ${{ matrix.vector }}
@@ -169,10 +92,6 @@ jobs:
         run: |
           set -o pipefail
           cargo test -p runner -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/runner.log"
-          # Occurrences rather than lines, and unanchored. `--nocapture` is what makes those two
-          # different: `libtest` writes `test <name> ... ` without a newline and only finishes the
-          # line after the body has run, so a skip's own output lands *mid-line* behind the name of
-          # the test it belongs to. The first version of this counted `^SKIPPED` and found 4 of 23.
           skipped=$(grep -o 'SKIPPED ' "$RUNNER_TEMP/runner.log" | wc -l)
           echo "$skipped tests did not run at subgroup ${{ matrix.width }}, and ${{ matrix.skips }} is what this width is written not to run"
           if [ "$skipped" -ne "${{ matrix.skips }}" ]; then
@@ -185,10 +104,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      # `rust-version` was asserted in `Cargo.toml` and never tested against anything. It said
-      # 1.97 — the version that happened to be installed — and the workspace builds on 1.88, so
-      # the claim was nine releases too conservative and nobody could have known. This is what
-      # makes it a fact rather than a number.
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.88"

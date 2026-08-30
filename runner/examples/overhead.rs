@@ -1,25 +1,7 @@
-//! Where the time goes when you ask for one answer.
-//!
-//! `examples/latency.rs` reported ~940 us per round trip against a chess engine's 199 ns, and said
-//! the number "overstates the floor" because `Gpu::run` allocates buffers and builds a pipeline on
-//! every call. That was a reasonable thing to say and it was not measured. This measures it.
-//!
-//! The method is subtraction, twice over:
-//!
-//! - The **device clock** reports what the dispatch itself cost. `Gpu::time` reads it.
-//! - The **host clock** around `Gpu::run` reports everything: allocation, pipeline creation, the
-//!   uploads, the submit, the fence, the readback.
-//! - Varying the buffer size while holding the kernel empty separates the fixed per-call cost from
-//!   the per-byte one.
-//!
-//! What is left after both subtractions is the part a persistent-resource API could remove, and
-//! that is the only honest way to say how much is on the table.
-
 use runner::Gpu;
 use runner::kernels;
 use std::time::{Duration, Instant};
 
-/// Buffer sizes in words. The kernel is empty at every one, so any difference is not the kernel.
 const SIZES: [(usize, &str); 5] = [
     (64, "256 B"),
     (16_384, "64 KB"),
@@ -28,7 +10,6 @@ const SIZES: [(usize, &str); 5] = [
     (16_777_216, "64 MB"),
 ];
 
-/// How many round trips to average.
 const TRIPS: u32 = 40;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -51,7 +32,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (words, label) in SIZES {
         let input = vec![1_u32; words];
 
-        // Warm: the first call of a module pays for pipeline compilation.
         gpu.run_u32(&empty, &input, 1)?;
 
         let started = Instant::now();
@@ -60,8 +40,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let trip = started.elapsed() / TRIPS;
 
-        // The device's own clock, for the dispatch alone. Everything else in `run` is untimed by
-        // it: the allocations, both copies, and the fence.
         let dispatch = gpu.time(&empty, &input, 1, 1)?;
         let overhead = trip.saturating_sub(dispatch);
 
@@ -79,9 +57,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    // Split the fixed cost in two. `probe_resident` allocates a device-local buffer and frees it
-    // and does nothing else — no command buffer, no submit — so it isolates `vkAllocateMemory`
-    // from the three submit-and-fence round trips `run` performs.
     println!(
         "\n{:>8} {:>16} {:>18}",
         "buffer", "allocate + free", "per run (3 of them)"
@@ -105,8 +80,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          and `run` allocates three buffers and builds a pipeline every time."
     );
 
-    // And what the same dispatch costs when the setup is amortised across many of them, which is
-    // what `Gpu::time` with a high iteration count measures.
     let input = vec![1_u32; 65_536];
     gpu.time(&empty, &input, 1, 1)?;
     let batched = gpu.time(&empty, &input, 1, 1_000)? / 1_000;
@@ -122,7 +95,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Microseconds, which is the scale everything here lands on.
 fn micros(duration: Duration) -> String {
     format!("{:.1} us", duration.as_secs_f64() * 1e6)
 }

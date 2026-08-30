@@ -1,28 +1,8 @@
-//! Does a narrow element type actually move fewer bytes per second of wall clock?
-//!
-//! `notes/NEXT.md` argued for `i8` and `i16` on the grounds that a bandwidth-bound kernel moving a
-//! quarter of the bytes should take a quarter of the time. That is an argument, not a measurement,
-//! and this is the measurement.
-//!
-//! The kernel is a clamp — one instruction per element, so the arithmetic is as close to free as
-//! this crate can make it and whatever is left is memory. The same **element count** runs at each
-//! width, which is the comparison that means something: a run that held the *byte* count fixed
-//! would be four times the work at `i8` and would prove nothing.
-//!
-//! Caveats, because a benchmark without them is a claim. One device, one run. The buffers are
-//! device-local and the timing is the device's own timestamps, so the host copies are outside it.
-//! And a clamp over 8-bit elements is not what a real kernel does with them — it is what isolates
-//! the thing being asked about.
-
 use runner::Gpu;
 use runner::kernels::{self, WORKGROUP_SIZE};
 use simdr::lanes::{Element, I8, I16, I32};
 use std::time::Duration;
 
-/// How many elements to sweep, and how many timed passes at each size.
-///
-/// Two sizes because one cannot tell work from overhead: if the small and the large dispatch cost
-/// the same, what is being measured is the launch.
 const SIZES: [(usize, u32); 2] = [(1 << 20, 50), (1 << 24, 10)];
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -34,17 +14,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let limits = gpu.limits();
     println!("{} — subgroup {}", limits.name, limits.subgroup_size);
 
-    // **Written for a subgroup of 32 or 64, and it now says so instead of failing.** The whole
-    // measurement is about strip mining: `Simd<i8, 128>` is four strips at width 32 and *sixteen*
-    // at width 8, which the lane API refuses by name — `TooManyStrips { strips: 16, limit: 8 }`.
-    //
-    // A narrower device could be handed a narrower vector, and then the row labelled "four strips"
-    // would not be four strips. So the honest answer is a refusal rather than a smaller number,
-    // which is the same argument `Domain::exact_limit` makes about a half leaving its range.
-    //
-    // Printed as `SKIPPED` and exited cleanly, which is the shape the test harness already uses for
-    // "cannot run here" and what `nightly.yml` counts. Ahead of the narrow-feature gate below so
-    // that a device reporting a small subgroup declines for one reason rather than two.
     if limits.subgroup_size < 32 {
         println!(
             "SKIPPED narrow: four i8 strips need a subgroup of at least 32 and this device              reports {}. The comparison is about strip mining, and sixteen strips is a refusal              rather than a smaller number.",
@@ -70,7 +39,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Time the same clamp over the same element count at three widths.
 fn measure(gpu: &Gpu, elements: usize, iterations: u32) -> Result<(), Box<dyn std::error::Error>> {
     let width = gpu.limits().subgroup_size;
 
@@ -80,11 +48,6 @@ fn measure(gpu: &Gpu, elements: usize, iterations: u32) -> Result<(), Box<dyn st
         "element", "per pass", "bytes in", "GB/s", "vs i32"
     );
 
-    // Timed first and printed second, so the last column can be a ratio against `i32` rather
-    // than against whichever row happened to come first.
-    // The strip count is a free parameter and it turns out to matter more than the width does: an
-    // `i8` invocation holding one element loads a single byte, and one holding four loads a word.
-    // Both rows read the same buffer and compute the same answer.
     let mut rows: Vec<(&str, Duration, usize)> = Vec::new();
     for (label, spirv, stride, strips) in [
         (
@@ -119,13 +82,9 @@ fn measure(gpu: &Gpu, elements: usize, iterations: u32) -> Result<(), Box<dyn st
         ),
     ] {
         let bytes = elements * stride as usize;
-        // The buffer is words whatever the element width is; the kernel reads it at its own
-        // stride, and this is how many words that many elements occupy.
         let input = vec![0x0102_0304_u32; bytes.div_ceil(4)];
-        // Fewer invocations when each holds more elements, so every row covers the same elements.
         let workgroups = u32::try_from(elements / (WORKGROUP_SIZE as usize * strips))?;
 
-        // One untimed pass, so the driver's lazy pipeline work stays out of the measurement.
         gpu.time(&spirv, &input, workgroups, 1)?;
         let per_pass = gpu.time(&spirv, &input, workgroups, iterations)? / iterations;
         rows.push((label, per_pass, bytes));
@@ -133,7 +92,6 @@ fn measure(gpu: &Gpu, elements: usize, iterations: u32) -> Result<(), Box<dyn st
 
     let widest = rows.last().map(|row| row.1);
     for (label, per_pass, bytes) in &rows {
-        // Read once and written once, so twice the buffer.
         let rate = (bytes * 2) as f64 / per_pass.as_secs_f64() / 1e9;
         let against = widest.map_or_else(
             || String::from("—"),
@@ -152,12 +110,10 @@ fn measure(gpu: &Gpu, elements: usize, iterations: u32) -> Result<(), Box<dyn st
     Ok(())
 }
 
-/// Microseconds, which is the scale these land on.
 fn format_duration(duration: Duration) -> String {
     format!("{:.0} us", duration.as_secs_f64() * 1e6)
 }
 
-/// A count with separators, because eight-digit numbers are unreadable without them.
 fn thousands(value: usize) -> String {
     let digits = value.to_string();
     let mut out = String::new();

@@ -1,23 +1,5 @@
-//! What is encoded comes back out.
-//!
-//! `encode` writes instructions into a word stream and `decode` reads them back. Every other test
-//! uses `decode` to *inspect* what the emitter produced, which means every one of them rests on
-//! the two agreeing — and nothing said they do. A decoder that mis-parsed word counts in some
-//! shape would make a whole file of assertions read the wrong operands and pass.
-//!
-//! This is the property that closes it: over generated instructions of every shape the encoder
-//! accepts, `decode(encode(x)) == x`. Generated rather than listed, because the interesting cases
-//! are the ones nobody thinks to list — an instruction with no operands, one with exactly enough
-//! to hit a word-count boundary, a string whose length is a multiple of four.
-//!
-//! No device and no validator. This is the layer below both.
-
 use simdr::{decode, encode};
 
-/// The same small deterministic generator the fuzzer uses.
-///
-/// Copied rather than shared: `runner` is where the fuzzer lives and the emitter must not depend
-/// on it. Four lines is a cheaper price than an inverted dependency.
 struct Rng(u64);
 
 impl Rng {
@@ -34,14 +16,9 @@ impl Rng {
     }
 }
 
-/// One generated instruction: an opcode and its operands.
 fn instruction(rng: &mut Rng) -> (u16, Vec<u32>) {
-    // Opcodes this crate actually emits run to about 350; going past that costs nothing and
-    // reaches the top of the 16-bit field.
     let opcode = rng.below(0xFFFF) as u16;
 
-    // Zero operands is a real shape — `OpReturn`, `OpFunctionEnd` — and is exactly the one an
-    // off-by-one in the word count would break.
     let count = rng.below(24) as usize;
     let operands = (0..count).map(|_| rng.next() as u32).collect();
 
@@ -72,8 +49,6 @@ fn every_generated_instruction_reads_back_the_way_it_was_written() {
 
 #[test]
 fn a_stream_of_many_instructions_reads_back_in_order() {
-    // One at a time proves the encoding; a stream proves the *walk* — a word count that is right
-    // for the instruction and wrong for the advance shows up only here.
     let mut rng = Rng(1);
     let written: Vec<(u16, Vec<u32>)> = (0..256).map(|_| instruction(&mut rng)).collect();
 
@@ -91,9 +66,6 @@ fn a_stream_of_many_instructions_reads_back_in_order() {
 
 #[test]
 fn a_literal_string_occupies_exactly_the_words_it_claims_to() {
-    // `literal_string_words` is arithmetic a caller sizes a buffer with, and the multiple-of-four
-    // case is the one that is easy to get wrong: the NUL terminator is part of the literal rather
-    // than padding that may be elided, so four bytes still need two words.
     for text in [
         "",
         "a",
@@ -115,7 +87,6 @@ fn a_literal_string_occupies_exactly_the_words_it_claims_to() {
             "{text:?} was sized wrongly"
         );
 
-        // And the bytes are there, terminated. Reading them back is what a disassembler would do.
         let bytes: Vec<u8> = operands
             .iter()
             .flat_map(|word| word.to_le_bytes())
@@ -135,8 +106,6 @@ fn a_literal_string_occupies_exactly_the_words_it_claims_to() {
 
 #[test]
 fn a_truncated_stream_stops_rather_than_reading_past_the_end() {
-    // `decode` reads bytes that may not be ours. Every way it can be handed a short stream must
-    // end the walk, not panic and not read on.
     let mut words = Vec::new();
     encode::instruction(&mut words, 21, &[32, 0]).expect("fits");
 
@@ -149,9 +118,6 @@ fn a_truncated_stream_stops_rather_than_reading_past_the_end() {
 
 #[test]
 fn an_instruction_too_long_to_encode_is_refused_rather_than_truncated() {
-    // The word count is a 16-bit field. An instruction that does not fit is a caller error with a
-    // name, and the stream is left as it was — a half-written instruction would corrupt every
-    // instruction after it.
     let mut words = vec![0xDEAD_BEEF];
     let operands = vec![0_u32; 0x1_0000];
 

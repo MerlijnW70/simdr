@@ -1,26 +1,7 @@
-//! What holding a reduction's pipelines is worth.
-//!
-//! `runner/examples/specialize.rs` measured a pipeline at ~485 µs against a dispatch at ~0.8 µs,
-//! and `Gpu::sum` builds one per fold on every call. This is the other side of that number: the
-//! same reduction, asked repeatedly, with the pipelines built once instead of every time.
-//!
-//! Both columns do identical work on the device — the same modules, the same dispatch counts, the
-//! same host copies. The only difference is what is rebuilt between calls.
-//!
-//! Caveats, because a benchmark without them is a claim. One device, one run. The host copy is
-//! included in both and is the same in both. And a reduction is a chain of a dozen dispatches, so
-//! this is a larger saving than a single-kernel caller would see — `Session` is the number for
-//! that, and it is in the README.
-
 use runner::reduction::dispatches_for;
 use runner::{Gpu, Timing};
 use std::time::{Duration, Instant};
 
-/// Element counts to measure at, and how many reductions to time at each.
-///
-/// Two sizes because one cannot separate setup from work: if the small and the large case save the
-/// same absolute time, what was removed is per-call rather than per-element — which is exactly the
-/// claim being made, so it should be visible.
 const SIZES: [(usize, u32); 2] = [(1 << 13, 40), (1 << 20, 10)];
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -39,15 +20,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "elements", "folds", "Gpu::sum", "Reducer::sum", "faster"
     );
 
-    // The largest size's held time, kept so the breakdown below reports shares of a number this
-    // run measured rather than one written down from a previous one.
     let mut largest_held = Duration::ZERO;
 
     for (elements, repeats) in SIZES {
         let input: Vec<f32> = (0..elements).map(|index| (index % 16) as f32).collect();
         let expected: f32 = input.iter().sum();
 
-        // Warm both paths, so neither pays for the driver's first compile of these modules.
         gpu.sum(&input)?;
         let mut reducer = gpu.reducer(elements)?;
         reducer.sum(&input)?;
@@ -88,23 +66,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// What not crossing the bus twice is worth.
-///
-/// The breakdown above says the host upload and download are most of what a held reduction still
-/// costs, and that no device-side change touches them. This is the change that does: Σ x² as one
-/// chain instead of three host crossings.
-///
-/// Both columns compute the same number and `runner/tests/reducer.rs` asserts they agree, so what
-/// is being timed is only where the intermediate went.
-///
-/// # The left column is given every advantage
-///
-/// It would be easy — and wrong — to write it as `gpu.run(&square, …)`, which allocates three
-/// buffers and builds a pipeline on every call. That is ~900 µs of setup this file has already
-/// measured, and charging it to the old route would make the new one look two to three times
-/// better than it is. So the map runs through a held [`Session`] and the reduction through a held
-/// `Reducer`: nothing is allocated or built in either column, and the only difference left is that
-/// one of them carries the intermediate across the bus and back.
 fn mapped(gpu: &Gpu) -> Result<(), Box<dyn std::error::Error>> {
     let width = gpu.limits().subgroup_size;
     let square = runner::kernels::square(width)?;
@@ -116,11 +77,6 @@ fn mapped(gpu: &Gpu) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     for (elements, repeats) in SIZES {
-        // **Values of 0, 1 and 2, and both halves of that matter.** Σ x² has to stay inside the
-        // 2²⁴ an `f32` counts exactly or the comparison below is a tolerance wearing an equals
-        // sign — 0..7 over 2²⁰ elements sums to 18.3 million and does not, which is how this
-        // assertion earned its place by failing. And 2 has to be in there: x² and x agree on 0 and
-        // 1, so a map that had stopped squaring would go unnoticed without it.
         let input: Vec<f32> = (0..elements).map(|index| (index % 3) as f32).collect();
         let expected: f32 = input.iter().map(|value| value * value).sum();
         let groups = elements as u32 / runner::kernels::WORKGROUP_SIZE;
@@ -128,11 +84,9 @@ fn mapped(gpu: &Gpu) -> Result<(), Box<dyn std::error::Error>> {
         let mut plain = gpu.reducer(elements)?;
         let mut fused = gpu.reducer_of(elements, &square)?;
 
-        // The map, held: no allocation and no pipeline creation inside the timed loop.
         let mut mapping = gpu.session(&square, &[elements, elements])?;
         let words: Vec<u32> = input.iter().map(|value| value.to_bits()).collect();
 
-        // Warm every path, so none pays for the driver's first compile of these modules.
         mapping.write(0, &words)?;
         mapping.dispatch(groups, 1)?;
         mapping.read(1, elements)?;
@@ -141,8 +95,6 @@ fn mapped(gpu: &Gpu) -> Result<(), Box<dyn std::error::Error>> {
 
         let started = Instant::now();
         for _ in 0..repeats {
-            // The best a caller can do today: send the input, run the map, bring the squares
-            // home, send them back to be reduced.
             mapping.write(0, &words)?;
             mapping.dispatch(groups, 1)?;
             let squares: Vec<f32> = mapping
@@ -181,56 +133,9 @@ fn mapped(gpu: &Gpu) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Where a held reduction's remaining time actually goes.
-///
-/// `notes/NEXT.md` asked twice about this half of the call — first whether the between-pass copies
-/// dominated it (they did not; they were a fifth) and then whether the barriers around those copies
-/// did (they were two thirds of the fifth). The copies are gone now, replaced by a ping-pong across
-/// two descriptor sets, and one barrier per pass is what is left.
-///
-/// Each row is a *difference between two calls that differ in one thing*, rather than a subtraction
-/// from an estimate:
-///
-/// - **chained step** — a chain of empty kernels at [`LONG`] passes against the same chain at one.
-///   Both do nothing else, so the difference is one dispatch and the barrier before it. **Read this
-///   row as an upper bound**: a chain of empty kernels has nothing for a barrier to overlap with,
-///   and when ten of these were removed from the reduction the call moved by about a quarter of
-///   what this row predicted.
-/// - **host upload / download** — `Session::write` and `Session::read` on a session that is already
-///   built, so no allocation and no pipeline creation is in the number.
-/// - **the `f32` copy** and **one submission** — added because the rows above accounted for only
-///   about half the call and the rest was going somewhere unnamed. See below.
-///
-/// # The rows that were missing, and why a breakdown has to add up
-///
-/// With three rows this table came to roughly *half* of the `Reducer::sum` it was breaking down,
-/// and that gap went unremarked through three separate optimisations. A breakdown whose rows do not
-/// approach the whole is not a breakdown; it is a list of things that were easy to measure.
-///
-/// The two that were missing are both things the *measurement* skipped rather than the call:
-///
-/// - `Reducer::sum` takes `&[f32]` and the buffer holds words, so it builds a `Vec<u32>` of the
-///   whole input on every call. The upload row hoisted that conversion out of its timed loop —
-///   measuring a cost the real call does not have, and missing one it does.
-/// - The step row is a *difference* between two chains, so every fixed cost of submitting at all
-///   cancels out of it. One submission and its fence is paid once per call and appeared nowhere.
-///
-/// `whole` is what `Reducer::sum` took at the same size in the table above, so the shares are
-/// against a number measured in this run rather than one copied from a previous one.
-///
-/// # Why the long chain
-///
-/// The step row is a difference between two ~2 ms numbers. At 15 passes that difference is about a
-/// tenth of either, and the repeats are about a tenth apart — so signal and noise were the same
-/// size, and two runs of this file once reported 188 us and 337 us for the same quantity.
-///
-/// [`LONG`] makes the difference roughly half of the measurement instead of a tenth, which is the
-/// whole fix: the repeats are no steadier, they just no longer swamp what is being measured. Both
-/// spreads are printed so a reader can check that rather than take it on trust.
 fn breakdown(gpu: &Gpu, whole: Duration) -> Result<(), Box<dyn std::error::Error>> {
     const ELEMENTS: usize = 1 << 20;
     const REPEATS: usize = 20;
-    /// Passes in the long chain, and therefore `LONG - 1` barriers.
     const LONG: usize = 61;
 
     let megabytes = (ELEMENTS * size_of::<u32>()) as f64 / 1e6;
@@ -259,9 +164,6 @@ fn breakdown(gpu: &Gpu, whole: Duration) -> Result<(), Box<dyn std::error::Error
         chained.get(1).ok_or("no long chain")?,
     );
     let each = long.median.saturating_sub(short.median) / (LONG as u32 - 1);
-    // As many as this reduction actually chains, asked of the planner rather than written down.
-    // It was a literal 14 — right while the folds halved, and wrong the moment they stopped: the
-    // same reduction is five dispatches now, and the row would have gone on charging for fifteen.
     let steps = (runner::reduction::dispatches_for(ELEMENTS) - 1) as u32;
     let chained = each * steps;
 
@@ -284,7 +186,6 @@ fn breakdown(gpu: &Gpu, whole: Duration) -> Result<(), Box<dyn std::error::Error
     );
     println!();
 
-    // The host copies, on a session that is already built.
     let mut session = gpu.session(&empty, &[ELEMENTS, ELEMENTS])?;
     session.write(0, &input)?;
     session.read(1, ELEMENTS)?;
@@ -301,12 +202,6 @@ fn breakdown(gpu: &Gpu, whole: Duration) -> Result<(), Box<dyn std::error::Error
     }
     let whole_download = started.elapsed() / REPEATS as u32;
 
-    // What a reduction brings home is one `f32`, and it no longer costs a row of its own: the copy
-    // is recorded inside the chain's submission and the host read is four bytes out of a mapping
-    // already open. It used to be the row above — the same buffer, for the same one number.
-
-    // The `Vec<u32>` `Reducer::sum` builds from its `&[f32]` on every call. Pure host work: a
-    // four-megabyte allocation and a copy, to reinterpret bits that are already the right bits.
     let floats: Vec<f32> = input.iter().map(|_| 1.0).collect();
     let started = Instant::now();
     for _ in 0..REPEATS {
@@ -315,20 +210,12 @@ fn breakdown(gpu: &Gpu, whole: Duration) -> Result<(), Box<dyn std::error::Error
     }
     let conversion = started.elapsed() / REPEATS as u32;
 
-    // The same write with one word in it. `Buffer::write` maps the memory, copies, and unmaps on
-    // every call, and a one-word write pays all of that and almost none of the copy — so the
-    // difference between this and the row above is the four megabytes, and this is everything
-    // else. Which of the two is larger decides whether the upload is worth attacking by mapping
-    // once and keeping it, or only by not copying at all.
     let started = Instant::now();
     for _ in 0..REPEATS {
         session.write(0, &[0_u32])?;
     }
     let mapping = started.elapsed() / REPEATS as u32;
 
-    // One submission and the fence it waits on, with nothing in it. Every chain pays this once,
-    // and the step row above cannot see it: that row is a *difference* between two chains, so
-    // anything paid once per call cancels out of it exactly.
     let started = Instant::now();
     for _ in 0..REPEATS {
         session.dispatch(1, 1)?;
@@ -342,12 +229,6 @@ fn breakdown(gpu: &Gpu, whole: Duration) -> Result<(), Box<dyn std::error::Error
         "share",
         micros(whole)
     );
-    // The input's four megabytes on their own: the whole write minus a one-word write, which pays
-    // the same fixed costs and almost none of the copying. Both writes take whichever route the
-    // device offers — straight into the binding where it is host-writable, through staging and a
-    // copy where it is not — so this row follows the code rather than describing the old shape of
-    // it. Where the direct route is taken there is no submission left in either term, and what is
-    // left is the memcpy itself.
     let payload = upload.saturating_sub(mapping);
     let accounted = chained + payload + submission;
 
@@ -370,7 +251,7 @@ fn breakdown(gpu: &Gpu, whole: Duration) -> Result<(), Box<dyn std::error::Error
          and removing the second barrier turned out to save about 2 us rather than half of 19.\n\
          Paired against the old build on the same machine: no measurable difference on the 4080\n\
          or on lavapipe, and 5.5% on the integrated Radeon, where bandwidth is scarce enough for\n\
-         4 MB of copying to show. notes/FINDINGS.md has the runs.\n\n\
+         4 MB of copying to show.\n\n\
        \x20 Shares are against the `Reducer::sum` time in the table above, same run, same device.\n\
          The bracketed rows are costs this call used to pay and no longer does: two of its three\n\
          submissions, now recorded inside the chain's own command buffer; the whole buffer copied\n\
@@ -389,12 +270,10 @@ fn breakdown(gpu: &Gpu, whole: Duration) -> Result<(), Box<dyn std::error::Error
 
     Ok(())
 }
-/// Microseconds, which is the scale these land on.
 fn micros(duration: Duration) -> String {
     format!("{:.1} us", duration.as_secs_f64() * 1e6)
 }
 
-/// A count with separators, because eight-digit numbers are unreadable without them.
 fn thousands(value: usize) -> String {
     let digits = value.to_string();
     let mut out = String::new();
@@ -407,16 +286,6 @@ fn thousands(value: usize) -> String {
     out
 }
 
-/// The same question asked of the chain itself, with a timestamp between every pass.
-///
-/// **Everything above is probes.** Each row is timed on its own — a chain of empty kernels for the
-/// step cost, a bare submit-and-wait for the submission, a `Session` write for the upload — and
-/// each pays fixed costs the real call pays once between them all. They come to more than the
-/// whole, and the table says so.
-///
-/// This is the call. `Reducer::sum_timed` writes a timestamp into the command buffer after every
-/// dispatch, so pass `i` is measured beside the passes it actually runs beside. Nothing is
-/// reconstructed and nothing is subtracted.
 fn measured_in_place(gpu: &Gpu) -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "
@@ -425,14 +294,12 @@ the same reduction, timed from inside its own command buffer:
 "
     );
 
-    // The larger of the two sizes above, which is where a chain has enough passes to divide.
     let Some(&(elements, _)) = SIZES.last() else {
         return Ok(());
     };
     let mut reducer = gpu.reducer(elements)?;
     let input = vec![1.0_f32; elements];
 
-    // Once to warm the driver, then the run that is reported.
     reducer.sum_timed(&input)?;
     let (reduction, spans) = reducer.sum_timed(&input)?;
 

@@ -1,85 +1,16 @@
-//! Votes over a predicate — what `Mask::any`, `Mask::all` and a ballot become.
-//!
-//! A [`Predicate`] is one boolean per element. Asking a question *about* the whole predicate
-//! crosses lanes, so unlike the comparison that produced it, these cost an instruction.
-//!
-//! # What a strip-mined vote means
-//!
-//! With one element per lane, `any` is one `OpGroupNonUniformAny` and that is the whole answer.
-//! With several, each strip has its own vote and they have to be combined — this folds them with
-//! a logical or (for `any`) or and (for `all`), which is the only reading that matches what
-//! `Mask::any` means for a `Simd` of that width.
-//!
-//! # Scope
-//!
-//! Every vote here is over the **subgroup**, and for a clustered mapping that is wider than the
-//! vector. `Simd<f32, 8>` on a 32-lane subgroup has four vectors sharing the hardware, and
-//! `OpGroupNonUniformAny` has no clustered form — so a vote would answer for all four at once.
-//! [`Lanes::any`] refuses that rather than returning a plausible wrong answer.
-
 use super::{Element, LaneError, Lanes, Mapping, Predicate, Vector};
 use crate::module::Id;
 use crate::spec::Capability;
 
 impl Lanes<'_> {
-    /// True in every lane when the predicate holds in *any* element — `Mask::any`.
-    ///
-    /// # Errors
-    ///
-    /// [`LaneError::NoSuchForm`] for a clustered mapping, where the vote would span vectors that
-    /// are not this one. Otherwise [`LaneError::Build`].
     pub fn any<const LANES: u32>(&mut self, predicate: Predicate<LANES>) -> Result<Id, LaneError> {
         self.vote::<LANES>("any", predicate, Combine::Or)
     }
 
-    /// True in every lane when the predicate holds in *every* element — `Mask::all`.
-    ///
-    /// # Errors
-    ///
-    /// As [`Lanes::any`].
     pub fn all<const LANES: u32>(&mut self, predicate: Predicate<LANES>) -> Result<Id, LaneError> {
         self.vote::<LANES>("all", predicate, Combine::And)
     }
 
-    /// True in every lane when every lane holds the **same value** — the vote about a value
-    /// rather than about a predicate.
-    ///
-    /// `any` and `all` ask whether a comparison held somewhere or everywhere; this asks whether
-    /// the lanes agree, which no comparison can express: the value each lane would compare
-    /// against is the one it is trying to learn.
-    ///
-    /// **What it is for is the branch.** `decisions/DR-0003` refuses a branch on anything but a
-    /// [`super::Uniform`], and until now the only way to obtain one was to vote on a predicate.
-    /// This is the instruction that says a *value* is uniform — the fast path a kernel takes when
-    /// its whole subgroup wants the same row, the same bucket, the same weight — so
-    /// [`Lanes::all_equal_uniform`] hands the answer straight to `if_uniform`.
-    ///
-    /// `OpGroupNonUniformAllEqual` had been in this crate since the atomics landed, with no
-    /// caller, no test and no validator ever pointed at it. An audit of the public surface found
-    /// it, which is the second time that audit has found an operation nothing could reach.
-    ///
-    /// # Errors
-    ///
-    /// [`LaneError::NoSuchForm`] for a clustered mapping, where the vote would answer for every
-    /// vector sharing the subgroup. Otherwise [`LaneError::Build`].
-    ///
-    /// # A strip-mined vector is two questions, not one folded vote
-    ///
-    /// `any` and `all` fold their strips with a logical or and and, and that is exactly right
-    /// because each strip's vote is already the whole answer *for that strip*. Agreement is not
-    /// like that: four strips each internally uniform can still hold four different values, and
-    /// `OpGroupNonUniformAllEqual` never compares one strip against another. Folding would return
-    /// `true` for a vector whose elements differ — a wrong answer rather than a missing one, which
-    /// is why this refused the mapping by name until there was something better to do.
-    ///
-    /// What it takes is both halves:
-    ///
-    /// * every lane holds the same **strip 0** — one `AllEqual`, and
-    /// * in every lane, every other strip equals strip 0 — `strips - 1` elementwise comparisons
-    ///   folded with `and`, then one `All` over the subgroup.
-    ///
-    /// Together those say every element of the vector is the same value, and neither says it
-    /// alone. The second is what [`Lanes::equal`] was added for.
     pub fn all_equal<T: Element, const LANES: u32>(
         &mut self,
         vector: Vector<T, LANES>,
@@ -103,8 +34,6 @@ impl Lanes<'_> {
         let first = strips.first().copied().ok_or(LaneError::no_strips())?;
         let lanes_agree = self.module().subgroup_all_equal(boolean, scope, first)?;
 
-        // Every strip against strip 0, within the lane. Nothing to ask when there is one strip,
-        // and that is the whole-subgroup case: one instruction, exactly as before.
         let mut same_here: Option<Id> = None;
         for &strip in strips.iter().skip(1) {
             let matched = self.module().binary(T::EQUAL, boolean, strip, first)?;
@@ -123,18 +52,6 @@ impl Lanes<'_> {
             .logical_and(boolean, lanes_agree, strips_agree)?)
     }
 
-    /// The predicate's first strip gathered into a bitmask, one bit per lane.
-    ///
-    /// A four-component vector of `u32`, which is 128 bits — enough for the widest subgroup any
-    /// implementation reports. This is the raw `Mask` a caller inspects when the boolean answers
-    /// above are not enough.
-    ///
-    /// Only the first strip: a ballot is per *lane*, and a strip-mined vector has more elements
-    /// than lanes, so there is no single mask that describes it.
-    ///
-    /// # Errors
-    ///
-    /// [`LaneError::NoSuchForm`] when the vector is strip-mined, otherwise [`LaneError::Build`].
     pub fn ballot<const LANES: u32>(
         &mut self,
         predicate: Predicate<LANES>,
@@ -163,7 +80,6 @@ impl Lanes<'_> {
         Ok(self.module().subgroup_ballot(mask, scope, first)?)
     }
 
-    /// One vote per strip, folded together.
     fn vote<const LANES: u32>(
         &mut self,
         name: &'static str,
@@ -204,7 +120,6 @@ impl Lanes<'_> {
     }
 }
 
-/// How the per-strip votes are folded into one, for the votes that can be folded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Combine {
     Or,
@@ -213,7 +128,6 @@ enum Combine {
 
 #[cfg(test)]
 mod tests {
-    // A test may panic — that is how it reports.
     #![allow(clippy::expect_used, clippy::indexing_slicing)]
 
     use super::*;
@@ -227,7 +141,6 @@ mod tests {
             .count()
     }
 
-    /// A predicate over `LANES`, built from a comparison so the strips are real.
     fn predicate<const LANES: u32>(lanes: &mut Lanes<'_>) -> Predicate<LANES> {
         let zero = lanes
             .splat_bits::<F32, LANES>(0.0_f32.to_bits())
@@ -240,8 +153,6 @@ mod tests {
 
     #[test]
     fn a_vote_on_a_value_is_one_instruction_and_asks_no_predicate() {
-        // The third vote. `any` and `all` take a comparison; this takes the vector, because the
-        // question is whether the lanes agree and no lane knows what to compare against.
         let mut module = Module::new(Version::V1_3);
         let mut lanes = Lanes::new(&mut module, 32).expect("built");
         let value = lanes
@@ -285,10 +196,6 @@ mod tests {
 
     #[test]
     fn a_strip_mined_vote_on_a_value_asks_both_halves_of_the_question() {
-        // Four strips: one `AllEqual` for "every lane holds the same strip 0", three comparisons
-        // folded with `and` for "every strip equals strip 0 in my lane", and one `All` to put that
-        // to the subgroup. A version that folded four `AllEqual`s would emit four of them and no
-        // comparison at all — and would answer `true` for a vector whose strips differ.
         let mut module = Module::new(Version::V1_3);
         let mut lanes = Lanes::new(&mut module, 32).expect("built");
         let wide = lanes
@@ -318,8 +225,6 @@ mod tests {
 
     #[test]
     fn a_whole_subgroup_vote_on_a_value_stays_one_instruction() {
-        // The strip-mined form is built out of the same call, so this is what says the extra
-        // machinery costs nothing where there is nothing to ask.
         let mut module = Module::new(Version::V1_3);
         let mut lanes = Lanes::new(&mut module, 32).expect("built");
         let value = lanes
@@ -337,8 +242,6 @@ mod tests {
 
     #[test]
     fn a_vote_on_a_value_refuses_the_one_mapping_it_would_answer_wrongly_for() {
-        // Clusters, for the reason every vote refuses them: the answer would cover all four
-        // vectors sharing the subgroup rather than this one.
         let mut module = Module::new(Version::V1_3);
         let mut lanes = Lanes::new(&mut module, 32).expect("built");
         let narrow = lanes.splat_bits::<F32, 8>(0).expect("splat");
@@ -352,8 +255,6 @@ mod tests {
             })
         ));
 
-        // The strip-mined one is *built* now, and the two halves above are why it took an
-        // elementwise equality to build it.
         assert!(lanes.all_equal(wide).is_ok());
     }
 
@@ -423,9 +324,6 @@ mod tests {
 
         let words = module.finish();
 
-        // Follow the ballot's own result type rather than the first declaration of each kind:
-        // `Lanes::new` already declares an unsigned integer for the scope constant, so looking
-        // at "the first `OpTypeInt`" would find that one and say nothing about this instruction.
         let ballot = decode::body(&words)
             .find(|instruction| instruction.opcode() == op::GROUP_NON_UNIFORM_BALLOT)
             .expect("a ballot was emitted")
@@ -435,14 +333,11 @@ mod tests {
         let vector = declaration(&words, op::TYPE_VECTOR, ballot[0]);
         assert_eq!(vector[2], 4, "four components");
 
-        // And they are unsigned: `OpGroupNonUniformBallot`'s result is a vector of four 32-bit
-        // *unsigned* integers, and a signed component type is a different type and the wrong one.
         let component = declaration(&words, op::TYPE_INT, vector[1]);
         assert_eq!(component[1], 32);
         assert_eq!(component[2], 0, "unsigned");
     }
 
-    /// The operands of the `opcode` instruction whose result id is `id`.
     fn declaration(words: &[u32], opcode: u16, id: u32) -> Vec<u32> {
         decode::body(words)
             .filter(|instruction| instruction.opcode() == opcode)

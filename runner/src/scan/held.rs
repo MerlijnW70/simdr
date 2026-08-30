@@ -1,17 +1,3 @@
-//! The scan that owns its pipelines and its buffers, and runs them in one submission.
-//!
-//! Excused from the mutation gate as FFI, so everything it decides lives next door where the gate
-//! can reach it: [`super::plan`] has how many levels a length needs, and [`super::passes`] has
-//! which module each dispatch runs over which buffers. What is left here is allocation, descriptor
-//! sets, and the submission — the parts that are genuinely Vulkan.
-//!
-//! `passes` moved out on the day this file was audited at 651 lines: the wiring is the most
-//! intricate addressing in the crate, it had no test that did not need a device, and none of it was
-//! `unsafe`. **A file is excused for containing `unsafe`, not for being near it.**
-//!
-//! Every pass reads what an earlier one wrote, and `Gpu::replay` puts a barrier between them, so
-//! the whole thing is one command buffer and one fence however deep it goes.
-
 use super::passes::{self, Ends, Modules, Slots};
 use super::plan::{self, Level};
 use crate::buffer::Buffer;
@@ -21,61 +7,21 @@ use crate::{Error, Gpu};
 use simdr::lanes::F32;
 use std::time::Duration;
 
-/// A prefix sum over a fixed number of elements, with its pipelines already built.
 pub struct Scanner<'gpu> {
     gpu: &'gpu Gpu,
-    /// How many elements this was built for. A different count needs a different `Scanner`.
     elements: usize,
-    /// The host's way in and out.
-    ///
-    /// `Option` because [`Buffer::destroy`] consumes the buffer and `Drop` has only `&mut self`.
     staging: Option<Buffer>,
-    /// Every device buffer, destroyed in reverse order of creation.
-    ///
-    /// Held as one list rather than named fields because how many there are depends on how many
-    /// levels the length needs, and a field per level is not a thing Rust has.
     buffers: Vec<Buffer>,
-    /// Which buffer the answer ends up in.
     answer: usize,
-    /// One per dispatch, in order.
     pipelines: Vec<Pipeline>,
-    /// How many workgroups each dispatch runs, in the same order.
     workgroups: Vec<u32>,
 }
 
 impl Gpu {
-    /// Build every pipeline a scan over `elements` needs, and hold them.
-    ///
-    /// `elements` must be a whole number of [`crate::kernels::WORKGROUP_SIZE`] and at least one of them.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::BadLength`] if `elements` is not a shape this can scan, [`Error::Emit`] if a
-    /// kernel cannot be built, otherwise as [`Gpu::run`].
     pub fn scanner<'gpu>(&'gpu self, elements: usize) -> Result<Scanner<'gpu>, Error> {
         self.build_scanner(elements, None)
     }
 
-    /// The same, with one elementwise pass of `map` run over the input first.
-    ///
-    /// **What removes a crossing of the bus.** The running total of f(x) over data the caller
-    /// cannot reach otherwise costs three host crossings: send the input, run `f`, bring the
-    /// result home, send it back, scan. Two of those are the whole buffer.
-    ///
-    /// Here `map` is the first pass of the same chain — its output never leaves the device, and
-    /// the first block scan reads it where the input would have been. The same trade
-    /// [`Gpu::reducer_of`] makes, which `runner/examples/reducer.rs` measures at 3.7× for a
-    /// reduction over 2²⁰.
-    ///
-    /// `map` must be a two-binding kernel built for [`crate::kernels::WORKGROUP_SIZE`] invocations, reading
-    /// binding 0 and writing binding 1, and it must write **every** element the first scan reads.
-    /// `elements / WORKGROUP_SIZE` workgroups of it are dispatched, worked out here rather than
-    /// taken as an argument so the count cannot disagree with the length the levels were built
-    /// for.
-    ///
-    /// # Errors
-    ///
-    /// As [`Gpu::scanner`].
     pub fn scanner_of<'gpu>(
         &'gpu self,
         elements: usize,
@@ -84,7 +30,6 @@ impl Gpu {
         self.build_scanner(elements, Some(map))
     }
 
-    /// The construction both of them share.
     fn build_scanner<'gpu>(
         &'gpu self,
         elements: usize,
@@ -93,7 +38,6 @@ impl Gpu {
         let levels = plan::levels(elements)?;
         let width = self.limits().subgroup_size;
 
-        // Every module first, so a kernel that will not build fails before anything is allocated.
         let blocks = kernels::scan::scan_blocks::<F32>(width).map_err(Error::Emit)?;
         let blocks_exclusive =
             kernels::scan::scan_blocks_exclusive::<F32>(width).map_err(Error::Emit)?;
@@ -116,14 +60,10 @@ impl Gpu {
                 workgroups: Vec::new(),
             };
 
-            // The input is the one buffer the host writes, so it is the one worth asking to be
-            // reachable from both sides — see `Buffer::shared`.
             let input = match held.shared(bytes) {
                 Ok(index) => index,
                 Err(error) => return Err(held.fail(error)),
             };
-            // Where the map writes, and where the first block scan then reads. Only allocated
-            // when there is a map: a scanner without one would hold a buffer nothing touches.
             let mapped = match map {
                 None => None,
                 Some(_) => match held.local(bytes) {
@@ -169,11 +109,6 @@ impl Gpu {
                 return Err(held.fail(error));
             }
 
-            // **Two derivations of the same number, made to agree.** The plan says how many
-            // dispatches a scan of this depth takes; the loop above emits them one at a time. If
-            // those ever disagree the scanner is running a different algorithm from the one that
-            // was planned, and the difference would show up as a wrong answer at some depth rather
-            // than as a failure here.
             if held.pipelines.len() != plan::dispatches(levels.len(), map.is_some()) {
                 return Err(held.fail(Error::NoPipeline));
             }
@@ -183,7 +118,6 @@ impl Gpu {
     }
 }
 
-/// A `Scanner` under construction, with the release path for a failure part way through.
 struct Held<'gpu> {
     gpu: &'gpu Gpu,
     staging: Buffer,
@@ -193,11 +127,6 @@ struct Held<'gpu> {
 }
 
 impl<'gpu> Held<'gpu> {
-    /// Allocate a device-local buffer and return where it landed.
-    ///
-    /// # Safety
-    ///
-    /// As [`Buffer::device_local`].
     unsafe fn local(&mut self, bytes: u64) -> Result<usize, Error> {
         // SAFETY: `Buffer::device_local` asks for a live device and a caller who will destroy
         // what comes back. The device outlives this builder, and everything pushed here is
@@ -207,11 +136,6 @@ impl<'gpu> Held<'gpu> {
         Ok(self.buffers.len() - 1)
     }
 
-    /// The same, in memory the host can write where the device offers it.
-    ///
-    /// # Safety
-    ///
-    /// As [`Buffer::shared`].
     unsafe fn shared(&mut self, bytes: u64) -> Result<usize, Error> {
         // SAFETY: as `local` — the same contract, for a buffer that also asks to be host-writable.
         let buffer = unsafe { Buffer::shared(self.gpu, bytes) }?;
@@ -219,19 +143,12 @@ impl<'gpu> Held<'gpu> {
         Ok(self.buffers.len() - 1)
     }
 
-    /// One level's buffers, zeroed.
-    ///
-    /// # Safety
-    ///
-    /// As [`Buffer::device_local`].
     unsafe fn level(&mut self, level: &Level, at_top: bool, words: u64) -> Result<Slots, Error> {
         let bytes = (level.capacity as u64) * words;
 
         // SAFETY: `zeroed` asks what this function's own contract asks, and each of the three
         // calls allocates a separate buffer this builder then owns.
         let totals = unsafe { self.zeroed(bytes) }?;
-        // At the top there is no block structure left to scan and re-offset: one workgroup scans
-        // the level straight into the offsets, so the intermediate buffer would never be read.
         let scanned = if at_top {
             None
         } else {
@@ -248,16 +165,6 @@ impl<'gpu> Held<'gpu> {
         })
     }
 
-    /// A device-local buffer whose whole contents have been written once, with zeros.
-    ///
-    /// **The padding is the reason.** A level of four totals still gets a buffer of sixty-four,
-    /// because a workgroup is sixty-four invocations, and the tail would otherwise be memory
-    /// nobody wrote. `notes/FINDINGS.md` records three tests that assumed such memory reads as
-    /// zero — true on both GPUs here and false on lavapipe.
-    ///
-    /// # Safety
-    ///
-    /// As [`Buffer::device_local`].
     unsafe fn zeroed(&mut self, bytes: u64) -> Result<usize, Error> {
         // SAFETY: as this function's own contract.
         let index = unsafe { self.local(bytes) }?;
@@ -276,16 +183,6 @@ impl<'gpu> Held<'gpu> {
         Ok(index)
     }
 
-    /// Build a pipeline over `bound` and remember how many workgroups it runs.
-    ///
-    /// **Every pass of a scan goes through here**, which is why the dispatch bound is checked here
-    /// rather than seven times in [`Held::record`]. A scan is where a dispatch running off the end
-    /// is hardest to see: each pass reads what the one before it wrote, so a pass that overruns
-    /// corrupts the input of the next one and the wrong number arrives levels away from its cause.
-    ///
-    /// # Safety
-    ///
-    /// Every index must name a buffer this holds.
     unsafe fn pass(
         &mut self,
         spirv: &[u32],
@@ -300,8 +197,6 @@ impl<'gpu> Held<'gpu> {
             buffers.push((buffer, bytes));
         }
 
-        // The sizes the descriptors are about to name, in the order they are bound — which is the
-        // order the module's `Binding` decorations number them in.
         let held: Vec<usize> = buffers
             .iter()
             .map(|&(_, bytes)| (bytes / size_of::<u32>() as u64) as usize)
@@ -322,7 +217,6 @@ impl<'gpu> Held<'gpu> {
         Ok(())
     }
 
-    /// Release everything allocated so far and hand the error back.
     fn fail(self, error: Error) -> Error {
         // SAFETY: nothing was ever submitted, so no pipeline or buffer is in flight. Pipelines go
         // first: a descriptor set naming a destroyed buffer would be a dangling reference.
@@ -338,7 +232,6 @@ impl<'gpu> Held<'gpu> {
         error
     }
 
-    /// Hand the finished pieces to a `Scanner`.
     fn into_scanner(self, elements: usize, answer: usize) -> Scanner<'gpu> {
         Scanner {
             gpu: self.gpu,
@@ -353,17 +246,6 @@ impl<'gpu> Held<'gpu> {
 }
 
 impl Held<'_> {
-    /// Record every dispatch, in order.
-    ///
-    /// **The order itself lives in [`super::passes`]**, which has no `unsafe` in it and is
-    /// therefore inside the mutation gate. What is left here is the part that is genuinely FFI:
-    /// turning a list of `(slot, bytes)` into descriptor sets. Deciding that the third pass reads
-    /// the second level's totals is not FFI, and it is the most intricate addressing in this crate
-    /// — which is exactly the shape that had no test until it moved.
-    ///
-    /// # Safety
-    ///
-    /// As [`Held::pass`].
     unsafe fn record(
         &mut self,
         levels: &[Level],
@@ -371,8 +253,6 @@ impl Held<'_> {
         ends: Ends,
         modules: &Modules<'_>,
     ) -> Result<(), Error> {
-        // The input's own capacity, so the count the passes are built for is the count that was
-        // allocated rather than the one that was asked for.
         let elements = self.buffers.get(ends.input).map_or(0, Buffer::capacity);
 
         for pass in passes::passes(levels, slots, ends, modules, elements)? {
@@ -389,56 +269,24 @@ impl Held<'_> {
 }
 
 impl Scanner<'_> {
-    /// How many elements this was built for.
     #[must_use]
     pub const fn elements(&self) -> usize {
         self.elements
     }
 
-    /// How many dispatches one call runs.
     #[must_use]
     pub fn dispatches(&self) -> usize {
         self.pipelines.len()
     }
 
-    /// The inclusive prefix sum of `input`, reusing the pipelines and the buffers.
-    ///
-    /// `input.len()` must equal [`Scanner::elements`]. A shorter slice would leave the tail of the
-    /// buffer holding the previous call's data and scan that too, which is a wrong answer rather
-    /// than an error — so it is refused.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::TooLarge`] if `input` is not the length this was built for, otherwise as
-    /// [`Gpu::run`].
     pub fn scan(&mut self, input: &[f32]) -> Result<Vec<f32>, Error> {
         self.run(input).map(|(answer, _)| answer)
     }
 
-    /// The same scan, reporting how long each pass took on the device's own clock.
-    ///
-    /// **The deepest chain here, and the only one where a per-pass profile can say something a
-    /// reduction's could not.** A reduction's passes shrink by a fixed factor and all do the same
-    /// kind of work; a scan's do three different kinds — block scans on the way up, one workgroup
-    /// at the top, offset additions on the way down — and the way down reads buffers the way up
-    /// wrote.
-    ///
-    /// One timestamp per dispatch, written into the chain's own command buffer, so each pass is
-    /// measured beside the passes it actually runs beside. `runner/examples/reducer.rs` records
-    /// what that correction was worth for the reduction: a probe had the step cost five times too
-    /// high.
-    ///
-    /// The vector is empty on a device with no usable timestamp queries, which is a thing to
-    /// report rather than a zero to print.
-    ///
-    /// # Errors
-    ///
-    /// As [`Scanner::scan`].
     pub fn scan_timed(&mut self, input: &[f32]) -> Result<(Vec<f32>, Vec<Duration>), Error> {
         self.run(input)
     }
 
-    /// Both of the above: the answer, and where the time went.
     fn run(&mut self, input: &[f32]) -> Result<(Vec<f32>, Vec<Duration>), Error> {
         if input.len() != self.elements {
             return Err(Error::TooLarge {

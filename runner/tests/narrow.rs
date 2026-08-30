@@ -1,18 +1,3 @@
-//! Elements narrower than a lane, on a real device.
-//!
-//! `tests/kernels.rs` in the emitter proves these modules are valid, and validity is the weaker
-//! half here than usual: **the feature that decides whether a narrow reduction runs leaves no
-//! trace in the module**. `shaderSubgroupExtendedTypes` is a Vulkan device feature with no SPIR-V
-//! capability, so a module reducing over `i8` validates identically whether or not any device in
-//! the world would accept it. Only a dispatch can tell.
-//!
-//! # What is being checked
-//!
-//! That `decisions/DR-0004` is true: a narrow element is one element per lane, the arithmetic is
-//! at the type's own width, and the buffer holds one element per byte. The last of those is the
-//! one worth doubting — a stride the device disagreed with would give every fourth element and
-//! look like a mapping bug.
-
 mod common;
 
 use common::{device, elements, runnable};
@@ -25,19 +10,11 @@ fn a_byte_kernel_adds_at_eight_bits_and_wraps_there() {
     let Some(gpu) = device("i8-add") else { return };
     let limits = gpu.limits().clone();
 
-    // `byte_kernel()` is `shaderInt8 && storageBuffer8BitAccess`, and an `i8` kernel declares
-    // exactly `Int8` and `StorageBuffer8BitAccess` — so asking the module says the same thing and
-    // keeps saying it if the kernel's needs change. What the module *cannot* say is
-    // `shaderSubgroupExtendedTypes`, which has no capability; the reduction test below still asks
-    // `Narrow` for that one by hand, and says why.
     let spirv = kernels::narrow_add::<I8, 32>(limits.subgroup_size, 100).expect("built");
     if !runnable(&gpu, "i8-add", &[&spirv]) {
         return;
     }
 
-    // A ramp that crosses 127, so the last elements wrap into the negatives. That wrap is the
-    // claim: if the device were computing at 32 bits and truncating on the way out it would give
-    // the same answer, but if the *buffer* were being read at the wrong stride it would not.
     let input: Vec<u8> = (0..elements(limits.subgroup_size, 32))
         .map(|index| index as u8)
         .collect();
@@ -77,9 +54,6 @@ fn an_unsigned_byte_kernel_wraps_the_other_way() {
 
 #[test]
 fn every_element_of_a_byte_buffer_is_its_own_byte() {
-    // The stride, stated as an answer rather than as a decoration. Every element is distinct, so a
-    // buffer read four bytes apart would return every fourth input and a shape that still looks
-    // plausible.
     let Some(gpu) = device("i8-stride") else {
         return;
     };
@@ -113,8 +87,6 @@ fn a_16_bit_kernel_adds_at_sixteen_bits() {
     }
 
     let input: Vec<u16> = (0..elements(limits.subgroup_size, 32))
-        // Bounded, because the buffer is eight times longer on a four-wide device and `index *
-        // 1000` leaves a `u16` at 66.
         .map(|index| (index % 60) as u16 * 1000)
         .collect();
 
@@ -149,7 +121,6 @@ fn an_unsigned_16_bit_clamp_holds_its_bounds() {
     }
 
     let input: Vec<u16> = (0..elements(limits.subgroup_size, 32))
-        // Bounded, as above.
         .map(|index| (index % 90) as u16 * 700)
         .collect();
 
@@ -174,9 +145,6 @@ fn a_half_kernel_computes_in_halves_and_not_in_floats() {
         return;
     }
 
-    // 2048 is where a half's precision runs out: it steps by two from there, so 2048 + 1 is 2048
-    // and an `f32` computing the same sum would give 2049. That difference is the assertion — it
-    // is the only way to tell a real `f16` add from a widened one.
     let input: Vec<u16> = (0..elements(limits.subgroup_size, 32))
         .map(|index| half::from_f32(2048.0 + index as f32))
         .collect();
@@ -185,15 +153,10 @@ fn a_half_kernel_computes_in_halves_and_not_in_floats() {
 
     let got: Vec<f32> = output.iter().copied().map(half::to_f32).collect();
 
-    // 2048 + 1 is a tie between 2048 and 2050, and ties go to even — so the increment vanishes.
-    // An `f32` add would have given 2049, which is the whole difference being tested.
     assert_eq!(got.first().copied(), Some(2048.0));
     assert_ne!(got.first().copied(), Some(2049.0), "that would be an f32");
-    // 2050 + 1 ties between 2050 and 2052, and 2052 is the even one this time.
     assert_eq!(got.get(2).copied(), Some(2052.0));
 
-    // And the whole vector, from the same rule applied on the host. The intermediate is exact in
-    // an `f32` at these magnitudes, so rounding once at the end is what the device does too.
     let expected: Vec<f32> = input
         .iter()
         .map(|bits| half::to_f32(half::from_f32(half::to_f32(*bits) + 1.0)))
@@ -206,12 +169,6 @@ fn a_narrow_reduction_runs_when_the_device_has_extended_types() {
     let Some(gpu) = device("i8-sum") else { return };
     let limits = gpu.limits().clone();
 
-    // **The one permission the module cannot declare, and therefore the one gate that stays by
-    // hand.** `shaderSubgroupExtendedTypes` has no SPIR-V capability at all: a device may accept
-    // `OpGroupNonUniformIAdd` on a 32-bit integer and refuse it on an 8-bit one, and the two
-    // modules are identical apart from the element type. Everything else this kernel needs —
-    // `Int8`, `StorageBuffer8BitAccess`, the subgroup arithmetic — it declares, so `runnable` asks
-    // it rather than this test guessing.
     if !limits.narrow.subgroup_extended_types {
         eprintln!(
             "SKIPPED i8-sum: narrow subgroup operations need shaderSubgroupExtendedTypes, \
@@ -220,14 +177,7 @@ fn a_narrow_reduction_runs_when_the_device_has_extended_types() {
         return;
     }
 
-    // The whole subgroup, whatever the subgroup is. A fixed 32 would be one vector on one device,
-    // a cluster on another and four strips on a third, and the reduction covers a different number
-    // of lanes in each.
     let width = limits.subgroup_size as usize;
-    // Small values, so the total of a subgroup stays inside an i8 and the answer is a sum rather
-    // than a statement about wrapping.
-    // `narrow_sum_whole` is built for the device's own width, so it is one element per invocation
-    // whatever that width is — unlike every other kernel in this file, which is built for 32.
     let spirv = kernels::narrow_sum_whole::<I8>(limits.subgroup_size).expect("built");
     if !runnable(&gpu, "i8-sum", &[&spirv]) {
         return;
@@ -256,9 +206,6 @@ fn a_narrow_reduction_runs_when_the_device_has_extended_types() {
 
 #[test]
 fn a_strip_mined_byte_kernel_reaches_every_strip() {
-    // Four elements per lane over a byte buffer: the strip stride is in *elements*, and the byte
-    // stride is what the buffer says, so the two multiply. Getting either wrong lands the last
-    // strip somewhere else entirely.
     let Some(gpu) = device("i8-strips") else {
         return;
     };

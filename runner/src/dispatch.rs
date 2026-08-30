@@ -1,25 +1,3 @@
-//! Building a pipeline out of a SPIR-V module and running it.
-//!
-//! # What is timed, and what is not
-//!
-//! A run is three submissions: upload, dispatch, download. Only the middle one is timed, and the
-//! kernel's buffers are device-local, so the number [`Gpu::time`] reports is the kernel reading
-//! VRAM rather than the host's copies crossing the bus. Getting that wrong is what made two
-//! earlier benchmarks meaningless — see `notes/FINDINGS.md`.
-//!
-//! # What is where
-//!
-//! This file is the staging machinery: allocate three buffers, copy in, dispatch, copy out, tear
-//! down. `run` is the surface over it — one call per way a caller might spell its data. The rest
-//! are the pieces each of those needs: `pipeline` and `specialization` to build one, `grid` to say
-//! how many workgroups on how many axes, `step` to say what a chain hands each pass, `submit` to
-//! record and wait, `session` and `chain` to keep things alive across calls, and `extent` to refuse
-//! a dispatch that would run off the end of a binding.
-//!
-//! **Every one of them goes through `extent`.** It guarded this file's `execute` and nothing else
-//! for four days, which is a sixth of the ways this crate dispatches; `extent`'s own header has
-//! what that cost and what closing it needed.
-
 mod bindings;
 mod chain;
 mod extent;
@@ -52,7 +30,6 @@ use ash::vk;
 use std::time::Duration;
 
 impl Gpu {
-    /// Upload, dispatch, download — returning the output and what the dispatch alone took.
     fn execute(
         &self,
         spirv: &[u32],
@@ -64,19 +41,6 @@ impl Gpu {
         let count = input.len();
         let bytes = (count.max(1) * size_of::<u32>()) as u64;
 
-        // **The output buffer is exactly as long as the input, so the dispatch has to fit in it.**
-        // That equal-length rule is what makes this call a one-argument one, and it is also the
-        // trap in it: nothing about `workgroups` is checked against `input.len()`, so a caller who
-        // dispatches twice what their buffer holds gets a kernel writing off the end of it. That
-        // is undefined behaviour — an access violation on one device here and plausible wrong
-        // numbers on another — rather than an error.
-        //
-        // `extent::Bounds` reads the workgroup size out of the module and refuses instead. It is a
-        // floor rather than a proof: see `dispatch::extent` for what it cannot catch.
-        // **With the specialization this dispatch will actually use.** `Kernel::load_offset_by`
-        // reaches past its run by a number chosen here rather than written into the module, and a
-        // bound that read the module alone counted zero for it — permissively, which is the one
-        // direction a refusal must never take.
         if let Some(overrun) =
             extent::Bounds::of(spirv, specialization).overrun_uniform(grid, count)
         {
@@ -90,9 +54,6 @@ impl Gpu {
             let source = Buffer::device_local(self, bytes)?;
             let destination = Buffer::device_local(self, bytes)?;
 
-            // The host's only way in. Forgetting this once made every computing kernel return
-            // whatever the device memory happened to hold, and the empty-kernel test still
-            // passed — which is why that one is not the floor it looks like.
             staging.write(self, input)?;
 
             let outcome = self.staged_run(
@@ -114,11 +75,6 @@ impl Gpu {
         }
     }
 
-    /// The three submissions, with everything torn down afterwards.
-    ///
-    /// # Safety
-    ///
-    /// The buffers must be live and the device idle with respect to them.
     #[expect(
         clippy::too_many_arguments,
         reason = "every one is a distinct thing the run needs, and bundling them into a struct \
@@ -148,8 +104,6 @@ impl Gpu {
             )
         }?;
 
-        // Upload: the host's words are already in `staging`; copy them where the kernel can see
-        // them. Untimed, because a benchmark of PCIe is not what anyone asked for.
         // SAFETY: both buffers are the caller's, alive for this call, and nothing is using them —
         // `copy` waits on its own fence before returning, so the dispatch below cannot overlap it.
         unsafe { self.copy(staging, source, bytes) }?;
@@ -171,11 +125,6 @@ impl Gpu {
         Ok((output, elapsed))
     }
 
-    /// Record `iterations` dispatches and time the submission.
-    ///
-    /// # Safety
-    ///
-    /// The pipeline must be live.
     unsafe fn dispatch(
         &self,
         pipeline: &Pipeline,
@@ -204,8 +153,6 @@ impl Gpu {
 
                 for iteration in 0..iterations {
                     if iteration > 0 {
-                        // Keep the dispatches from overlapping, so the elapsed time is the sum of
-                        // their own rather than a measure of the scheduler's appetite.
                         let barrier = [vk::MemoryBarrier::default()
                             .src_access_mask(vk::AccessFlags::SHADER_WRITE)
                             .dst_access_mask(vk::AccessFlags::SHADER_READ)];

@@ -1,26 +1,9 @@
-//! Two-axis kernels, validated.
-//!
-//! Split from `kernels.rs`. A second axis changes the interface — `LocalSize` gains a y and two
-//! more components come out of the built-ins — and the address gains a multiply. Both are places a
-//! module can stop being valid without computing anything different, which is exactly what a
-//! validator is for and what counting instructions in a unit test is not.
-//!
-//! `decisions/DR-0006` is the design these check.
-
 mod common;
 
 use common::{VULKAN_1_1, expect_valid};
 use simdr::kernel::{Kernel, Shape};
 use simdr::lanes::U32;
-// ---------------------------------------------------------------------------------------------
-// Grids
-//
-// A second axis changes the interface — `LocalSize` gains a y and two more components come out of
-// the built-ins — and the address gains a multiply. Both are places a module can stop being valid
-// without computing anything different.
-// ---------------------------------------------------------------------------------------------
 
-/// One subgroup across, `rows` deep, two buffers.
 fn grid(rows: u32) -> Shape {
     Shape::grid(32, 32, rows, 2)
 }
@@ -45,8 +28,6 @@ fn a_grid_kernel_one_row_deep_is_valid_spirv() {
 
 #[test]
 fn a_workgroup_several_rows_deep_is_valid_spirv() {
-    // The only shape that reads `LocalInvocationId.y`, and the only one whose row is arithmetic
-    // rather than a built-in component straight through.
     let mut kernel = Kernel::<U32>::new(grid(4)).expect("built");
     let value = kernel.load_row::<32>(0, 256).expect("loaded");
     kernel.store_row(1, 256, value).expect("stored");
@@ -96,14 +77,6 @@ fn reading_a_second_row_is_valid_spirv() {
 
 #[test]
 fn writing_a_named_row_is_valid_spirv() {
-    // **The write that matches `load_row_at`, and the one nothing reached.** A mechanical sweep of
-    // the public surface for operations with no consumer found `store_row_at` — its reading twin
-    // is used by the test above and by `kernels::plane`, and the writing one had a unit test in
-    // `kernel/plane.rs` and no validator behind it.
-    //
-    // That is the state `OpUDot` was in when it turned out to be invalid SPIR-V, and a grid store
-    // is a good candidate for it: the row is a caller's id rather than this invocation's, so the
-    // address is a multiply and two adds that no other test composes in this order.
     let mut kernel = Kernel::<U32>::new(grid(4)).expect("built");
     let value = kernel.load_row::<32>(0, 512).expect("loaded");
 
@@ -119,8 +92,6 @@ fn writing_a_named_row_is_valid_spirv() {
 
 #[test]
 fn a_strip_mined_grid_kernel_is_valid_spirv() {
-    // Four elements per lane on each axis at once: the column arithmetic strips and the row
-    // arithmetic multiplies, and the two have to compose into one index.
     let mut kernel = Kernel::<U32>::new(grid(2)).expect("built");
     let value = kernel.load_row::<128>(0, 4096).expect("loaded");
     kernel.store_row(1, 4096, value).expect("stored");

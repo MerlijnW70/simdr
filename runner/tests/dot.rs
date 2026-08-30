@@ -1,20 +1,9 @@
-//! Plain dot products, run on a real device.
-//!
-//! The inner loop of every dense layer, without the clipped ReLU that `network.rs` puts on top of
-//! it. Integers, so the comparison is exact by construction — a float dot product over 32 terms
-//! would need an argument about associativity that says nothing about whether the kernel is right.
-
 mod common;
 
 use common::{device, runnable};
 use runner::kernels::{self, WORKGROUP_SIZE};
 use simdr::lanes::I32;
 
-/// A dot product, in the integers a quantised network would use.
-///
-/// The inner loop of a dense layer: multiply elementwise, sum across the lanes. Integers so the
-/// comparison is exact by construction — a float dot product over 32 terms would need an argument
-/// about associativity that says nothing about whether the kernel is right.
 #[test]
 fn a_subgroup_dot_product_matches_the_reference_exactly() {
     let Some(gpu) = device("dot-product") else {
@@ -28,21 +17,15 @@ fn a_subgroup_dot_product_matches_the_reference_exactly() {
         return;
     }
 
-    // One element per lane, whatever the width is. A fixed 32 is the whole subgroup on one device
-    // here, a cluster on another and four strips on a third — three different answers to "how many
-    // lanes does this reduce", and only the first was ever what the reference computed.
     let width = limits.subgroup_size as usize;
     let count = WORKGROUP_SIZE as usize;
 
-    // Two concatenated vectors in one buffer: weights then activations, which is how a caller
-    // with two arrays hands them over.
     let mut input: Vec<u32> = Vec::with_capacity(count * 2);
     input.extend((0..count).map(|index| (index % 7) as u32));
     input.extend((0..count).map(|index| (index % 5 + 1) as u32));
 
     let output = gpu.run_u32(&spirv, &input, 1).expect("dispatched");
 
-    // Every lane of a subgroup holds that subgroup's whole dot product.
     let expected: Vec<u32> = (0..count)
         .map(|lane| {
             let first = lane / width * width;
@@ -52,12 +35,8 @@ fn a_subgroup_dot_product_matches_the_reference_exactly() {
         })
         .collect();
 
-    // The buffer is twice as long as the dispatch writes — it holds both operands — so only the
-    // written prefix is an answer. The rest is whatever the upload left there.
     assert_eq!(output.get(..count), Some(expected.as_slice()));
 
-    // Discriminator: the two subgroups must disagree, or the reduction could have been over the
-    // whole workgroup and nobody would know.
     assert_ne!(
         output.first(),
         output.last(),
@@ -65,7 +44,6 @@ fn a_subgroup_dot_product_matches_the_reference_exactly() {
     );
 }
 
-/// The same, strip-mined: 128 products per subgroup instead of 32.
 #[test]
 fn a_strip_mined_dot_product_folds_four_products_per_lane() {
     let Some(gpu) = device("dot-product-strips") else {
@@ -78,7 +56,6 @@ fn a_strip_mined_dot_product_folds_four_products_per_lane() {
         return;
     }
 
-    // 64 invocations × 4 strips = 256 elements per operand.
     let per_operand = WORKGROUP_SIZE as usize * 4;
     let mut input: Vec<u32> = Vec::with_capacity(per_operand * 2);
     input.extend((0..per_operand).map(|index| (index % 7) as u32));
@@ -91,8 +68,6 @@ fn a_strip_mined_dot_product_folds_four_products_per_lane() {
 
     let output = gpu.run_u32(&spirv, &input, 1).expect("dispatched");
 
-    // Subgroup 0 covers invocations 0..32, which read strips at 0..32, 64..96, 128..160, 192..224.
-    // Subgroup 1 covers 32..64, reading 32..64, 96..128, 160..192, 224..256.
     let term = |index: usize| (index % 7) * (index % 5 + 1);
     let expected: Vec<u32> = (0..WORKGROUP_SIZE as usize)
         .map(|lane| {
@@ -104,7 +79,6 @@ fn a_strip_mined_dot_product_folds_four_products_per_lane() {
         })
         .collect();
 
-    // As above: only the invocations that ran wrote anything.
     assert_eq!(
         output.get(..WORKGROUP_SIZE as usize),
         Some(expected.as_slice())

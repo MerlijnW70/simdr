@@ -1,115 +1,3 @@
-//! Random lane programs, run on the device and checked against a CPU reference.
-//!
-//! Every other test in this repository was written by someone who already had an idea of what
-//! could go wrong. This one has no idea: it generates a program, works out what the answer must
-//! be by interpreting the same program on the CPU, and compares. What it finds is what nobody
-//! thought to look for.
-//!
-//! # Why this can be exact
-//!
-//! Floating-point addition is not associative, and a subgroup reduction combines lanes in an
-//! order the specification does not fix — so comparing arbitrary `f32` sums exactly would be
-//! comparing against one arbitrary order.
-//!
-//! The integer domains have no such problem: addition and multiplication are associative and
-//! commutative modulo their width, and wrapping is defined. The float domain earns the same
-//! property by generating only small integers, which are exact in an `f32` and stay exact through
-//! sums that remain below 2²⁴ — see [`Domain::ceiling`].
-//!
-//! **`f16` is fuzzed too**, which this paragraph denied for longer than it was true. A half is
-//! exact only to 2048 and a sum over sixty-four lanes leaves that range at once — so a round that
-//! leaves it is *refused* rather than compared, which is what [`Reference::exact`] is for. Two
-//! rounds in 256 are typically refused that way; the rest are compared exactly like any other
-//! domain.
-//!
-//! # What is generated
-//!
-//! Straight-line programs over one loaded vector and a handful of constants: elementwise
-//! arithmetic, comparisons and selects, subgroup shuffles, and one reduction or scan at the end.
-//!
-//! **And control flow, since 2026-08-11.** `Op::RepeatAdd` and `Op::RolledAdd` do the same
-//! arithmetic through an unrolled loop and a real four-block one, so the pair must agree while
-//! only one of them has a back edge. `Op::RolledCounterAdd` reads the loop's counter phi.
-//! `Finish::SumOrMax` carries a value out of a branch through an `OpPhi` — the failure mode no
-//! other layer here catches, because a phi naming the wrong predecessor validates cleanly and then
-//! computes the wrong thing.
-//!
-//! Until that day this module's vocabulary predated three passes of emitter work, and "30 000
-//! programs, zero disagreements" was a true statement about the wrong surface.
-//!
-//! **And the narrow integers, since 2026-08-12.** `i8`, `u8`, `i16` and `u16` reach different
-//! conversion and extreme instructions from the same source, and had direct device tests and no
-//! fuzzing. The buffer is where they differ from everything else here — four 8-bit elements share
-//! a word — and [`check`] is the one place that packs and unpacks.
-//!
-//! **And the scans, since 2026-08-14.** [`Finish::Scan`] and [`Finish::ScanExclusive`] are the
-//! first finishes that keep *every* element rather than combining them, and they are here for a
-//! reason the reductions illustrate: a reduction combines the same set whatever order the lanes
-//! are in, so a mapping that pairs the wrong lanes still returns the right total. That is how
-//! `reduce_min` came to fold its strips with a maximum and agree with every hand-written test but
-//! the strip-mined one.
-//!
-//! A scan cannot hide that. Its answer at position `j` depends on exactly which elements the
-//! hardware considers to come before `j`, so the reference has to model the **lane order** and not
-//! only the arithmetic — see the `interpret` module. Until this, every test of the scan was hand-written,
-//! which is the state the reduction was in when the fuzzer found that bug.
-//!
-//! **All three mappings, since later the same day.** The clustered scans were excluded here while
-//! `Lanes::prefix_sum` refused them, so the rounds that would have exercised the ladder ended in a
-//! reduction instead. The generator offers them at every mapping now, and the reference scans runs
-//! of `min(lanes, width)` invocations rather than of the width — which is the one line that tells a
-//! clustered scan from a whole-subgroup one.
-//!
-//! **And the bit shifts, since 2026-08-15 — the first step that is not available in every domain.**
-//! `Op::BitShift` reaches `Lanes::shift_left`, `shift_right_logical` and `shift_right_arithmetic`,
-//! which take `T: Integer`. Everything generated before it existed in all eight domains, so one
-//! function generic over `Element` could emit any step, and that is precisely why the shifts had no
-//! `Op`: the layer that emits could not express *"this domain has the instruction and that one does
-//! not"*. [`Emit`] is that expression, carried by the element type, and the width ladder stays
-//! single rather than being copied once for integers and once for floats.
-//!
-//! The bound they are gated by is younger than the gap. `shift_left` took `T: Element` until this
-//! pass was prepared, so a shift of a vector of floats compiled, built, and produced a module
-//! `spirv-val` rejects — `OpUDot`'s shape exactly, in three public operations at once.
-//!
-//! **The distance is drawn across the element's whole width**, which is the half of this worth
-//! arguing. `OpShiftRightLogical` and `OpShiftRightArithmetic` agree on every value whose top bit
-//! is clear, and every value this generator draws has one — so a corpus of small numbers proves one
-//! instruction and reads as proving two. A left shift of 31 is what puts a bit at the top, and the
-//! right shift after it is then a question with two different answers. The ceiling is the
-//! specification's: a shift by at least the operand's width is **undefined**, and
-//! [`ProgramError::ShiftTooFar`] refuses one rather than comparing a device's arbitrary answer
-//! against a host's.
-//!
-//! **And three more the same day, which turned the gate into a mechanism.** `Op::Absolute` reaches
-//! `Lanes::abs`, gated on `Signed` — **five** domains, neither the six an `Integer` bound reaches
-//! nor the two a float-only operation does. `Op::FusedMulAdd` reaches `Lanes::fma`, which takes
-//! `Vector<F32, _>` concretely and so is available in exactly **one**. Six, five and one in the
-//! same trait is the whole argument that the gate belongs on the element type: one more bound would
-//! otherwise have been one more copy of the width ladder.
-//!
-//! `Op::AddIfAllAbove` needed no gate at all. It is the third vote — `Lanes::all_uniform`, a
-//! different opcode from `any_uniform` — and two of the three were generated while it had unit
-//! tests and nothing else, which is the asymmetry `Op::ShiftDown` had.
-//!
-//! **Two of the three arrived with an edge the corpus had never been able to reach.** A magnitude
-//! has no answer at a two's-complement minimum, and until the bit shifts existed no signed value
-//! here was large enough to be one; a left shift of 31 lands on it exactly. So the reference
-//! *refuses* such a round rather than asserting what every device happens to do — the answer
-//! [`Domain::exact_limit`] gives for a half that leaves its range, and the opposite of the mistake
-//! a test once made about the sign of a sum of negative zeros.
-//!
-//! And the fused multiply-add is fuzzable only because of what this corpus is. `Lanes::fma`'s own
-//! doc comment says a fused operation is *"never bit-identical"* to a separate multiply and add,
-//! which is true in general and not here: every float this generator draws is a small integer, both
-//! spellings are exact, and the pair can be held to agreeing.
-//!
-//! **And the two operations the API audit added, since later on 2026-08-14.** `Op::SelectEqual`
-//! reaches `Lanes::equal` — the elementwise comparison this crate had gone a month without — and
-//! `Op::AddIfAllEqual` reaches the vote about a *value*, the second uniform branch here. Both
-//! arrived with hand-written tests only, which is the state the scan was in when the fuzzer found
-//! `reduce_min` folding its strips with a maximum.
-
 mod domain;
 mod generate;
 mod interpret;
@@ -122,68 +10,24 @@ pub use program::{Emit, Finish, Op, Program, ProgramError};
 
 use crate::{Error, Gpu};
 
-/// What a single fuzzing round concluded.
 #[derive(Debug)]
 pub enum Outcome {
-    /// The device and the reference agreed.
     Agreed,
-    /// They did not, and here is the program that separated them.
     Disagreed {
-        /// The program, so it can be minimised and re-run.
         program: Program,
-        /// What the reference said, for the first few lanes.
         expected: Vec<u32>,
-        /// What the device said.
         actual: Vec<u32>,
-        /// The first index where they differ.
         at: usize,
     },
-    /// The program could not be built for this device — a lane count with no mapping, say.
-    ///
-    /// Not a failure: the generator is allowed to ask for things the mapping refuses, and being
-    /// refused *by name* is the correct answer.
-    ///
-    /// **A [`ProgramError`] and not a `LaneError` since the bit shifts arrived.** Until then every
-    /// operation existed in every domain and the only thing that could go wrong was the width. A
-    /// step some domains have and others do not is a second kind of no, and `decisions/DR-0009` is
-    /// about not folding two kinds of no into one arm.
     Refused(ProgramError),
-    /// The reference left the range its domain counts exactly, so the round was not compared.
-    ///
-    /// Also not a failure, and for a sharper reason than [`Outcome::Refused`]: the *device* would
-    /// have answered perfectly well. It is the comparison that cannot be trusted, because both
-    /// sides would be rounded and two roundings agreeing says nothing about the mapping.
-    ///
-    /// This is what lets [`Domain::Half`] be fuzzed at all — a half counts integers only to 2048,
-    /// which a sum over a few hundred lanes leaves at once. A caller sweeping should **count
-    /// these**: a domain that is refused every round is a domain with no coverage, and it would
-    /// otherwise look exactly like a domain that always agreed.
     Unrepresentable,
 }
 
-/// Something that stopped a round before it could conclude.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum FuzzError {
-    /// The dispatch failed.
     Run(Error),
-    /// The input holds fewer elements than the program reads.
-    ///
-    /// **A caller error the reference used to absorb.** `interpret` gathers each invocation's
-    /// elements at the addresses the kernel computes and read a short input as *zeros* — so a
-    /// corpus one element short produced an expected answer for a program nobody asked about, and
-    /// the round then failed on the dispatch's own bound with a message about buffers.
-    ///
-    /// The sweeps here size their corpus from [`Program::input_len`] and cannot reach this. That is
-    /// the reason to name it rather than to leave it: a reference that quietly invents the data it
-    /// is missing is the one component whose wrongness cannot be caught by comparing it to
-    /// something.
-    ShortInput {
-        /// Elements the program reads.
-        needed: usize,
-        /// Elements the input holds.
-        given: usize,
-    },
+    ShortInput { needed: usize, given: usize },
 }
 
 impl From<Error> for FuzzError {
@@ -208,18 +52,7 @@ impl core::fmt::Display for FuzzError {
 
 impl std::error::Error for FuzzError {}
 
-/// Build `program`, run it, and compare against the reference.
-///
-/// # Errors
-///
-/// [`FuzzError::Run`] if the dispatch itself fails, which is a broken environment rather than a
-/// disagreement. [`FuzzError::ShortInput`] if `input` holds less than the program reads, which is a
-/// caller error and is checked here because the reference below would otherwise absorb it.
 pub fn check(gpu: &Gpu, program: &Program, input: &[u32]) -> Result<Outcome, FuzzError> {
-    // Before anything, and before the reference in particular. `interpret` reads at the addresses
-    // the kernel computes and treats a missing element as a zero — so a short corpus produces an
-    // expected answer for a program nobody asked about, and the round then fails on the dispatch's
-    // bound with a message about buffers rather than about the corpus.
     let needed = program.input_len();
     if input.len() < needed {
         return Err(FuzzError::ShortInput {
@@ -233,10 +66,6 @@ pub fn check(gpu: &Gpu, program: &Program, input: &[u32]) -> Result<Outcome, Fuz
         Err(refused) => return Ok(Outcome::Refused(refused)),
     };
 
-    // The reference first, and the dispatch only if it can be believed. A round whose arithmetic
-    // left the range its domain counts exactly cannot be compared — both sides would be rounded
-    // and agreeing or disagreeing would say nothing about which lanes were combined — so it is
-    // refused here rather than dispatched and then loosened.
     let expected = reference(program, input);
     if !expected.exact {
         return Ok(Outcome::Unrepresentable);
@@ -246,12 +75,6 @@ pub fn check(gpu: &Gpu, program: &Program, input: &[u32]) -> Result<Outcome, Fuz
     Ok(verdict(program, expected.values, actual))
 }
 
-/// Run `spirv` over `input`, packing the buffer the way this domain's stride requires.
-///
-/// Everything above this line works in **element values held one per `u32`**, which is the shape
-/// the interpreter and the comparison want. The buffer does not: a domain of 8-bit elements has a
-/// stride of one byte, so four elements share a word. This is the only place the two meet, and it
-/// is a boundary rather than a special case scattered through the harness.
 fn dispatch(
     gpu: &Gpu,
     program: &Program,
@@ -275,13 +98,6 @@ fn dispatch(
     }
 }
 
-/// Whether two answers agree, and where they first stop agreeing.
-///
-/// Split out of [`check`] because a device is not needed to decide it and one *was* needed to
-/// reach it. A mutation run found that out: flipping the comparison here left the whole suite
-/// green, because `Outcome::Disagreed` is never constructed while everything agrees — so the index
-/// it reports had nothing checking it, and a fuzzing failure would have pointed at the wrong
-/// element.
 fn verdict(program: &Program, expected: Vec<u32>, actual: Vec<u32>) -> Outcome {
     match expected
         .iter()
@@ -300,7 +116,6 @@ fn verdict(program: &Program, expected: Vec<u32>, actual: Vec<u32>) -> Outcome {
 
 #[cfg(test)]
 mod tests {
-    // A test may panic — that is how it reports.
     #![allow(clippy::expect_used, clippy::panic)]
 
     use super::*;
@@ -325,8 +140,6 @@ mod tests {
 
     #[test]
     fn a_disagreement_reports_the_first_index_that_differs() {
-        // The index a failure message points at. Nothing checked it until a mutant flipped the
-        // comparison and the suite stayed green.
         let outcome = verdict(&program(), vec![1, 2, 3, 4], vec![1, 2, 9, 4]);
 
         match outcome {
@@ -347,8 +160,6 @@ mod tests {
 
     #[test]
     fn a_shorter_answer_agrees_over_the_part_that_exists() {
-        // `zip` stops at the shorter side, which is deliberate: the output buffer is often longer
-        // than the dispatch wrote, and the tail is whatever the upload left there.
         let outcome = verdict(&program(), vec![1, 2], vec![1, 2, 999]);
         assert!(matches!(outcome, Outcome::Agreed));
     }

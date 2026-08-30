@@ -1,7 +1,3 @@
-//! Loops, and the values that survive them.
-//!
-//! A loop is four blocks in SPIR-V, and they have to be arranged exactly:
-//!
 //! ```text
 //!   …            OpBranch %header
 //!   %header:     OpLoopMerge %merge %continue   ← declared before anything else in the block
@@ -12,31 +8,12 @@
 //!                OpBranch %header               ← the back edge
 //!   %merge:      …                              ← where the loop leaves off
 //! ```
-//!
-//! Getting that wrong produces a module the validator rejects for reasons that read like riddles,
-//! which is why the shape lives here once rather than at each call site.
-//!
-//! # The trip count is uniform
-//!
-//! Same rule as a branch, same reason: a loop whose condition varies per lane leaves some lanes
-//! going round again while others have left, and a subgroup instruction inside it answers for
-//! whoever is still there. `decisions/DR-0003`. What is offered is a loop of a *fixed* number of
-//! iterations, decided when the kernel is built — which is what a strip-mined `Simd` needs
-//! anyway, and what an unrolled reduction is.
 
 use super::{LaneError, Lanes};
 use crate::module::{Id, Module};
 use crate::spec::LoopControl;
 
-/// Anything that emits into a module, which is what the loop shape needs and all it needs.
-///
-/// Both [`Lanes`] and [`crate::kernel::Kernel`] offer a rolled loop, and the four-block shape above
-/// is delicate enough that having it twice would be having it wrong once. What differs between them
-/// is only what a body is handed: lane code wants lane operations, and a kernel body wants the
-/// buffers — which a `Lanes` does not have and is not going to get, because it holds a module and
-/// a width and nothing else.
 pub(crate) trait Emits {
-    /// The module being built.
     fn module(&mut self) -> &mut Module;
 }
 
@@ -46,11 +23,6 @@ impl Emits for Lanes<'_> {
     }
 }
 
-/// The four-block loop, over whatever emits it.
-///
-/// `times` is fixed when the module is built, for the reason [`Lanes::repeat_rolled`] gives: a trip
-/// count that varied per lane would diverge, and a subgroup instruction inside a diverged loop
-/// answers for whoever is still there. `decisions/DR-0003`.
 pub(crate) fn rolled<H, F>(
     host: &mut H,
     times: u32,
@@ -81,21 +53,6 @@ where
     })
 }
 
-/// The same, carrying **several** values rather than one.
-///
-/// One phi a value at the header, all of them declared before the body is built. That is why the
-/// body's return length is checked rather than assumed: the phis have already promised how many
-/// values will arrive, and a body producing fewer leaves one of them naming an id that does not
-/// exist — which the validator reports as a bad id and not as a broken promise.
-///
-/// Every carried value shares `carried_type`. A loop wanting two types wants two loops, or a
-/// struct, and neither has been needed.
-///
-/// # Why this exists
-///
-/// A reduction that accumulates more than one running total, which is what a weighted sum over
-/// several vectors is. Carrying one value forces one loop a total, and each of those loops reads
-/// the same data again — so a blend over sixteen heads read its cache sixteen times.
 pub(crate) fn rolled_many<H, F>(
     host: &mut H,
     times: u32,
@@ -122,15 +79,12 @@ where
     let continue_block = host.module().alloc_id()?;
     let merge_block = host.module().alloc_id()?;
 
-    // The block the loop is entered from, which the phis name as an incoming edge.
     let entry = host.module().alloc_id()?;
     host.module().branch(entry)?;
     host.module().label_at(entry)?;
     host.module().branch(header)?;
 
     host.module().label_at(header)?;
-    // The phis come first in the header, before the merge declaration — SPIR-V requires every
-    // `OpPhi` at the very start of its block.
     let counter = host.module().alloc_id()?;
     let stepped = host.module().alloc_id()?;
     let mut carried = Vec::with_capacity(initial.len());
@@ -146,9 +100,6 @@ where
             .phi_at(name, carried_type, &[(was, entry), (will, continue_block)])?;
     }
 
-    // The comparison comes *before* the merge declaration. `OpLoopMerge` has to be the
-    // second-to-last instruction in its block, immediately preceding the branch — putting the
-    // comparison between them is a module the validator rejects, and it did.
     let carry_on = host
         .module()
         .binary(crate::module::op::U_LESS_THAN, boolean, counter, limit)?;
@@ -165,8 +116,6 @@ where
             wanted: produced.len(),
         });
     }
-    // Each `produced` was promised to a phi above, so the body's results have to arrive under those
-    // names. A copy is the honest way to say so without a mutable local.
     for (&will, &one) in produced.iter().zip(&result) {
         host.module().copy_object_at(will, carried_type, one)?;
     }
@@ -181,31 +130,10 @@ where
 }
 
 impl Lanes<'_> {
-    /// Repeat `body` a fixed number of times, threading one value through it.
-    ///
-    /// `body` receives the value carried from the previous iteration and returns the value for
-    /// the next; the loop yields whatever the last iteration produced. That threading is the
-    /// whole difficulty — SPIR-V has no mutable locals in the logical addressing model, so the
-    /// carried value is an `OpPhi` at the loop header, and its incoming edges cannot be written
-    /// until the body has been built.
-    ///
-    /// The count is a Rust `u32` rather than an [`Id`], and deliberately: a trip count that
-    /// varied per lane would diverge, and one that varied uniformly at runtime would still need a
-    /// condition this does not take. A fixed count covers the strip-mined and tree-reduction
-    /// shapes that lane code actually wants.
-    ///
-    /// # Errors
-    ///
-    /// [`LaneError::Build`] if any instruction cannot be emitted, or whatever `body` returns.
     pub fn repeat<F>(&mut self, times: u32, initial: Id, mut body: F) -> Result<Id, LaneError>
     where
         F: FnMut(&mut Self, Id, u32) -> Result<Id, LaneError>,
     {
-        // Unrolled, and it takes no `carried_type` because it needs none: with no phi there is
-        // nothing whose type has to be declared. A `times` known at build time makes the loop
-        // machinery pure cost — no phi, no back edge, no counter — and the driver was going to
-        // unroll a small fixed loop anyway. [`Lanes::repeat_rolled`] is the one that emits a real
-        // loop; this is what nearly every caller means, and it produces better SPIR-V.
         let mut carried = initial;
         for iteration in 0..times {
             carried = body(self, carried, iteration)?;
@@ -213,19 +141,6 @@ impl Lanes<'_> {
         Ok(carried)
     }
 
-    /// The same, as a real loop rather than an unrolled one.
-    ///
-    /// Emits the four-block shape above with an `OpPhi` carrying both the counter and the value.
-    /// Use it when `times` is large enough that unrolling would bloat the module.
-    ///
-    /// `body` receives the carried value and the *iteration number* — the counter phi, a `u32`
-    /// id that is 0 on the first trip and `times - 1` on the last. It is one value rather than one
-    /// per iteration, because the body is built once; a body that wants `data[i]` indexes with it,
-    /// and a body that wants to unroll by iteration wants [`Lanes::repeat`] instead.
-    ///
-    /// # Errors
-    ///
-    /// [`LaneError::Build`] if any instruction cannot be emitted, or whatever `body` returns.
     pub fn repeat_rolled<F>(
         &mut self,
         times: u32,
@@ -242,7 +157,6 @@ impl Lanes<'_> {
 
 #[cfg(test)]
 mod tests {
-    // A test may panic — that is how it reports.
     #![allow(clippy::expect_used, clippy::indexing_slicing)]
 
     use super::*;
@@ -326,7 +240,6 @@ mod tests {
         assert_eq!(count(&words, op::LOOP_MERGE), 1);
         assert_eq!(count(&words, op::PHI), 2, "the counter and the value");
         assert_eq!(count(&words, op::F_ADD), 1, "the body is built once");
-        // entry, header, body, continue, merge.
         assert_eq!(count(&words, op::LABEL), 5);
     }
 
@@ -351,8 +264,6 @@ mod tests {
             .position(|opcode| *opcode == op::LOOP_MERGE)
             .expect("declared");
 
-        // *Immediately* before, not merely somewhere before. The looser check passed while the
-        // comparison sat between them, and only `spirv-val` noticed.
         assert_eq!(
             seen.get(merge + 1).copied(),
             Some(op::BRANCH_CONDITIONAL),
@@ -362,8 +273,6 @@ mod tests {
 
     #[test]
     fn the_phis_come_before_the_merge_declaration_in_the_header() {
-        // SPIR-V requires every `OpPhi` at the very start of its block, and the header's merge
-        // instruction is not a phi.
         let mut module = Module::new(Version::V1_3);
         let mut lanes = Lanes::new(&mut module, 32).expect("built");
         let float = lanes.type_of::<F32>().expect("f32");
@@ -392,8 +301,6 @@ mod tests {
 
     #[test]
     fn a_rolled_body_is_handed_the_counter_phi_itself() {
-        // Not a copy of it and not a fresh id: the value the body indexes with has to be the same
-        // one the continue block steps, or every iteration would read the same element.
         let mut module = Module::new(Version::V1_3);
         let mut lanes = Lanes::new(&mut module, 32).expect("built");
         let float = lanes.type_of::<F32>().expect("f32");

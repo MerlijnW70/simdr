@@ -1,35 +1,8 @@
-//! Reductions — the operations that combine every lane into one number.
-//!
-//! Which instruction comes out depends on how `LANES` sits on the subgroup, and that is decided in
-//! one place: [`Lanes::mapping`].
-//!
-//! - As wide as the subgroup: one plain `Reduce`.
-//! - Narrower: one `ClusteredReduce` whose cluster size is the vector's own width, so the lanes
-//!   that would otherwise idle are running other copies of the same vector.
-//! - Wider: fold the strips together inside each lane first — `strips - 1` scalar operations —
-//!   then one subgroup instruction over the partials.
-//!
-//! Needs `GroupNonUniform` and `GroupNonUniformArithmetic`, plus `GroupNonUniformClustered`
-//! whenever a vector is narrower than the subgroup. Nothing here asks a caller to declare them;
-//! [`Lanes::reduction`] does it while deciding the shape, which is what keeps a kernel that never
-//! clusters runnable on a device that offers no clustered form.
-//!
-//! **The scans are next door, in [`super::scan`].** They take the same three mappings and reach a
-//! different instruction at each — one of them no instruction at all — and the reason they are
-//! apart is the reason the fuzzer generates both: a reduction combines the same set whatever order
-//! the lanes are in, so it cannot tell a wrong pairing from a right one.
-
 use super::{Element, LaneError, Lanes, Mapping, Vector};
 use crate::module::{Id, Reduction};
 use crate::spec::Capability;
 
 impl Lanes<'_> {
-    /// The sum of every element, delivered to every lane — `Simd::reduce_sum`.
-    ///
-    /// # Errors
-    ///
-    /// [`LaneError::NoMapping`] if `LANES` cannot sit on this subgroup, [`LaneError::Build`] if an
-    /// instruction cannot be emitted.
     pub fn reduce_sum<T: Element, const LANES: u32>(
         &mut self,
         vector: Vector<T, LANES>,
@@ -37,8 +10,6 @@ impl Lanes<'_> {
         self.reduce_with::<T, LANES>(T::GROUP_ADD, T::ADD, vector)
     }
 
-    /// Fold the strips inside each lane with `local`, then reduce across the subgroup with
-    /// `group`.
     fn reduce_with<T: Element, const LANES: u32>(
         &mut self,
         group: u16,
@@ -54,8 +25,6 @@ impl Lanes<'_> {
             .subgroup_reduce(group, element, scope, reduction, partial)?)
     }
 
-    /// Combine a vector's strips into one per-lane value, and say which reduction shape the
-    /// subgroup step then needs.
     fn fold_strips<T: Element, const LANES: u32>(
         &mut self,
         local: u16,
@@ -76,12 +45,6 @@ impl Lanes<'_> {
         Ok((reduction, partial))
     }
 
-    /// The reduction shape this vector's mapping implies, declaring what it needs on the way.
-    ///
-    /// A strip-mined vector reduces over the *whole* subgroup once its strips are folded — the
-    /// strips are within a lane, so they never needed a cluster. Only the clustered case asks for
-    /// `GroupNonUniformClustered`, which is why a kernel that never uses one stays runnable on a
-    /// device that does not offer it.
     pub(super) fn reduction<const LANES: u32>(&mut self) -> Result<Reduction, LaneError> {
         let mapping = self.mapping::<LANES>()?;
 
@@ -104,7 +67,6 @@ impl Lanes<'_> {
 
 #[cfg(test)]
 mod tests {
-    // A test may panic — that is how it reports.
     #![allow(clippy::expect_used, clippy::indexing_slicing)]
 
     use super::*;
@@ -119,7 +81,6 @@ mod tests {
             .count()
     }
 
-    /// The operands of the group reduction in a module built at `width` for `LANES`.
     fn reduce_operands<const LANES: u32>(width: u32) -> Vec<u32> {
         let mut module = Module::new(Version::V1_3);
         let mut lanes = Lanes::new(&mut module, width).expect("built");
@@ -164,7 +125,6 @@ mod tests {
 
         let words = module.finish();
 
-        // Four elements per lane: three scalar adds to fold them, then one subgroup instruction.
         assert_eq!(count(&words, op::F_ADD), 3);
         assert_eq!(count(&words, op::GROUP_NON_UNIFORM_F_ADD), 1);
 
@@ -208,7 +168,6 @@ mod tests {
 
     #[test]
     fn one_lane_count_reduces_three_different_ways_across_two_devices() {
-        // DR-0002, read off the emitted instruction rather than the mapping.
         assert_eq!(reduce_operands::<32>(32)[3], GroupOperation::Reduce.word());
         assert_eq!(
             reduce_operands::<32>(64)[3],

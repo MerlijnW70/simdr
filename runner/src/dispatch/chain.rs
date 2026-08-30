@@ -1,29 +1,3 @@
-//! Several dispatches in a row, with the data staying on the device between them.
-//!
-//! A reduction that starts wider than one workgroup cannot finish in one dispatch: there is no
-//! barrier across a dispatch in Vulkan, so the only way one workgroup reads another's output is a
-//! second dispatch. Chaining them through the host would work and would measure the bus, which is
-//! the mistake `notes/FINDINGS.md` records twice already. So the whole chain is one command
-//! buffer, one submission, and the words never leave device memory until the end.
-//!
-//! # Feeding each pass its predecessor's output
-//!
-//! Two device buffers, alternating: pass 0 reads A and writes B, pass 1 reads B and writes A. Only
-//! the descriptor set changes — every kernel this crate emits binds buffer 0 read and buffer 1
-//! written, and the module never learns which is which. [`super::step`] has the arithmetic and the
-//! consequence, which is that the answer ends up in a different buffer depending on how many
-//! passes ran.
-//!
-//! This file is the recording: barriers, dispatches, and the submission around them. It replaced a
-//! device-to-device copy of B back into A after every pass — 22% of a held reduction over 2^20
-//! elements, two thirds of which was the pair of pipeline barriers the copy needed rather than the
-//! copy itself. What is left between passes is one barrier, because a pass still has to wait for
-//! the one before it, and that one barrier turned out to cost nearly what the pair did.
-//!
-//! So this is shorter code rather than faster code, except on a device short of bandwidth — 5.5%
-//! on the integrated Radeon and nothing measurable on the other two. `super::step` has the
-//! numbers.
-
 use super::pipeline::Pipeline;
 use super::step::{Ends, Pass, answer_in_destination};
 use crate::buffer::Buffer;
@@ -32,33 +6,10 @@ use ash::vk;
 use std::time::Duration;
 
 impl Gpu {
-    /// Run every pass in order over one pair of device-local buffers, and read the result back.
-    ///
-    /// Each pass reads what the one before it wrote. The buffers are both `input.len()` words
-    /// wide throughout — a shrinking chain simply stops reading the tail — so the caller sizes
-    /// once, for the first pass.
-    ///
-    /// The returned vector is the whole output buffer, not just the part the last pass touched.
-    /// Which prefix is meaningful is the caller's arithmetic, and it is the caller who knows it.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::NoPipeline`] if `passes` is empty, otherwise as [`Gpu::run`].
     pub fn run_chain(&self, passes: &[Pass<'_>], input: &[u32]) -> Result<Vec<u32>, Error> {
         self.run_chain_head(passes, input, input.len())
     }
 
-    /// The same, bringing only the first `head` words home.
-    ///
-    /// A chain that ends in one number — a reduction — has no use for the rest of the buffer, and
-    /// copying 4 MB back to read four bytes was **37%** of a held reduction over 2²⁰ elements. The
-    /// dispatches are identical; only the download shrinks.
-    ///
-    /// `head` is clamped to the buffer, so asking for more than there is returns what there is.
-    ///
-    /// # Errors
-    ///
-    /// As [`Gpu::run_chain`].
     pub fn run_chain_head(
         &self,
         passes: &[Pass<'_>],
@@ -69,10 +20,6 @@ impl Gpu {
             return Err(Error::NoPipeline);
         }
 
-        // Every pass, before anything is allocated. Both buffers are `input.len()` words wide for
-        // the whole chain, so each pass is the single-length question `Gpu::run` asks — and a chain
-        // is where getting it wrong is least visible, because a pass that runs off the end writes
-        // into whatever the *next* pass is about to read.
         for pass in passes {
             let grid = super::Grid::linear(pass.workgroups);
             if let Some(overrun) =
@@ -90,16 +37,6 @@ impl Gpu {
         // used only between a submission and the fence that completes it.
         unsafe {
             let staging = Buffer::staging(self, bytes)?;
-            // **Not `Buffer::shared`, and that was measured rather than assumed.** This path
-            // allocates its buffers on every call, and allocating out of the memory both sides can
-            // reach costs more than the upload it saves: `Gpu::sum` over 2²⁰ went from ~2153 µs to
-            // ~3492 µs on an RTX 4080 when this asked for shared memory — 62% slower. The tell is
-            // the 8 192-element case, which has 32 KB to upload and no transfer worth saving, and
-            // still lost 22%. So the cost is in the allocation, not the writing.
-            //
-            // `Reducer` and `Session` do ask for it, because they allocate once and upload many
-            // times. Same memory, opposite answer, and the difference is only how often the buffer
-            // is made. `notes/FINDINGS.md` has both columns.
             let source = Buffer::device_local(self, bytes)?;
             let destination = Buffer::device_local(self, bytes)?;
 
@@ -123,11 +60,6 @@ impl Gpu {
         }
     }
 
-    /// Upload, run the chain, download — with everything torn down afterwards.
-    ///
-    /// # Safety
-    ///
-    /// The buffers must be live and the device idle with respect to them.
     unsafe fn chained_run(
         &self,
         passes: &[Pass<'_>],
@@ -144,11 +76,6 @@ impl Gpu {
 
         let mut pipelines = Vec::with_capacity(passes.len());
         for (index, pass) in passes.iter().enumerate() {
-            // Built before recording rather than inside it: a failure here must not leave a
-            // half-recorded command buffer, and every pipeline has to outlive the submission.
-            //
-            // The buffer pair alternates, which is the whole ping-pong: this pipeline's descriptor
-            // set is what decides which end the pass reads.
             let (read, written) = Ends::of(index).order(source, destination);
             // SAFETY: this function's contract says the buffers are live and the device idle with
             // respect to them, which is what pointing descriptors at them requires. Every pipeline
@@ -179,13 +106,8 @@ impl Gpu {
         } else {
             source
         };
-        // Only what the caller asked for. `count` is words and the copy is bytes, and the
-        // difference between those two is exactly the mistake that made this read megabytes.
         let home = (count.max(1) * size_of::<u32>()) as u64;
 
-        // One submission for the upload, the chain and the answer together. These were three, and
-        // on a device with memory both sides can reach the upload is not even one of them —
-        // `deliver` has already put the input into `source` and handed back `None`.
         // SAFETY: every pipeline in `pipelines` was built above and is still live, the buffers are
         // the caller's and outlive the call, and `replay` waits on its fence before returning.
         let recorded = unsafe {
@@ -213,61 +135,22 @@ impl Gpu {
     }
 }
 
-/// The three buffers a chain runs over, and how wide they are.
-///
-/// Grouped because they are one decision, not three: the pair alternates and the staging buffer
-/// serves both ends, so a caller that had `source` right and `destination` wrong would have a
-/// working program that returned the second-to-last pass. Passing them together also keeps them
-/// the same width, which every dispatch below assumes.
 #[derive(Clone, Copy)]
 struct Workspace<'a> {
-    /// The host's way in and out.
     staging: &'a Buffer,
-    /// Read by pass 0, and written by every odd pass after it.
     source: &'a Buffer,
-    /// Written by pass 0, and read by every odd pass after it.
     destination: &'a Buffer,
-    /// How wide all three are, in bytes.
     bytes: u64,
 }
 
-/// One buffer-to-buffer copy, recorded inside a submission rather than being one.
 #[derive(Clone, Copy)]
 pub(crate) struct Staged<'a> {
-    /// Where the bytes come from.
     pub(crate) from: &'a Buffer,
-    /// Where they go.
     pub(crate) to: &'a Buffer,
-    /// How many.
     pub(crate) bytes: u64,
 }
 
 impl Gpu {
-    /// Record every pipeline in order with a barrier between them, and wait for the whole thing.
-    ///
-    /// The half of a chain that does not care where the pipelines came from. [`Gpu::run_chain`]
-    /// builds them and throws them away; [`crate::Reducer`] keeps them. Both record the same
-    /// sequence, and it lives here so there is one of it.
-    ///
-    /// `workgroups` is one entry per pipeline, in the same order. Nothing here knows which buffers
-    /// a pipeline is bound to — that was decided when it was built, and this only has to order the
-    /// dispatches against each other.
-    ///
-    /// # The copies belong in here
-    ///
-    /// `before` moves the host's data into the buffer the first pass reads, and `after` brings the
-    /// answer back out. Both used to be separate [`Gpu::copy`] calls around this one, and a `copy`
-    /// is a whole `record_and_wait` — its own command buffer, its own submission, its own fence.
-    ///
-    /// `runner/examples/reducer.rs` measured a bare submit-and-wait at **~65 µs**, so a reduction
-    /// that submitted three times spent about 195 µs of a 540 µs call doing nothing but starting
-    /// and stopping. Recorded here they cost two barriers instead.
-    ///
-    /// # Safety
-    ///
-    /// The pipelines must be live, and their descriptor sets must name buffers that are — a set
-    /// built against freed ones would read freed memory. Every buffer named by `before` and
-    /// `after` must be live and large enough for its `bytes`.
     pub(crate) unsafe fn replay(
         &self,
         pipelines: &[Pipeline],
@@ -279,23 +162,6 @@ impl Gpu {
         unsafe { self.replay_timed(pipelines, workgroups, before, after) }.map(|_| ())
     }
 
-    /// The same submission, reporting how long each pass took **on the device's own clock**.
-    ///
-    /// One timestamp per pass, written into the command buffer between the dispatches rather than
-    /// around them. That is the whole difference from timing a pass on its own: a probe pays its
-    /// own submission, its own fence and its own cold caches, and a chain's third dispatch pays
-    /// none of those because the two before it already did.
-    ///
-    /// `runner/examples/reducer.rs` had a breakdown built out of probes, and its rows came to
-    /// **123%** of the call they were describing. These are the call.
-    ///
-    /// The returned vector is one duration per pass, in order, and **empty on a device with no
-    /// usable timestamp queries** — `timestampValidBits` is zero on some queues and the feature is
-    /// optional. Empty means "this device cannot say", not "it took no time".
-    ///
-    /// # Safety
-    ///
-    /// As [`Gpu::replay`].
     pub(crate) unsafe fn replay_timed(
         &self,
         pipelines: &[Pipeline],
@@ -303,9 +169,6 @@ impl Gpu {
         before: Option<Staged<'_>>,
         after: Option<Staged<'_>>,
     ) -> Result<Vec<Duration>, Error> {
-        // One mark per pass, so a caller that wants to know where a chain's time went can be told
-        // in the terms of the chain that actually ran. `Gpu::replay` throws the answer away and
-        // `Gpu::replay_timed` hands it back; both record the same command buffer.
         let marks = pipelines.len() as u32;
         // SAFETY: `record_and_wait` asks that whatever the closure names outlive the submission.
         // It names the pipelines and the buffers in `before`/`after`, all of which are the
@@ -313,8 +176,6 @@ impl Gpu {
         let recorded = unsafe {
             self.record_and_wait(marks, |device, command, clock| {
                 if let Some(upload) = before {
-                    // Nothing has run yet, so there is nothing to wait for — only to make visible.
-                    // The barrier after it is what the first dispatch needs.
                     let region = [vk::BufferCopy::default().size(upload.bytes)];
                     device.cmd_copy_buffer(command, upload.from.handle, upload.to.handle, &region);
                     across(device, command, TRANSFER_TO_SHADER);
@@ -322,10 +183,6 @@ impl Gpu {
 
                 for (index, (pipeline, groups)) in pipelines.iter().zip(workgroups).enumerate() {
                     if index > 0 {
-                        // This pass reads what the one before it wrote, and writes what the one
-                        // before *that* read. The first is a memory dependency and needs the access
-                        // masks; the second is an execution dependency and needs only the barrier
-                        // to exist, which it does.
                         barrier(device, command);
                     }
 
@@ -344,10 +201,6 @@ impl Gpu {
                     );
                     device.cmd_dispatch(command, (*groups).max(1), 1, 1);
 
-                    // A mark per pass, written at the *bottom* of the pipe so it lands after this
-                    // dispatch has finished rather than after it was issued. This is what makes a
-                    // breakdown the call itself: each pass is measured beside the passes it
-                    // actually runs beside, paying whatever they make it pay.
                     if let Some(clock) = clock {
                         // SAFETY: covered by the block this closure runs inside — the command
                         // buffer is recording, and the index is below the count `marks` promised
@@ -374,7 +227,6 @@ impl Gpu {
     }
 }
 
-/// Which stages a barrier separates, and what it makes visible.
 type Stages = (
     vk::PipelineStageFlags,
     vk::PipelineStageFlags,
@@ -382,7 +234,6 @@ type Stages = (
     vk::AccessFlags,
 );
 
-/// The first dispatch reads what the upload copy wrote.
 const TRANSFER_TO_SHADER: Stages = (
     vk::PipelineStageFlags::TRANSFER,
     vk::PipelineStageFlags::COMPUTE_SHADER,
@@ -390,7 +241,6 @@ const TRANSFER_TO_SHADER: Stages = (
     vk::AccessFlags::SHADER_READ,
 );
 
-/// The download copy reads what the last dispatch wrote.
 const SHADER_TO_TRANSFER: Stages = (
     vk::PipelineStageFlags::COMPUTE_SHADER,
     vk::PipelineStageFlags::TRANSFER,
@@ -398,7 +248,6 @@ const SHADER_TO_TRANSFER: Stages = (
     vk::AccessFlags::TRANSFER_READ,
 );
 
-/// Record a barrier between two differing stages.
 fn across(device: &ash::Device, command: vk::CommandBuffer, stages: Stages) {
     let (from, to, written, read) = stages;
     let memory = [vk::MemoryBarrier::default()
@@ -420,13 +269,6 @@ fn across(device: &ash::Device, command: vk::CommandBuffer, stages: Stages) {
     }
 }
 
-/// Record the one barrier a chained pass needs.
-///
-/// `SHADER_WRITE` becoming visible to `SHADER_READ` is the read-after-write: this pass reads the
-/// buffer the last one wrote. `SHADER_WRITE` in the destination mask as well is the
-/// write-after-read: this pass writes the buffer the pass before it *read*, and while an execution
-/// dependency alone is enough for that, naming it is what stops the next reader of this code from
-/// removing it.
 fn barrier(device: &ash::Device, command: vk::CommandBuffer) {
     let memory = [vk::MemoryBarrier::default()
         .src_access_mask(vk::AccessFlags::SHADER_WRITE)

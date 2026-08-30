@@ -1,8 +1,3 @@
-//! Setting up a kernel's interface: buffers, layout, entry point, invocation index.
-//!
-//! All of it is the same every time, which is exactly why it belongs here rather than being
-//! copied into each kernel — this is the sixty lines that `Kernel::new` replaces.
-
 use super::Shape;
 use crate::lanes::{Element, LaneError};
 use crate::module::{Id, Module, Section, Version, op};
@@ -11,7 +6,6 @@ use crate::spec::{
     FunctionControl, MemoryModel, StorageClass,
 };
 
-/// A built interface, with `main` open and waiting for a body.
 pub(super) struct Parts {
     pub(super) module: Module,
     pub(super) element: Id,
@@ -19,15 +13,11 @@ pub(super) struct Parts {
     pub(super) uint: Id,
     pub(super) zero: Id,
     pub(super) buffers: Vec<Id>,
-    /// This invocation's index within its workgroup.
     pub(super) local: Id,
-    /// Which workgroup this invocation is in.
     pub(super) group: Id,
-    /// This invocation's row across the whole dispatch, for a grid kernel.
     pub(super) row: Option<Id>,
 }
 
-/// Build a module holding the interface, and open `main`.
 pub(super) fn build<T: Element>(shape: Shape) -> Result<Parts, LaneError> {
     if shape.buffers == 0 || shape.workgroup == 0 {
         return Err(LaneError::BadShape {
@@ -38,15 +28,6 @@ pub(super) fn build<T: Element>(shape: Shape) -> Result<Parts, LaneError> {
     if shape.rows == Some(0) {
         return Err(LaneError::BadRows { rows: 0 });
     }
-    // **The same bound `Lanes::new` applies, applied where the shape is.** A `Shape` carries the
-    // subgroup width because `decisions/DR-0002` says a module is built for one, and this checked
-    // every other field of it and not that one: `Shape::new(0, 64, 2)` built a kernel, stored to a
-    // buffer and finished a module `spirv-val` accepts — the failure arriving only if something
-    // later asked for a lane operation, and never at all for a kernel that has none.
-    //
-    // A width is not a detail of the lane API. It is what the addresses, the strip counts and the
-    // mapping are all decided from, so a shape that names an impossible one describes nothing, the
-    // way a workgroup of zero invocations does.
     if shape.subgroup == 0 || !shape.subgroup.is_power_of_two() {
         return Err(LaneError::BadWidth {
             width: shape.subgroup,
@@ -70,21 +51,12 @@ pub(super) fn build<T: Element>(shape: Shape) -> Result<Parts, LaneError> {
 
     let element_pointer = module.type_pointer(StorageClass::StorageBuffer, element)?;
 
-    // One struct per buffer rather than one shared: §2.8 lets aggregates repeat precisely so they
-    // can be decorated apart, and a caller that later wants different strides per binding should
-    // not have to unpick a shared type first.
-    // Two permissions rather than one: `element` above declared whatever the *type* needs, and
-    // this declares what a storage buffer holding it needs. A device may offer `shaderInt8` and
-    // not `storageBuffer8BitAccess`, and only the second is a property of the buffer.
     T::require_in_storage_buffer(&mut module)?;
 
     let mut buffers = Vec::with_capacity(shape.buffers as usize);
     for binding in 0..shape.buffers {
         let elements = module.type_runtime_array(element)?;
         let block = module.type_struct(&[elements])?;
-        // The element's own width, not four. This is the whole of the narrow types' benefit: the
-        // stride is what decides how many bytes a dispatch moves, and everything above it is
-        // unchanged.
         module.decorate(elements, Decoration::ArrayStride, &[T::STRIDE])?;
         module.decorate(block, Decoration::Block, &[])?;
         module.member_decorate(block, 0, Decoration::Offset, &[0])?;
@@ -96,10 +68,6 @@ pub(super) fn build<T: Element>(shape: Shape) -> Result<Parts, LaneError> {
         buffers.push(variable);
     }
 
-    // Declared, decorated and named in the interface in one call each. Below SPIR-V 1.4 that
-    // interface lists Input and Output only, so the buffers are deliberately absent — and it is
-    // rendered rather than emitted, because a kernel that reaches for a built-in while its body is
-    // being built adds to it long after this line. See `module::entry`.
     let local_id = module.builtin_input(BuiltIn::LocalInvocationId, uint3)?;
     let workgroup_id = module.builtin_input(BuiltIn::WorkgroupId, uint3)?;
     module.name(local_id, "local_id")?;
@@ -125,7 +93,6 @@ pub(super) fn build<T: Element>(shape: Shape) -> Result<Parts, LaneError> {
     module.begin_function(void, main, FunctionControl::None, signature)?;
     module.label()?;
 
-    // Both built-ins are three-component vectors; a linear dispatch only ever uses x.
     let local_vector = module.load(uint3, local_id)?;
     let local = module.composite_extract(uint, local_vector, &[0])?;
     let group_vector = module.load(uint3, workgroup_id)?;
@@ -146,15 +113,6 @@ pub(super) fn build<T: Element>(shape: Shape) -> Result<Parts, LaneError> {
     })
 }
 
-/// This invocation's row across the whole dispatch: `group.y × rows + local.y`.
-///
-/// Emitted once at function entry, because every access on the second axis wants it and the two
-/// built-ins are already loaded here.
-///
-/// **A workgroup one row deep folds to `group.y`.** The `LocalSize` above declares y as 1, so
-/// `LocalInvocationId.y` can only be 0 — that is not an assumption about the dispatch, it is what
-/// the execution mode this same function emitted says. Two instructions saved on the shape that
-/// most grid kernels use.
 fn row_index(
     module: &mut Module,
     shape: Shape,

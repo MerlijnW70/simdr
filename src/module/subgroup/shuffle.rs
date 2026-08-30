@@ -1,19 +1,6 @@
-//! Lane exchanges — what `simd_swizzle!` and the rotates lower to.
-//!
-//! Needs `GroupNonUniformShuffle` for the indexed forms and `GroupNonUniformShuffleRelative` for
-//! the up and down ones. Note that no instruction here takes a `GroupOperation`: a shuffle moves
-//! values between lanes rather than combining them, so it has no reduction shape to name.
-
 use crate::module::{BuildError, Id, Module, op};
 
 impl Module {
-    /// Read `value` from the lane `lane` names.
-    ///
-    /// `simd_swizzle!`'s general case: an arbitrary permutation in one instruction.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError`] if the instruction cannot be emitted.
     pub fn subgroup_shuffle(
         &mut self,
         result_type: Id,
@@ -28,14 +15,6 @@ impl Module {
         )
     }
 
-    /// Read `value` from the lane whose index is ours exclusive-or `mask` — the butterfly.
-    ///
-    /// The exchange a hand-written tree reduction is built from, and the reason such a reduction
-    /// needs no shared memory.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError`] if the instruction cannot be emitted.
     pub fn subgroup_shuffle_xor(
         &mut self,
         result_type: Id,
@@ -50,11 +29,6 @@ impl Module {
         )
     }
 
-    /// Read `value` from the lane `delta` below ours.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError`] if the instruction cannot be emitted.
     pub fn subgroup_shuffle_up(
         &mut self,
         result_type: Id,
@@ -69,11 +43,6 @@ impl Module {
         )
     }
 
-    /// Read `value` from the lane `delta` above ours.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError`] if the instruction cannot be emitted.
     pub fn subgroup_shuffle_down(
         &mut self,
         result_type: Id,
@@ -91,7 +60,6 @@ impl Module {
 
 #[cfg(test)]
 mod tests {
-    // A test may panic — that is how it reports.
     #![allow(clippy::expect_used, clippy::indexing_slicing)]
 
     use super::*;

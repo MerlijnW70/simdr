@@ -1,11 +1,3 @@
-//! A branch that yields a value.
-//!
-//! [`Lanes::if_uniform`] runs a body for its effects and nothing survives the merge. That is the
-//! honest shape for a store, and the wrong one for everything else: the moment a kernel wants
-//! *this sum or that one*, it needs a value that arrives from one arm or the other.
-//!
-//! SPIR-V spells that as `OpPhi`, which names the block each value came through:
-//!
 //! ```text
 //!   %entry:    OpSelectionMerge %merge None
 //!              OpBranchConditional %cond %then %else
@@ -15,36 +7,12 @@
 //!              OpBranch %merge
 //!   %merge:    %result = OpPhi %type %a %from_then %b %from_else
 //! ```
-//!
-//! The trap is `%from_then`. It is *not* `%then` whenever the arm branched again — a nested
-//! selection, a loop — and a phi naming the wrong predecessor is a module that validates and
-//! computes the wrong thing. So the arm's last open block is read back from
-//! [`crate::module::Module::current_block`] rather than assumed, and an arm that left no open
-//! block at all is refused by name.
-//!
-//! # Both arms run in the SPIR-V sense, neither runs on the machine
-//!
-//! The condition is a [`Uniform`], so the whole subgroup takes the same edge — DR-0003, same as
-//! everywhere else here. Unlike [`Lanes::select`], which evaluates both sides and picks, only one
-//! arm's instructions execute. That is the reason to reach for this: an arm that is expensive, or
-//! that contains a reduction, is genuinely skipped.
 
 use super::{LaneError, Lanes, Uniform};
 use crate::module::Id;
 use crate::spec::SelectionControl;
 
 impl Lanes<'_> {
-    /// Take one arm or the other, and yield the value the taken arm produced.
-    ///
-    /// Both closures return an [`Id`] of type `value_type`; the result is whichever one ran. Use
-    /// [`Lanes::type_of`] to name the type, or [`crate::module::Module::type_bool`] and friends
-    /// for something that is not an element type.
-    ///
-    /// # Errors
-    ///
-    /// [`LaneError::NoOpenBlock`] if an arm ends its own block — a `return`, or a branch it did
-    /// not close — because then its value has no edge into the merge. [`LaneError::Build`] if an
-    /// instruction cannot be emitted, or whatever an arm returns.
     pub fn choose_uniform<T, E>(
         &mut self,
         condition: Uniform,
@@ -74,15 +42,6 @@ impl Lanes<'_> {
             .phi(value_type, &[(taken, from_then), (untaken, from_else)])?)
     }
 
-    /// Take the arm when `condition` holds, and fall back to `otherwise` when it does not.
-    ///
-    /// The one-armed form, which is what most callers mean. `otherwise` is a value that already
-    /// exists before the branch — a running total, an identity element — so the false edge needs
-    /// no block of its own.
-    ///
-    /// # Errors
-    ///
-    /// As [`Lanes::choose_uniform`].
     pub fn if_uniform_value<F>(
         &mut self,
         condition: Uniform,
@@ -96,8 +55,6 @@ impl Lanes<'_> {
         self.choose_uniform(condition, value_type, body, |_| Ok(otherwise))
     }
 
-    /// Emit one arm: open its block, build it, close it into the merge, and report which block it
-    /// actually finished in.
     fn arm<F>(
         &mut self,
         block: Id,
@@ -110,7 +67,6 @@ impl Lanes<'_> {
     {
         self.module().label_at(block)?;
         let value = body(self)?;
-        // Read back *before* the branch closes it. Nesting is exactly why this cannot be `block`.
         let finished = self
             .module()
             .current_block()
@@ -122,7 +78,6 @@ impl Lanes<'_> {
 
 #[cfg(test)]
 mod tests {
-    // A test may panic — that is how it reports.
     #![allow(clippy::expect_used, clippy::indexing_slicing)]
 
     use super::*;
@@ -136,7 +91,6 @@ mod tests {
             .count()
     }
 
-    /// A uniform condition, built the only way there is.
     fn condition(lanes: &mut Lanes<'_>) -> Uniform {
         let zero = lanes
             .splat_bits::<F32, 32>(0.0_f32.to_bits())
@@ -146,7 +100,6 @@ mod tests {
         lanes.any_uniform(over).expect("voted")
     }
 
-    /// The operands of the sole `OpPhi` in `words`.
     fn phi_operands(words: &[u32]) -> Vec<u32> {
         decode::body(words)
             .find(|instruction| instruction.opcode() == op::PHI)
@@ -155,7 +108,6 @@ mod tests {
             .to_vec()
     }
 
-    /// The label ids in the order they were opened.
     fn labels(words: &[u32]) -> Vec<u32> {
         decode::body(words)
             .filter(|instruction| instruction.opcode() == op::LABEL)
@@ -207,7 +159,6 @@ mod tests {
         let opened = labels(&words);
         let operands = phi_operands(&words);
 
-        // result type, result id, then (value, from), else (value, from).
         assert_eq!(operands.len(), 6);
         assert_eq!(operands[3], opened[0], "the then arm");
         assert_eq!(operands[5], opened[1], "the else arm");
@@ -215,9 +166,6 @@ mod tests {
 
     #[test]
     fn a_nested_choice_is_named_by_its_own_merge_and_not_the_arm_it_opened() {
-        // The whole reason `current_block` exists. An arm that branches again finishes somewhere
-        // other than the block it opened, and a phi naming the block it opened would be a module
-        // that validates and reads a value from an edge that does not carry it.
         let mut module = Module::new(Version::V1_3);
         let mut lanes = Lanes::new(&mut module, 32).expect("built");
         let when = condition(&mut lanes);
@@ -235,7 +183,6 @@ mod tests {
 
         let words = module.finish();
         let opened = labels(&words);
-        // outer then, inner then, inner else, inner merge, outer else, outer merge.
         assert_eq!(opened.len(), 6);
 
         let outer = decode::body(&words)
@@ -309,7 +256,6 @@ mod tests {
             float,
             |_| Ok(one.id()),
             |lanes| {
-                // 12 lanes has no mapping onto a 32-wide subgroup.
                 lanes.splat_bits::<F32, 12>(0)?;
                 Ok(one.id())
             },

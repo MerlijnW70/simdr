@@ -1,25 +1,10 @@
-//! Votes, ballots and broadcasts — what a `Mask<T, N>` lowers to.
-//!
-//! Needs `GroupNonUniform` for [`Module::subgroup_elect`], `GroupNonUniformVote` for the votes,
-//! and `GroupNonUniformBallot` for the rest.
-
 use crate::module::{BuildError, Id, Module, op};
 
 impl Module {
-    /// True in exactly one lane of the group, and false in the rest.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError`] if the instruction cannot be emitted.
     pub fn subgroup_elect(&mut self, bool_type: Id, scope: Id) -> Result<Id, BuildError> {
         self.result_instruction(op::GROUP_NON_UNIFORM_ELECT, bool_type, &[scope.word()])
     }
 
-    /// True when `predicate` holds in every active lane — `Mask::all`.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError`] if the instruction cannot be emitted.
     pub fn subgroup_all(
         &mut self,
         bool_type: Id,
@@ -33,11 +18,6 @@ impl Module {
         )
     }
 
-    /// True when `predicate` holds in any active lane — `Mask::any`.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError`] if the instruction cannot be emitted.
     pub fn subgroup_any(
         &mut self,
         bool_type: Id,
@@ -51,11 +31,6 @@ impl Module {
         )
     }
 
-    /// True when every active lane holds the same `value`.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError`] if the instruction cannot be emitted.
     pub fn subgroup_all_equal(
         &mut self,
         bool_type: Id,
@@ -69,14 +44,6 @@ impl Module {
         )
     }
 
-    /// Every lane's `predicate`, gathered into a bitmask.
-    ///
-    /// `result_type` must be a four-component vector of `u32` — 128 bits, enough for the widest
-    /// subgroup any implementation reports. This is a `Mask<T, N>` made explicit.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError`] if the instruction cannot be emitted.
     pub fn subgroup_ballot(
         &mut self,
         result_type: Id,
@@ -90,11 +57,6 @@ impl Module {
         )
     }
 
-    /// The value held by the lane `lane` names, delivered to every lane.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError`] if the instruction cannot be emitted.
     pub fn subgroup_broadcast(
         &mut self,
         result_type: Id,
@@ -109,11 +71,6 @@ impl Module {
         )
     }
 
-    /// The value held by the lowest-numbered active lane, delivered to every lane.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError`] if the instruction cannot be emitted.
     pub fn subgroup_broadcast_first(
         &mut self,
         result_type: Id,
@@ -130,7 +87,6 @@ impl Module {
 
 #[cfg(test)]
 mod tests {
-    // A test may panic — that is how it reports.
     #![allow(clippy::expect_used, clippy::indexing_slicing)]
 
     use super::*;
@@ -241,10 +197,6 @@ mod tests {
 
     #[test]
     fn a_vote_on_a_value_takes_the_value_itself_and_not_a_predicate_about_it() {
-        // `OpGroupNonUniformAllEqual` is shaped like the votes above and asks a different question:
-        // its operand is the value being compared across lanes rather than a boolean, and only the
-        // result is a boolean. It sat in this crate with no caller until an audit found it, which
-        // is why it gets its own check rather than sharing one with `all` and `any`.
         let mut module = Module::new(Version::V1_3);
         let boolean = module.type_bool().expect("bool");
         let value = module.constant_f32(1.5).expect("1.5");

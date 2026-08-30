@@ -1,13 +1,6 @@
-//! Constant declarations, deduplicated by the bits they encode to.
-
 use super::{BuildError, Id, Module, Section, op};
 use crate::encode::Word;
 
-/// What makes a constant the same constant as another.
-///
-/// The value is held as the bits it encodes to rather than as a number, which is both what the
-/// instruction carries and the right notion of sameness: two `f32`s with identical bits are one
-/// constant, and `0.0` and `-0.0` are two.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) enum ConstantKey {
     Bool { of_type: Id, value: bool },
@@ -15,7 +8,6 @@ pub(super) enum ConstantKey {
 }
 
 impl Module {
-    /// Return the id of an identical constant, declaring it first if the module has not seen it.
     fn intern_constant(
         &mut self,
         key: ConstantKey,
@@ -28,8 +20,6 @@ impl Module {
         }
 
         let id = self.alloc_id()?;
-        // A constant names its type first and itself second — the reverse of a type declaration,
-        // which has no type to name.
         let mut operands = vec![of_type.word(), id.word()];
         operands.extend_from_slice(literal);
         self.emit(Section::TypeConstantVariable, opcode, &operands)?;
@@ -37,11 +27,6 @@ impl Module {
         Ok(id)
     }
 
-    /// A 32-bit unsigned constant, declaring `u32` if needed.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError`] if the declaration cannot be emitted.
     pub fn constant_u32(&mut self, value: u32) -> Result<Id, BuildError> {
         let of_type = self.type_int(32, false)?;
         self.intern_constant(
@@ -55,15 +40,8 @@ impl Module {
         )
     }
 
-    /// A 32-bit signed constant, declaring `i32` if needed.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError`] if the declaration cannot be emitted.
     pub fn constant_i32(&mut self, value: i32) -> Result<Id, BuildError> {
         let of_type = self.type_int(32, true)?;
-        // Reinterpreted rather than converted: the instruction carries the bit pattern, and a
-        // negative value must not be range-checked into something else on the way.
         let bits = u32::from_ne_bytes(value.to_ne_bytes());
         self.intern_constant(
             ConstantKey::Scalar32 { of_type, bits },
@@ -73,14 +51,6 @@ impl Module {
         )
     }
 
-    /// A 32-bit float constant, declaring `f32` if needed.
-    ///
-    /// Sameness is by bit pattern, which is the specification's rule and also the useful one:
-    /// `0.0` and `-0.0` stay two constants, and two NaNs with different payloads do too.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError`] if the declaration cannot be emitted.
     pub fn constant_f32(&mut self, value: f32) -> Result<Id, BuildError> {
         let of_type = self.type_float(32)?;
         let bits = value.to_bits();
@@ -92,21 +62,6 @@ impl Module {
         )
     }
 
-    /// A scalar constant of a type this module has already declared.
-    ///
-    /// What the narrow element types need: `OpConstant` carries one literal word for any scalar
-    /// type 32 bits or narrower, so an `i8` and an `f16` constant are the same instruction with a
-    /// different type id.
-    ///
-    /// **The literal must already be extended to 32 bits the way the type requires** — sign-
-    /// extended for a signed integer narrower than 32 bits, zero-extended otherwise. That is
-    /// §2.2.1's rule and it is not checked here, because this layer holds an id and has no way to
-    /// ask what the type behind it was. [`crate::lanes::Element::constant_from_bits`] is where
-    /// each type does its own extending, and where the tests for it live.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError`] if the declaration cannot be emitted.
     pub fn constant_scalar(&mut self, of_type: Id, literal: Word) -> Result<Id, BuildError> {
         self.intern_constant(
             ConstantKey::Scalar32 {
@@ -119,11 +74,6 @@ impl Module {
         )
     }
 
-    /// A boolean constant, declaring `bool` if needed.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError`] if the declaration cannot be emitted.
     pub fn constant_bool(&mut self, value: bool) -> Result<Id, BuildError> {
         let of_type = self.type_bool()?;
         let opcode = if value {
@@ -137,7 +87,6 @@ impl Module {
 
 #[cfg(test)]
 mod tests {
-    // A test may panic — that is how it reports.
     #![allow(clippy::expect_used, clippy::indexing_slicing)]
 
     use super::*;
@@ -167,7 +116,6 @@ mod tests {
     fn constants_of_different_types_are_distinct_even_with_the_same_bits() {
         let mut module = Module::new(Version::V1_3);
 
-        // Zero has the same 32 bits whether it is an unsigned, a signed or a float.
         let unsigned = module.constant_u32(0).expect("0u32");
         let signed = module.constant_i32(0).expect("0i32");
         let float = module.constant_f32(0.0).expect("0.0f32");
@@ -184,7 +132,6 @@ mod tests {
 
         let words = module.finish();
 
-        // The literal is the last word: two's complement, not a range-checked conversion.
         assert_eq!(words.last(), Some(&0xffff_ffff));
     }
 
@@ -225,7 +172,6 @@ mod tests {
         let words = module.finish();
         let body = &words[5..];
 
-        // OpTypeBool, then OpConstantTrue, then OpConstantFalse — the type declared once.
         assert_eq!(body[0] & 0xffff, Word::from(op::TYPE_BOOL));
         assert_eq!(body[2] & 0xffff, Word::from(op::CONSTANT_TRUE));
         assert_eq!(body[5] & 0xffff, Word::from(op::CONSTANT_FALSE));
@@ -255,11 +201,6 @@ mod tests {
 
     #[test]
     fn the_general_scalar_form_interns_with_the_typed_one_it_generalises() {
-        // `constant_scalar` is what a caller with a type in hand reaches for; `constant_u32` is the
-        // spelling for the type this crate uses most. They key on the same shape, so asking both
-        // for the same number of the same type has to yield one declaration and one id — otherwise
-        // a module would carry two `OpConstant`s that mean the same thing and every caller holding
-        // the older id would be pointing at a duplicate.
         let mut module = Module::new(Version::V1_3);
         let uint = module.type_int(32, false).expect("u32");
 

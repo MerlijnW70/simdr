@@ -1,42 +1,15 @@
-//! `simdr` pointed at a real workload: a chess engine's NNUE output layer.
-//!
-//! The engine is `H:\schaak` — zero dependencies, no `unsafe`, same discipline as this project.
-//! Its network is `768 → 256×2 → 1`, quantised, and the whole per-evaluation arithmetic once the
-//! accumulator is current is two 256-element clipped-ReLU dot products. That is what runs here,
-//! at those dimensions, with that clamp.
-//!
-//! # What this measures, and what it cannot
-//!
-//! Two numbers, and the gap between them is the answer:
-//!
-//! - **Latency**: one evaluation, asked for and waited on. What a game-tree search would pay.
-//! - **Throughput**: many evaluations at once. What a trainer or a validation sweep would pay.
-//!
-//! The engine's own recorded figures (`H:\schaak\NNUE.md`) are the comparison: 5.0 M evals/s on
-//! one CPU thread at full refresh, 199 ns each. Those are single-threaded and this is a whole GPU,
-//! so a throughput win here is not a like-for-like victory — it is an upper bound on what
-//! offloading could ever be worth, measured rather than assumed.
-//!
-//! Nothing here plugs into the engine. It runs the engine's arithmetic at the engine's size, which
-//! is what decides whether plugging in would be worth doing.
-
 use runner::Gpu;
 use runner::kernels::network::{Layer, bits, clipped_dot, unclipped_dot};
 use std::time::Instant;
 
-/// One layer: 256 elements, the engine's `HIDDEN`.
 const WIDTH: usize = 256;
 
-/// Two layers per position — one per perspective — which one workgroup covers.
 const PER_POSITION: usize = 2 * WIDTH;
 
-/// The engine's single-threaded full-refresh rate, from `H:\schaak\NNUE.md:154`.
 const ENGINE_EVALS_PER_SECOND: f64 = 5.0e6;
 
-/// How many round trips to time.
 const ROUND_TRIPS: u32 = 100;
 
-/// How many batched dispatches to time together.
 const BATCHED: u32 = 50;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -61,7 +34,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// One evaluation, asked for and waited on.
 fn latency(gpu: &Gpu) -> Result<(), Box<dyn std::error::Error>> {
     let spirv = clipped_dot::<256>(32, PER_POSITION as u32, Layer::QA)?;
     let input = payload(1);
@@ -86,11 +58,6 @@ fn latency(gpu: &Gpu) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// As many evaluations at once as the device will take.
-///
-/// The largest size here holds 268 MB of operands, which is past the point where this project's
-/// measurements have ever been trustworthy — the `spread` column is what says so on the spot,
-/// rather than the reader finding out by running it twice.
 fn throughput(gpu: &Gpu) -> Result<(), Box<dyn std::error::Error>> {
     println!("many positions at once, dispatch time only");
     println!(
@@ -123,14 +90,7 @@ fn throughput(gpu: &Gpu) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// What the clamp costs, since there is no elementwise min or max to do it in one.
-///
-/// Two kernels differing by four instructions per element, timed back to back. The pair is run
-/// several times over rather than once each: an A-then-B comparison at one size is exactly the
-/// shape that produced two retracted claims in `notes/FINDINGS.md`, and the only defence is to
-/// show the spread and refuse the ratio when it is wide.
 fn clamp_cost(gpu: &Gpu) -> Result<(), Box<dyn std::error::Error>> {
-    // Small enough that the working set is not the thing being measured: 8 MB of operands.
     let positions = 2_048_u32;
     let offset = positions * PER_POSITION as u32;
     let input = payload(positions as usize);
@@ -158,9 +118,6 @@ fn clamp_cost(gpu: &Gpu) -> Result<(), Box<dyn std::error::Error>> {
         measured.push((each, timing.is_steady(), timing.spread()));
     }
 
-    // A ratio is worth printing only when the gap between the two is larger than the wobble
-    // within either. 1% apart with a 3% spread is not a small difference — it is no difference,
-    // and reporting it as "1.01x" would be inventing a digit the measurement does not have.
     match (measured.first(), measured.get(1)) {
         (Some(&(clipped, steady_a, spread_a)), Some(&(plain, steady_b, spread_b))) => {
             let ratio = clipped.as_secs_f64() / plain.as_secs_f64();
@@ -189,7 +146,6 @@ fn clamp_cost(gpu: &Gpu) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// State the conclusion, so a reader of the output does not have to infer it.
 fn verdict() {
     println!("what this says");
     println!("  - in search: no. One answer costs more than the engine spends on thousands,");
@@ -200,10 +156,6 @@ fn verdict() {
     println!("    numbers say evaluation is ~20% of search time. Free eval caps the win at ~25%.");
 }
 
-/// `positions` positions' worth of activations followed by the same many weights.
-///
-/// The values are the shape a real accumulator has — some below the floor, some above the
-/// ceiling — because a payload that never triggered the clamp would be timing a different kernel.
 fn payload(positions: usize) -> Vec<u32> {
     let count = positions * PER_POSITION;
     let mut words = Vec::with_capacity(count * 2);
@@ -212,7 +164,6 @@ fn payload(positions: usize) -> Vec<u32> {
     words
 }
 
-/// One accumulator value.
 fn activation(index: usize) -> i32 {
     match index % 4 {
         0 => -(index as i32 % 500) - 1,

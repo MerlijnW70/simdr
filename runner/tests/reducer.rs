@@ -1,26 +1,3 @@
-//! The reduction with its pipelines held, on a real device.
-//!
-//! `reduction.rs` checks that a full-buffer sum is *right*. This checks that keeping the pipelines
-//! and the buffers between calls does not change the answer — which is the only thing a cache is
-//! allowed to do, and the thing a cache most easily gets wrong.
-//!
-//! # The failure a cache has
-//!
-//! State left behind. A reducer whose buffers still hold the last call's data would answer the
-//! second question with a mixture of both, and the mixture would be a plausible number. So the
-//! tests here run *different* inputs through one reducer and compare each against its own answer,
-//! rather than running the same input twice and finding it stable.
-
-//! # Why the gates here name a feature bit by hand
-//!
-//! Every other file in this suite asks the *module* what it needs — `common::runnable` reads the
-//! `OpCapability` list out of it, so a kernel that starts needing something new brings its own gate.
-//! A `Reducer` builds its modules **inside itself**, from a length rather than from a caller's
-//! SPIR-V, so there is nothing here to ask. Naming `subgroup_arithmetic` is the only option, and it
-//! is a limitation of the type's shape rather than a choice made here.
-//!
-//! The same is true of `scan.rs`'s `Scanner` and of the two held cases in `bounds.rs`.
-
 mod common;
 
 use common::device;
@@ -28,7 +5,6 @@ use runner::kernels::WORKGROUP_SIZE;
 use runner::reduction::dispatches_for;
 use runner::{BadLength, Error};
 
-/// Values whose every partial sum stays inside the 24 bits an `f32` carries.
 fn payload(count: usize, scale: f32) -> Vec<f32> {
     (0..count)
         .map(|index| (index % 16) as f32 * scale)
@@ -64,9 +40,6 @@ fn a_held_reducer_gives_the_same_answer_as_a_fresh_sum() {
 
 #[test]
 fn a_reducer_reused_does_not_return_the_first_answer_again() {
-    // The failure a cache has. Three different inputs through one reducer, each answered on its
-    // own terms — the same discipline `session.rs` uses, and for the same reason: a stale buffer
-    // returns a number rather than an error.
     let Some(gpu) = device("reducer-reuse") else {
         return;
     };
@@ -95,9 +68,6 @@ fn a_reducer_reused_does_not_return_the_first_answer_again() {
 
 #[test]
 fn a_reducer_refuses_an_input_that_is_not_the_length_it_was_built_for() {
-    // A shorter slice would leave the tail of the buffer holding the last call's data, and the
-    // answer would be this call's sum plus part of that one's. Refused rather than truncated,
-    // which is what this crate does everywhere a length disagrees.
     let Some(gpu) = device("reducer-length") else {
         return;
     };
@@ -115,7 +85,6 @@ fn a_reducer_refuses_an_input_that_is_not_the_length_it_was_built_for() {
         Err(Error::TooLarge { .. })
     ));
 
-    // And the right length still works afterwards, so a refusal leaves nothing broken behind.
     let input = payload(count, 1.0);
     let expected: f32 = input.iter().sum();
     assert_eq!(reducer.sum(&input).expect("reduced").total, expected);
@@ -123,9 +92,6 @@ fn a_reducer_refuses_an_input_that_is_not_the_length_it_was_built_for() {
 
 #[test]
 fn a_reducer_refuses_the_lengths_a_one_shot_sum_refuses() {
-    // The same guards as `Gpu::sum`, checked here because a reducer that accepted a length it
-    // could not fold would move the failure from construction to the first call — later, and
-    // further from the mistake.
     let Some(gpu) = device("reducer-shape") else {
         return;
     };
@@ -145,8 +111,6 @@ fn a_reducer_refuses_the_lengths_a_one_shot_sum_refuses() {
 
 #[test]
 fn two_reducers_of_different_lengths_do_not_interfere() {
-    // Each owns its own buffers and its own pipelines, so holding two at once has to be safe —
-    // and the descriptor sets of one must not name the other's memory.
     let Some(gpu) = device("reducer-two") else {
         return;
     };
@@ -161,7 +125,6 @@ fn two_reducers_of_different_lengths_do_not_interfere() {
     let small_input = payload(4_096, 1.0);
     let large_input = payload(16_384, 1.0);
 
-    // Interleaved, so a shared buffer would show up as one answer polluting the other.
     let first_small = small.sum(&small_input).expect("reduced").total;
     let first_large = large.sum(&large_input).expect("reduced").total;
     let second_small = small.sum(&small_input).expect("reduced").total;
@@ -180,13 +143,6 @@ fn two_reducers_of_different_lengths_do_not_interfere() {
 
 #[test]
 fn a_reducer_reads_the_end_of_the_pair_its_last_pass_wrote() {
-    // The chain ping-pongs across two buffers, so which one holds the answer depends on whether the
-    // pass count is odd or even. Reading the wrong one returns the second-to-last fold — a
-    // plausible number, roughly twice the right one, and green on any length that happens to have
-    // the parity the code assumed.
-    //
-    // So this sweeps lengths. `dispatches_for` is 8 at 8 192 elements and 15 at 2^20, so both
-    // parities are here whatever the device's subgroup width does to the fold count.
     let Some(gpu) = device("reducer-parity") else {
         return;
     };
@@ -214,9 +170,6 @@ fn a_reducer_reads_the_end_of_the_pair_its_last_pass_wrote() {
             Err(error) => panic!("{count} elements: {error}"),
         };
 
-        // Two different inputs through one reducer, large first. A stale buffer would make the
-        // second answer too large rather than too small, and the wrong end of the pair would make
-        // either about double.
         let heavy = payload(count, 4.0);
         let light = payload(count, 1.0);
 
@@ -245,10 +198,6 @@ fn a_reducer_reads_the_end_of_the_pair_its_last_pass_wrote() {
 
 #[test]
 fn a_chain_of_either_parity_returns_the_buffer_its_last_pass_wrote() {
-    // The same claim one level down, where the pass count is chosen rather than derived. One
-    // doubling, two, three and four: the odd ones leave the answer in the destination buffer and
-    // the even ones in the source, and every count has a different expected value so no two can be
-    // confused.
     let Some(gpu) = device("chain-parity") else {
         return;
     };
@@ -275,12 +224,6 @@ fn a_chain_of_either_parity_returns_the_buffer_its_last_pass_wrote() {
 
 #[test]
 fn a_head_read_returns_that_many_words_and_the_right_ones() {
-    // `run_chain_head` brings only a prefix home. The failure it has to not have is returning the
-    // right *count* of the wrong words — a `head` applied to the read but not to the copy, or the
-    // other way round, would still return something of the expected length.
-    //
-    // So every element is distinct and the prefix is compared against the full run's, element for
-    // element, at several lengths.
     let Some(gpu) = device("chain-head") else {
         return;
     };
@@ -310,8 +253,6 @@ fn a_head_read_returns_that_many_words_and_the_right_ones() {
 
 #[test]
 fn a_head_larger_than_the_buffer_returns_the_buffer() {
-    // Clamped rather than refused: a caller asking for more than exists has asked for everything,
-    // and copying past the end of the allocation is undefined rather than merely wrong.
     let Some(gpu) = device("chain-head-clamp") else {
         return;
     };
@@ -331,10 +272,6 @@ fn a_head_larger_than_the_buffer_returns_the_buffer() {
 
 #[test]
 fn a_mapped_reducer_computes_the_sum_of_squares_without_a_round_trip() {
-    // Σ x², the squared L2 norm. The map pass runs on the device and its output goes straight into
-    // the first fold — so the intermediate never crosses the bus. What this asserts is that it
-    // computes the same number the two-step route does, because "faster" is worth nothing if the
-    // answer moved.
     let Some(gpu) = device("reducer-mapped") else {
         return;
     };
@@ -351,8 +288,6 @@ fn a_mapped_reducer_computes_the_sum_of_squares_without_a_round_trip() {
             continue;
         }
 
-        // Small values, so every partial sum of squares stays inside the 24 bits an `f32` carries
-        // and the comparison is exact rather than lucky.
         let input: Vec<f32> = (0..count).map(|index| (index % 8) as f32).collect();
         let expected: f32 = input.iter().map(|value| value * value).sum();
 
@@ -360,8 +295,6 @@ fn a_mapped_reducer_computes_the_sum_of_squares_without_a_round_trip() {
         let total = mapped.sum(&input).expect("reduced").total;
         assert_eq!(total, expected, "{count} elements");
 
-        // And the two-step route, which is what a caller would have written instead: run the map,
-        // bring it home, send it back, reduce.
         let squares = gpu
             .run(&square, &input, count as u32 / WORKGROUP_SIZE)
             .expect("mapped");
@@ -379,9 +312,6 @@ fn a_mapped_reducer_computes_the_sum_of_squares_without_a_round_trip() {
 
 #[test]
 fn a_mapped_reducer_runs_one_more_dispatch_than_a_plain_one() {
-    // The map is a pass of the same chain rather than a second submission, and the count is what
-    // says so. It also moves the *parity*, which decides which buffer the answer lands in — the
-    // test above would fail if that were got wrong, and this one says where to look.
     let Some(gpu) = device("reducer-mapped-count") else {
         return;
     };

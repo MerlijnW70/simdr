@@ -1,14 +1,3 @@
-//! What `super` promises about a dispatch's reach, checked against modules it did not write.
-//!
-//! **A file of its own because there is three times as much of it as there is of the thing it
-//! checks**, and that ratio is the point rather than an accident: this reads SPIR-V, not only the
-//! SPIR-V this crate emits, so every clause it applies needs a module shaped to provoke it. The
-//! same split is why `runner/src/fuzz/domain/tests.rs` exists.
-//!
-//! Nothing moved but the braces. `use super::*` reaches the same items it did inline, because a
-//! `mod tests;` beside its parent is the same module path a `mod tests { … }` inside it was.
-
-// A test may panic — that is how it reports.
 #![allow(clippy::expect_used)]
 
 use super::{Bounds, Overrun, element_bytes, invocations, local_size};
@@ -18,16 +7,12 @@ use simdr::lanes::{F32, I8};
 use simdr::module::op;
 use simdr::spec::ExecutionMode;
 
-/// How many elements each invocation touches, as the tests below ask it.
 fn per_invocation(spirv: &[u32]) -> u64 {
     Bounds::of(spirv, &Specialization::none()).elements_per_invocation()
 }
 
 #[test]
 fn the_workgroup_size_is_read_out_of_the_module_the_emitter_built() {
-    // Not a constant repeated here: `kernels::WORKGROUP_SIZE` is what the kernel was built
-    // for, and this proves the module says the same thing. A linear kernel's other two axes
-    // are one, which is the reading that let the product stand in for the x axis for so long.
     let spirv = kernels::empty(32).expect("built");
     assert_eq!(
         local_size(&spirv),
@@ -37,20 +22,12 @@ fn the_workgroup_size_is_read_out_of_the_module_the_emitter_built() {
 
 #[test]
 fn a_module_with_no_execution_mode_at_all_reports_nothing() {
-    // The header alone. Nothing to decode, so nothing is claimed.
     assert_eq!(local_size(&[]), None);
     assert_eq!(local_size(&[0x0723_0203, 0x0001_0300, 0, 1, 0]), None);
 }
 
-/// A module body of one hand-built `OpExecutionMode`, for shapes the emitter does not produce.
-///
-/// Written out by hand because that is the point: every kernel here declares `LocalSize` and
-/// nothing else with five operands, so a module that does can only come from somewhere else —
-/// and "somewhere else" is exactly who this decoder has to be right about.
 fn module_with_execution_mode(mode: u32, sizes: [u32; 3]) -> Vec<u32> {
     let mut words = vec![0x0723_0203, 0x0001_0300, 0, 1, 0];
-    // Word count in the high half, opcode in the low: one for the instruction word, one for
-    // the entry point, one for the mode, three for the literals.
     words.push((6 << 16) | u32::from(op::EXECUTION_MODE));
     words.push(1);
     words.push(mode);
@@ -60,9 +37,6 @@ fn module_with_execution_mode(mode: u32, sizes: [u32; 3]) -> Vec<u32> {
 
 #[test]
 fn an_execution_mode_that_is_not_local_size_declares_no_workgroup() {
-    // `LocalSizeHint` takes the same three literals and means something else entirely — it is
-    // advice to a driver, not the shape of a dispatch. Reading its operands as a workgroup
-    // size would invent a number out of an unrelated instruction.
     let hint = module_with_execution_mode(ExecutionMode::LocalSize.word() + 1, [2, 3, 4]);
     assert_eq!(local_size(&hint), None);
 
@@ -72,9 +46,6 @@ fn an_execution_mode_that_is_not_local_size_declares_no_workgroup() {
 
 #[test]
 fn the_three_axes_of_a_workgroup_are_multiplied_and_not_divided() {
-    // Every kernel here declares `LocalSize x 1 1`, where a product and a quotient agree:
-    // `x * 1 * 1` and `x / 1 / 1` are both `x`. So the one shape that tells them apart has to
-    // be built by hand, and without it the operator is untested on real modules.
     let module = module_with_execution_mode(ExecutionMode::LocalSize.word(), [2, 3, 4]);
     let axes = local_size(&module).expect("declared");
 
@@ -88,16 +59,11 @@ fn invocations_multiply_both_axes_by_the_workgroup() {
     assert_eq!(invocations(Grid::linear(16), [64, 1, 1]), 1024);
     assert_eq!(invocations(Grid::new(4, 4), [64, 1, 1]), 1024);
 
-    // A grid's workgroup is `columns × rows`, so its y is counted twice over — once as
-    // invocations within a workgroup and once as workgroups across the dispatch.
     assert_eq!(invocations(Grid::new(4, 4), [64, 2, 1]), 2048);
 }
 
 #[test]
 fn the_product_is_computed_wide_enough_not_to_wrap() {
-    // 2^20 workgroups of 2^16 invocations is 2^36, which does not fit in the `u32` both
-    // factors are. Computed narrowly it is *zero*, and a dispatch of zero invocations fits
-    // every buffer — so the wrap would not merely misreport, it would report the safe answer.
     assert_eq!(invocations(Grid::linear(1 << 20), [1 << 16, 1, 1]), 1 << 36);
     assert_eq!(
         (1_u32 << 20).wrapping_mul(1 << 16),
@@ -122,10 +88,6 @@ fn a_dispatch_that_matches_its_buffer_fits_and_one_word_more_does_not() {
 
 #[test]
 fn the_strip_count_is_read_back_out_of_the_module() {
-    // The emitter was told `LANES`; nothing wrote the strip count down. It is recovered from
-    // the address arithmetic, so these assertions are against what the *mapping* decides:
-    // 32 lanes on a 32-wide subgroup is one element per invocation, 128 is four, and on a
-    // 64-wide subgroup the same 128 is two.
     for (width, lanes, strips) in [(32_u32, 32_u32, 1_u64), (32, 128, 4), (64, 128, 2)] {
         let spirv = match lanes {
             32 => kernels::reduce::lane_sum::<F32, 32>(width),
@@ -149,16 +111,11 @@ fn a_kernel_that_touches_one_element_per_invocation_reports_one() {
 
 #[test]
 fn a_module_with_no_workgroup_arithmetic_reports_one_rather_than_nothing() {
-    // Under-counting is the safe direction: a floor that cannot read a module still refuses
-    // the dispatches it can prove wrong, and lets the rest through.
     assert_eq!(per_invocation(&[]), 1);
 }
 
 #[test]
 fn a_strip_mined_kernel_needs_more_buffer_than_its_invocation_count() {
-    // **The check the first version could not make.** Four strips at 32 lanes: one workgroup
-    // of 64 invocations touches 256 elements, so 64 words is not enough however many
-    // invocations there are.
     let bounds = Bounds::of(
         &kernels::reduce::lane_sum::<F32, 128>(32).expect("built"),
         &Specialization::none(),
@@ -175,8 +132,6 @@ fn a_strip_mined_kernel_needs_more_buffer_than_its_invocation_count() {
 
 #[test]
 fn the_strip_count_multiplies_the_requirement_and_does_not_replace_it() {
-    // Both factors, together. A version that used the strip count *instead of* the invocation
-    // count would accept a dispatch of any width.
     let bounds = Bounds::of(
         &kernels::reduce::lane_sum::<F32, 128>(32).expect("built"),
         &Specialization::none(),
@@ -192,11 +147,6 @@ fn the_strip_count_multiplies_the_requirement_and_does_not_replace_it() {
 
 #[test]
 fn the_width_four_bug_this_check_was_written_for_is_now_refused() {
-    // **The regression this exists to prevent, stated as itself.** A kernel with a hard-coded
-    // 32 lanes is one element per invocation on a 32-wide subgroup and *eight* on a four-wide
-    // one. `kernels::scale` was written that way, and on lavapipe at four lanes it read and
-    // wrote eight times the buffer every caller handed it: undefined behaviour returning zeros
-    // at width 8 for a day before it became an access violation at 4.
     let spirv = kernels::lane_affine::<32>(4).expect("built");
     let bounds = Bounds::of(&spirv, &Specialization::none());
     let workgroup = kernels::WORKGROUP_SIZE as usize;
@@ -215,14 +165,6 @@ fn the_width_four_bug_this_check_was_written_for_is_now_refused() {
 
 #[test]
 fn a_constant_offset_past_the_run_is_read_out_of_the_folded_address() {
-    // `kernels::network::clipped_dot` puts activations in the first `offset` elements of
-    // binding 0 and weights after them, so it is the kernel this check was blind to: everything
-    // it reads past `invocations × strips` is the offset, and the offset is a literal in the
-    // module's own address arithmetic.
-    //
-    // 512 rather than a round number on purpose — it is `WORKGROUP_SIZE × 8`, the same shape as
-    // a strip term, so a walk that subtracted the wrong number of strips would land near it
-    // rather than obviously away from it.
     let offset = kernels::WORKGROUP_SIZE * 8;
     let spirv = kernels::network::clipped_dot::<256>(32, offset, 255).expect("built");
     let bounds = Bounds::of(&spirv, &Specialization::none());
@@ -241,9 +183,6 @@ fn a_constant_offset_past_the_run_is_read_out_of_the_folded_address() {
 
 #[test]
 fn a_kernel_reading_past_its_run_needs_a_buffer_past_its_run() {
-    // The hole this closed, as the numbers a caller sees. One workgroup of 64 invocations at
-    // eight strips is a run of 512 elements, and the kernel reads 512 more past it — so a
-    // buffer of exactly the run is half of what it touches, and this used to say it fit.
     let offset = kernels::WORKGROUP_SIZE * 8;
     let bounds = Bounds::of(
         &kernels::network::clipped_dot::<256>(32, offset, 255).expect("built"),
@@ -264,9 +203,6 @@ fn a_kernel_reading_past_its_run_needs_a_buffer_past_its_run() {
 
 #[test]
 fn a_kernel_that_offsets_into_nothing_reports_no_offset() {
-    // The other direction, and the one every other kernel here takes: `load` is `load_offset`
-    // with a zero, the emitter folds the zero away rather than emitting an add, and this must
-    // report nothing rather than inventing a term out of the strip stride.
     assert_eq!(
         Bounds::of(&kernels::empty(32).expect("built"), &Specialization::none()).offset(),
         0
@@ -284,12 +220,6 @@ fn a_kernel_that_offsets_into_nothing_reports_no_offset() {
 
 #[test]
 fn a_plane_is_measured_by_its_pitch_and_not_by_its_invocations() {
-    // **The shape `plane`'s own header describes and this could not see.** A matrix 4096
-    // elements to the row, read 64 columns at a time: the rows are `pitch` apart whether or not
-    // the dispatch covers one, so the last of 64 rows *starts* at 63 × 4096 and the invocation
-    // product — 64 × 64 — is under it by two orders of magnitude.
-    // A grid kernel's workgroup is one subgroup across — `Shape::grid(subgroup, subgroup, …)`
-    // — so 32 is its x axis and not `WORKGROUP_SIZE`.
     let width = 32_usize;
     let pitch = 4096;
     let bounds = Bounds::of(
@@ -312,10 +242,6 @@ fn a_plane_is_measured_by_its_pitch_and_not_by_its_invocations() {
 
 #[test]
 fn a_plane_the_dispatch_covers_whole_agrees_with_the_invocation_product() {
-    // The other side of it, and the reason nothing here ever noticed: where the dispatch covers
-    // a whole row, `(rows - 1) × pitch + columns` *is* `rows × columns`. Every grid kernel in
-    // this crate is dispatched that way — `Grid::new(pitch / width, height / rows)` — so the
-    // two readings agree on all of them, and disagree without bound off them.
     let width = 32;
     let pitch = width * 3;
     let bounds = Bounds::of(
@@ -323,8 +249,6 @@ fn a_plane_the_dispatch_covers_whole_agrees_with_the_invocation_product() {
         &Specialization::none(),
     );
 
-    // `pitch / width` workgroups across, which is how `plane.rs`'s own tests dispatch every one
-    // of these — three of 32 columns each covers the 96 a row holds.
     let grid = Grid::new(pitch / width, 8);
     let whole = 8 * pitch as usize;
 
@@ -334,18 +258,6 @@ fn a_plane_the_dispatch_covers_whole_agrees_with_the_invocation_product() {
 
 #[test]
 fn a_grid_more_than_one_row_deep_finds_its_row_among_the_other_sums() {
-    // **The path the mutation gate found untested, and it is the path that was already wrong
-    // once.** A workgroup one row deep computes its row as `group.y` alone and never builds the
-    // sum — so every grid test in this crate and every unit test above it took the short branch,
-    // and `row = group.y × rows + local.y` was decoded by nothing at all.
-    //
-    // That matters here more than a missing case usually would, because the sum is the thing
-    // this file mistook for something else: `start = (group.y × pitch) + run` has the same shape
-    // and is the address the row is *used* to compute.
-    //
-    // Narrow rather than whole rows, on purpose. Where a dispatch covers a row the pitch reading
-    // and the invocation reading agree exactly, so a decoder that found no pitch at all would
-    // still answer correctly — which is what the first version of this did.
     let width = 32;
     let pitch = width * 4;
     let bounds = Bounds::of(
@@ -354,7 +266,6 @@ fn a_grid_more_than_one_row_deep_finds_its_row_among_the_other_sums() {
     );
     let grid = Grid::new(1, 4);
 
-    // Four workgroups of two rows each, one workgroup of columns across a row four times wider.
     let reached = 7 * pitch as usize + width as usize;
     assert!(bounds.fits(grid, reached));
     assert!(!bounds.fits(grid, reached - 1));
@@ -366,14 +277,6 @@ fn a_grid_more_than_one_row_deep_finds_its_row_among_the_other_sums() {
 
 #[test]
 fn the_pitch_is_the_constant_beside_the_row_and_not_the_largest_one_nearby() {
-    // The row's own arithmetic carries three constants — `rows`, `pitch` and the run — and only
-    // one of them is the distance between rows. On every kernel here the pitch is the largest of
-    // the three, so a decoder that took whichever it met would still be right; this is the shape
-    // where it is not.
-    //
-    // 64 rows of 32 elements is more invocations than a device would accept in one workgroup.
-    // That is deliberate and costs nothing: `Bounds` decodes a module rather than dispatching
-    // one, and the question here is which literal it reads.
     let width = 32;
     let pitch = width;
     let bounds = Bounds::of(
@@ -382,7 +285,6 @@ fn the_pitch_is_the_constant_beside_the_row_and_not_the_largest_one_nearby() {
     );
     let grid = Grid::new(1, 2);
 
-    // 128 rows in all, and the last of them starts 127 pitches in.
     let reached = 127 * pitch as usize + width as usize;
     assert!(
         bounds.fits(grid, reached),
@@ -391,15 +293,8 @@ fn the_pitch_is_the_constant_beside_the_row_and_not_the_largest_one_nearby() {
     assert!(!bounds.fits(grid, reached - 1));
 }
 
-/// `spirv` with a second copy of every `OpIAdd`, each under a fresh result id.
-///
-/// A module with two terms of the row's shape, which no kernel here emits and which the
-/// uniqueness rule in `addressing::row_of` exists for. The copies are referenced by nothing, so
-/// they change no address and reach no access chain — the *only* thing they change is how many
-/// terms answer to the row's description, which is the question being asked.
 fn with_every_sum_twice(spirv: &[u32]) -> Vec<u32> {
     let mut words = spirv[..5].to_vec();
-    // Word three of the header is the id bound, and a fresh id has to come from under it.
     let mut next = spirv[3];
     let mut at = 5;
 
@@ -411,7 +306,6 @@ fn with_every_sum_twice(spirv: &[u32]) -> Vec<u32> {
         let instruction = &spirv[at..at + count];
         words.extend_from_slice(instruction);
 
-        // Type, result, left, right, and the instruction word before them.
         if (spirv[at] & 0xffff) as u16 == op::I_ADD && count == 5 {
             let mut copy = instruction.to_vec();
             copy[2] = next;
@@ -427,20 +321,11 @@ fn with_every_sum_twice(spirv: &[u32]) -> Vec<u32> {
 
 #[test]
 fn two_terms_of_the_rows_shape_give_no_row_rather_than_the_first_one() {
-    // **The rule that says do not guess, made falsifiable.** Nothing this crate emits has two
-    // sums of the row's shape, so the check that there is only one could not fire — and a guard
-    // that cannot fire reads exactly like a guard that works.
-    //
-    // Doubling every sum is the smallest edit that creates the ambiguity: the copies are
-    // referenced by nothing, so no address changes and no access chain reaches them. All that
-    // changes is how many terms answer to the row's description.
     let width = 32;
     let pitch = width * 4;
     let spirv = kernels::row_scale(width, pitch, 2, 3).expect("built");
     let grid = Grid::new(1, 4);
 
-    // What the invocation reading gives, which is what a module with no readable row falls back
-    // to — and a quarter of what the pitch reading gives for this dispatch.
     let fallback = (width * 4 * 2) as usize;
     assert!(
         !Bounds::of(&spirv, &Specialization::none()).fits(grid, fallback),
@@ -452,13 +337,6 @@ fn two_terms_of_the_rows_shape_give_no_row_rather_than_the_first_one() {
     );
 }
 
-/// `spirv` with a second `OpIAdd` over each sum's own left operand, under a fresh result id.
-///
-/// A term built on the *row's base* — `group.y × rows` — without being the row: its right
-/// operand is that same multiply rather than `local.y`. Nothing here emits one, and it is the
-/// shape the last two clauses of `row_of`'s conjunction exist to reject.
-///
-/// As with [`with_every_sum_twice`], the copies are referenced by nothing.
 fn with_a_second_sum_on_each_base(spirv: &[u32]) -> Vec<u32> {
     let mut words = spirv[..5].to_vec();
     let mut next = spirv[3];
@@ -475,8 +353,6 @@ fn with_a_second_sum_on_each_base(spirv: &[u32]) -> Vec<u32> {
         if (spirv[at] & 0xffff) as u16 == op::I_ADD && count == 5 {
             let mut copy = instruction.to_vec();
             copy[2] = next;
-            // The right operand becomes the left, so the copy keeps the row's base and loses
-            // the `local.y` that makes it a row.
             copy[4] = copy[3];
             next += 1;
             words.extend_from_slice(&copy);
@@ -490,14 +366,6 @@ fn with_a_second_sum_on_each_base(spirv: &[u32]) -> Vec<u32> {
 
 #[test]
 fn a_sum_on_the_rows_base_that_is_not_on_the_lane_is_not_a_second_row() {
-    // The two clauses that say *what the sum is over* rather than what it adds. On every module
-    // this crate emits they reject nothing, because the only `OpIMul` over `group.y` is the
-    // row's own base and the only term using it is the row — so the conjunction and either half
-    // of it select the same instruction, and the gate reports both as unguarded.
-    //
-    // This is the module where they differ: a second term over that same base, adding something
-    // other than the lane. It is not a row, the row is still unique, and the pitch is still
-    // read. Take away either clause and there are two candidates, no row, and no pitch.
     let width = 32;
     let pitch = width * 4;
     let spirv = kernels::row_scale(width, pitch, 2, 3).expect("built");
@@ -514,18 +382,7 @@ fn a_sum_on_the_rows_base_that_is_not_on_the_lane_is_not_a_second_row() {
     );
 }
 
-/// `spirv` with one more constant folded into the first access chain's index, off the lane.
-///
-/// `i_add(index, k)` spliced in front of a chain and the chain repointed at it: a sum with a
-/// constant on its right, reachable from an address, whose left is **not** the invocation's
-/// lane. Nothing here emits one, and it is the shape `shift_in`'s left-hand clause rejects.
-///
-/// Additive and in order, so the module stays well formed — this one has to be *reachable* to
-/// matter, unlike the row's copies, because the offset walk follows an address rather than
-/// scanning every term.
 fn with_a_constant_added_off_the_lane(spirv: &[u32]) -> Vec<u32> {
-    // Any sum's result type is the type an index has; the module declares one integer type and
-    // every address term carries it.
     let integer = super::decode::body(spirv).find_map(|instruction| {
         match (instruction.opcode(), instruction.operands()) {
             (op::I_ADD, [kind, ..]) => Some(*kind),
@@ -548,7 +405,6 @@ fn with_a_constant_added_off_the_lane(spirv: &[u32]) -> Vec<u32> {
         }
         let instruction = &spirv[at..at + count];
 
-        // Type, result, base, member, index, and the instruction word.
         if !spliced && (spirv[at] & 0xffff) as u16 == op::ACCESS_CHAIN && count == 6 {
             words.extend_from_slice(&[
                 (5 << 16) | u32::from(op::I_ADD),
@@ -571,11 +427,6 @@ fn with_a_constant_added_off_the_lane(spirv: &[u32]) -> Vec<u32> {
     words
 }
 
-/// The id of the largest `OpConstant` of type `kind` in `spirv`.
-///
-/// The largest, because the walk this feeds takes a **maximum** — a constant under the strip
-/// stride would be folded away by that and prove nothing. And of the index's own type, so the
-/// number is an index rather than a float's bit pattern read as one.
 fn largest_constant(spirv: &[u32], kind: Option<u32>) -> Option<u32> {
     super::decode::body(spirv)
         .filter_map(
@@ -592,15 +443,6 @@ fn largest_constant(spirv: &[u32], kind: Option<u32>) -> Option<u32> {
 
 #[test]
 fn a_constant_added_off_the_lane_is_not_the_lanes_offset() {
-    // `shift_in` asks for the sum over the **invocation's own lane**, then keeps the ones with a
-    // constant on the right. Both halves matter and only one of them can be seen from a module
-    // this crate emits, because in an emitted address exactly one sum has a constant on its
-    // right and it is the lane's — so the gate reports the conjunction as unguarded.
-    //
-    // Here is the module where they part. A constant added to the index somewhere other than
-    // the lane is arithmetic this walk has no business reading as an offset past the run: the
-    // loose reading would ask for *more* buffer than the kernel touches, which is the one
-    // direction this check must never take.
     let spirv = kernels::reduce::lane_sum::<F32, 128>(32).expect("built");
 
     assert_eq!(
@@ -619,12 +461,6 @@ fn a_constant_added_off_the_lane_is_not_the_lanes_offset() {
     );
 }
 
-/// `spirv` with its `OpExecutionMode` removed, and everything else left alone.
-///
-/// A module that declares no workgroup size, built out of one that does — so every built-in,
-/// decoration and access chain the addressing walks is still there to walk. Hand-building one
-/// from nothing gives a module the walk leaves at the first missing built-in, which is a
-/// different thing and tests a different branch.
 fn without_execution_mode(spirv: &[u32]) -> Vec<u32> {
     let mut words = spirv[..5].to_vec();
     let mut at = 5;
@@ -643,19 +479,11 @@ fn without_execution_mode(spirv: &[u32]) -> Vec<u32> {
 
 #[test]
 fn a_module_that_declares_no_workgroup_size_is_not_divided_by_it() {
-    // The strip count is recovered by *dividing* the run by the workgroup, and a module with no
-    // `LocalSize` gives that divisor as zero. `Shape` refuses a workgroup of zero, so no module
-    // this crate emits can be the one that matters — and this decoder reads modules rather than
-    // emitting them.
-    //
-    // Which is why it is built by subtraction: an emitted kernel minus its `OpExecutionMode`
-    // keeps every built-in and access chain the walk needs to reach the division.
     let stripped =
         without_execution_mode(&kernels::reduce::lane_sum::<F32, 128>(32).expect("built"));
 
     assert_eq!(local_size(&stripped), None, "the mode is the thing removed");
 
-    // The point of the test is that constructing this at all does not divide by zero.
     let bounds = Bounds::of(&stripped, &Specialization::none());
     assert!(
         bounds.fits(Grid::linear(1 << 20), 1),
@@ -666,7 +494,6 @@ fn a_module_that_declares_no_workgroup_size_is_not_divided_by_it() {
 
 #[test]
 fn an_undecodable_module_is_let_through_rather_than_refused() {
-    // "This runner cannot tell" must not be reported as "your module is wrong".
     assert!(Bounds::of(&[], &Specialization::none()).fits(Grid::linear(1 << 20), 1));
     assert_eq!(
         Bounds::of(&[], &Specialization::none()).overrun(Grid::linear(1 << 20), &[1, 1]),
@@ -676,7 +503,6 @@ fn an_undecodable_module_is_let_through_rather_than_refused() {
 
 #[test]
 fn the_stride_is_the_one_the_element_type_needs() {
-    // Four bytes to a word, so these are 1, 2 and 4 elements per word respectively.
     assert_eq!(element_bytes(&kernels::empty(32).expect("built")), Some(4));
 
     let bytes = kernels::narrow::narrow_add::<I8, 32>(32, 1).expect("built");
@@ -685,8 +511,6 @@ fn the_stride_is_the_one_the_element_type_needs() {
 
 #[test]
 fn a_byte_kernel_fills_a_word_with_four_invocations_rather_than_one() {
-    // The false alarm this check had for one run. 128 invocations of a byte kernel need 128
-    // bytes, which is 32 words — not 128 of them.
     let bounds = Bounds::of(
         &kernels::narrow::narrow_add::<I8, 32>(32, 1).expect("built"),
         &Specialization::none(),
@@ -705,8 +529,6 @@ fn a_byte_kernel_fills_a_word_with_four_invocations_rather_than_one() {
 
 #[test]
 fn a_word_kernel_and_a_byte_kernel_disagree_by_exactly_four() {
-    // The same dispatch against the same buffer, differing only in element size. If these
-    // ever agree, the stride is not reaching the comparison.
     let words = Bounds::of(&kernels::empty(32).expect("built"), &Specialization::none());
     let bytes = Bounds::of(
         &kernels::narrow::narrow_add::<I8, 32>(32, 1).expect("built"),
@@ -720,8 +542,6 @@ fn a_word_kernel_and_a_byte_kernel_disagree_by_exactly_four() {
 
 #[test]
 fn a_partly_filled_word_still_needs_the_whole_word() {
-    // Rounding up rather than down. 129 byte-writing invocations need 33 words; a version that
-    // divided would accept 32 and leave the last invocation writing past the end.
     let bounds = Bounds::of(
         &kernels::narrow::narrow_add::<I8, 32>(32, 1).expect("built"),
         &Specialization::none(),
@@ -736,10 +556,6 @@ fn a_partly_filled_word_still_needs_the_whole_word() {
 
 #[test]
 fn each_binding_is_measured_against_its_own_size() {
-    // **What the module-wide answer could not say.** A reduction reads four strips from binding
-    // 0 and writes one scalar per invocation to binding 1, so the two need 256 elements and 64.
-    // Taking the largest and applying it to both — which is what a single number has to do —
-    // would refuse an output buffer that is exactly the right size.
     let bounds = Bounds::of(
         &kernels::reduce::lane_sum::<F32, 128>(32).expect("built"),
         &Specialization::none(),
@@ -772,9 +588,6 @@ fn each_binding_is_measured_against_its_own_size() {
 
 #[test]
 fn a_binding_addressed_by_workgroup_rather_than_by_invocation_is_left_alone() {
-    // `scan_blocks` writes one total per *workgroup* to binding 2, at `workgroup_index`. There
-    // is no invocation count to multiply there, and a check that multiplied anyway would demand
-    // 64 words for a buffer that legitimately holds one per block.
     let spirv = kernels::scan::scan_blocks::<F32>(32).expect("built");
     let bounds = Bounds::of(&spirv, &Specialization::none());
     let workgroup = kernels::WORKGROUP_SIZE as usize;
@@ -797,8 +610,6 @@ fn a_binding_addressed_by_workgroup_rather_than_by_invocation_is_left_alone() {
 
 #[test]
 fn a_binding_with_no_size_given_is_not_checked() {
-    // `overrun` takes what the caller has. A short list is a caller who bound fewer buffers
-    // than the module names, which is a pipeline failure with a better message than this one.
     let bounds = Bounds::of(
         &kernels::reduce::lane_sum::<F32, 128>(32).expect("built"),
         &Specialization::none(),
@@ -812,23 +623,12 @@ fn a_binding_with_no_size_given_is_not_checked() {
     );
 }
 
-/// The smallest buffer, in words, that a single-workgroup dispatch of `bounds` does not overrun.
-///
-/// Searched rather than computed, because computing it here would be a second copy of the thing
-/// under test — and a reference that shares a line with what it checks agrees with it about the
-/// same mistake.
 fn needed(bounds: &Bounds) -> usize {
     (0..4096_usize)
         .find(|&words| bounds.overrun_uniform(Grid::linear(1), words).is_none())
         .unwrap_or(usize::MAX)
 }
 
-/// A specialization constant in an address is counted, at the value the pipeline will carry.
-///
-/// **This is the term the file used to say it could not see**, and saying so was the whole problem:
-/// a bound that counts zero for a term is a bound that lets a dispatch through. `load_offset_by`
-/// adds a number chosen when the pipeline is created, so the module holds no literal for it — and
-/// the pipeline holds the number, which is where the answer was all along.
 #[test]
 fn an_open_offset_is_counted_at_the_value_the_pipeline_carries() {
     let spirv = kernels::reduce::fold_halves_open(32).expect("built");
@@ -847,13 +647,10 @@ fn an_open_offset_is_counted_at_the_value_the_pipeline_carries() {
     );
 }
 
-/// An unspecialized pipeline gets the default the module declared, which is what the driver does.
 #[test]
 fn an_unset_constant_falls_back_to_the_modules_own_default() {
     let spirv = kernels::reduce::fold_halves_open(32).expect("built");
 
-    // `fold_halves_open` declares its offset with a default of zero, so an unspecialized pipeline
-    // reads the same elements twice and reaches no further than its own run.
     let unset = Bounds::of(&spirv, &Specialization::none());
     let zeroed = Bounds::of(
         &spirv,
@@ -863,10 +660,6 @@ fn an_unset_constant_falls_back_to_the_modules_own_default() {
     assert_eq!(needed(&unset), needed(&zeroed));
 }
 
-/// A value set under a `SpecId` this module does not declare changes nothing.
-///
-/// The direction that matters: a caller setting an id the module never asked for must not make the
-/// bound *larger* either, or a harmless mistake in one place becomes a refusal somewhere unrelated.
 #[test]
 fn a_constant_this_module_does_not_declare_is_not_counted() {
     let spirv = kernels::reduce::fold_halves_open(32).expect("built");
@@ -880,11 +673,6 @@ fn a_constant_this_module_does_not_declare_is_not_counted() {
     assert_eq!(needed(&unset), needed(&elsewhere));
 }
 
-/// A kernel with no specialization constant is unaffected by one being offered.
-///
-/// The other half of the same rule, and the one that would fail if [`super::addressing`] treated
-/// every `OpIAdd` with an unknown right operand as an open offset rather than only the ones a
-/// declared constant reaches.
 #[test]
 fn a_module_with_no_open_offset_reads_the_same_either_way() {
     let spirv = kernels::reduce::lane_sum::<F32, 32>(32).expect("built");

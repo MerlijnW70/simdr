@@ -1,39 +1,13 @@
-//! What a held reduction will run, decided before any of it is allocated.
-//!
-//! Split from [`super::held`], which owns Vulkan objects and is therefore excused from the
-//! mutation gate as FFI — a mutant that passes a wrong handle kills the process rather than
-//! failing a test. None of the arithmetic below is that. A map dispatched over the wrong number of
-//! workgroups, or a fold list missing its finisher, is a **wrong number**, and it belongs inside
-//! the gate.
-//!
-//! This is the third time that seam has been worth cutting: `dispatch.rs` gave up 200 lines of
-//! conversion that had been sitting behind a blanket FFI exemption, `chain.rs` gave up the copy
-//! planning, and this is the reduction's. The rule that keeps producing it: **a file is excused
-//! for containing `unsafe`, not for being near it.**
-
 use super::{BadLength, Fold, folds};
 use crate::Error;
 use crate::kernels::{self, WORKGROUP_SIZE};
 use simdr::lanes::F32;
 
-/// One pass of a reduction: the module to run and how many workgroups of it.
 pub(crate) struct Stage {
-    /// The SPIR-V.
     pub(crate) words: Vec<u32>,
-    /// Workgroups to dispatch.
     pub(crate) workgroups: u32,
 }
 
-/// Every pass a reduction over `elements` runs, in order.
-///
-/// A `map`, if there is one, then a fold per halving, then the workgroup reduction that finishes.
-/// Built entirely before anything is allocated, so a module that will not build fails before a
-/// buffer exists rather than half way through.
-///
-/// # Errors
-///
-/// [`Error::BadLength`] if `elements` is not a shape this can fold, [`Error::Emit`] if a module
-/// cannot be built.
 pub(crate) fn stages(
     width: u32,
     elements: usize,
@@ -54,10 +28,6 @@ pub(crate) fn stages(
     let plan: Vec<Fold> = folds(elements);
     let mut stages = Vec::with_capacity(plan.len() + 2);
 
-    // The map covers every element, one per invocation. `elements` is a power of two of at least
-    // two workgroups and `WORKGROUP_SIZE` is a power of two, so the division is exact — and it is
-    // computed here rather than taken as an argument precisely so it cannot disagree with the
-    // length the folds below were built for.
     if let Some(words) = map {
         stages.push(Stage {
             words: words.to_vec(),
@@ -72,8 +42,6 @@ pub(crate) fn stages(
         });
     }
 
-    // The last pass crosses between the subgroups of the final workgroup, through shared memory
-    // and a barrier, so every one of its invocations holds the whole answer.
     stages.push(Stage {
         words: kernels::workgroup_sum::<F32>(width).map_err(Error::Emit)?,
         workgroups: 1,
@@ -84,13 +52,11 @@ pub(crate) fn stages(
 
 #[cfg(test)]
 mod tests {
-    // A test may panic — that is how it reports.
     #![allow(clippy::expect_used, clippy::indexing_slicing)]
 
     use super::*;
     use crate::reduction::dispatches_for;
 
-    /// A width every kernel here can be built for.
     const WIDTH: u32 = 32;
 
     #[test]
@@ -118,8 +84,6 @@ mod tests {
 
     #[test]
     fn the_map_is_the_first_pass_and_keeps_the_words_it_was_given() {
-        // Ordering is the whole of it: a map appended rather than prepended would run *after* the
-        // reduction, over one number, and still produce a plausible total.
         let words = vec![0xdead_beef, 0x1234_5678];
         let stages = stages(WIDTH, 8_192, Some(&words)).expect("planned");
 
@@ -150,10 +114,6 @@ mod tests {
 
     #[test]
     fn the_stages_dispatch_exactly_what_the_fold_plan_says() {
-        // Two descriptions of the same chain — `folds` decides the shape and this builds modules
-        // for it — and a stage dispatched at a count the plan did not choose would read elements
-        // no fold ever wrote. They are checked against each other rather than against a literal,
-        // because the literals are what went stale when the folds stopped halving.
         for power in 7..=20 {
             let elements = 1_usize << power;
             let stages = stages(WIDTH, elements, None).expect("planned");
@@ -189,7 +149,6 @@ mod tests {
             stages(WIDTH, WORKGROUP_SIZE as usize, None),
             Err(Error::BadLength(BadLength::TooSmall { .. }))
         ));
-        // And exactly two workgroups is accepted, so the boundary is the one it says it is.
         assert!(stages(WIDTH, 2 * WORKGROUP_SIZE as usize, None).is_ok());
     }
 

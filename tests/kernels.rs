@@ -1,26 +1,3 @@
-//! Whole kernels, validated end to end.
-//!
-//! `validated.rs` checks structural shapes; this checks modules that would actually compute
-//! something if a device ran them. Nothing here executes — validity is not correctness, and the
-//! `runner` workspace member is what closes that gap.
-//!
-//! These used to hand-build sixty lines of buffer interface each, duplicating what
-//! `runner/src/kernels/mod.rs` also had. [`Kernel`] owns that now, so what is left is the shape of
-//! each kernel and the question of whether the validator accepts it.
-//!
-//! # What is next door
-//!
-//! This file grew to 848 lines and was cut along the questions its tests ask, not by size:
-//!
-//! - `deferred.rs` — kernels with a value left open until pipeline creation.
-//! - `grids.rs` — kernels with a second axis.
-//! - `instructions.rs` — the smallest module that reaches one instruction family, which is a
-//!   different question from whether a whole kernel is valid, and the one that caught `OpUDot`.
-//!
-//! What is left here is kernels that compute something with everything already decided: the
-//! reductions, the scan, the loop, every element type including the narrow ones, the extended
-//! instruction set, the dot product and the atomics.
-
 mod common;
 
 use common::{VULKAN_1_1, expect_valid};
@@ -28,7 +5,6 @@ use simdr::half;
 use simdr::kernel::{Kernel, Shape};
 use simdr::lanes::{Element, F16, F32, I8, I16, I32, U8, U16, U32};
 
-/// A 32-wide subgroup, 64 invocations, two buffers — the shape every kernel here shares.
 fn shape() -> Shape {
     Shape::new(32, 64, 2)
 }
@@ -97,8 +73,6 @@ fn a_strip_mined_reduction_is_valid_spirv() {
 
 #[test]
 fn a_maximum_reduction_is_valid_spirv() {
-    // Its strip fold goes through compare-and-select rather than a core max opcode, so it is a
-    // different instruction sequence from every other reduction here.
     let mut kernel = Kernel::<F32>::new(shape()).expect("built");
     let value = kernel.load::<64>(0).expect("loaded");
     let largest = kernel
@@ -129,11 +103,6 @@ fn a_prefix_sum_is_valid_spirv() {
 
 #[test]
 fn the_three_operations_an_audit_found_unreachable_are_valid_spirv() {
-    // **The check that has caught this class before.** `Lanes::dot_unsigned` emitted `OpUDot` with
-    // a signed result type for a week, and it was a public method with no caller, no unit test and
-    // no validator coverage — three layers, and it fell between all of them. An audit of the
-    // public surface found three more in the same state: the atomic exchange, the atomic load, and
-    // the vote about a value. Whether they were right was not known until this ran.
     let mut kernel = Kernel::<U32>::new(shape()).expect("built");
     let index = kernel.load::<32>(0).expect("loaded");
     let seven = kernel.module().constant_u32(7).expect("7");
@@ -145,8 +114,6 @@ fn the_three_operations_an_audit_found_unreachable_are_valid_spirv() {
         .expect("exchanged");
     let read = kernel.atomic_load_at(1, displaced).expect("read");
 
-    // The vote drives a real branch, which is the whole of what it is for: `if_uniform` takes a
-    // `Uniform`, and until `all_equal` there was no way to make one out of a *value*.
     let agreed = kernel
         .lanes()
         .expect("lanes")
@@ -164,10 +131,6 @@ fn the_three_operations_an_audit_found_unreachable_are_valid_spirv() {
 
 #[test]
 fn a_clustered_scan_is_valid_spirv() {
-    // **The one the validator has to see.** The clustered ladder reaches for
-    // `SubgroupLocalInvocationId` while the body is being built, which is long after the entry
-    // point was declared — and a built-in the body loads but the interface does not name is
-    // exactly what `spirv-val` rejects and what every driver here runs anyway.
     let mut kernel = Kernel::<F32>::new(shape()).expect("built");
     let value = kernel.load::<8>(0).expect("loaded");
     let running = kernel
@@ -219,7 +182,6 @@ fn an_unrolled_loop_is_valid_spirv() {
 
 #[test]
 fn every_element_type_produces_a_valid_kernel() {
-    // The three take different opcodes end to end, so each is its own module to validate.
     let mut floats = Kernel::<F32>::new(shape()).expect("built");
     let value = floats.load::<32>(0).expect("loaded");
     let total = floats
@@ -265,9 +227,6 @@ fn every_element_type_produces_a_valid_kernel() {
 
 #[test]
 fn a_kernel_calling_the_extended_instruction_set_is_valid_spirv() {
-    // The import is the part a validator has an opinion about: `OpExtInst` naming an id that is
-    // not an imported set, or an import placed outside its section, are both rejected here and
-    // nowhere in the unit tests — those only read back what was emitted.
     let mut kernel = Kernel::<F32>::new(shape()).expect("built");
     let value = kernel.load::<32>(0).expect("loaded");
     let shaped = {
@@ -287,8 +246,6 @@ fn a_kernel_calling_the_extended_instruction_set_is_valid_spirv() {
 
 #[test]
 fn an_integer_clamp_and_magnitude_are_valid_spirv() {
-    // A separate module from the float one: `SClamp` and `SAbs` are different instructions taking
-    // a different result type, and a validator checks the type against the instruction.
     let mut kernel = Kernel::<I32>::new(shape()).expect("built");
     let value = kernel.load::<64>(0).expect("loaded");
     let bounded = {
@@ -304,10 +261,6 @@ fn an_integer_clamp_and_magnitude_are_valid_spirv() {
     expect_valid(&words, "kernel-extended-integer", VULKAN_1_1);
 }
 
-/// Every narrow element type, elementwise, validated.
-///
-/// One module each rather than one shared: the capability, the stride and the constant's literal
-/// all differ per type, and a single kernel would prove whichever one it happened to use.
 #[test]
 fn every_narrow_element_type_produces_a_valid_kernel() {
     fn elementwise<T: Element>(label: &str, constant: u32) {
@@ -332,10 +285,6 @@ fn every_narrow_element_type_produces_a_valid_kernel() {
 
 #[test]
 fn a_narrow_reduction_is_valid_spirv() {
-    // The subgroup instructions over an 8-bit type. SPIR-V has no capability that says a device
-    // supports this — Vulkan's `shaderSubgroupExtendedTypes` gates it and leaves no trace in the
-    // module — so the validator accepting this says nothing about whether a device will run it,
-    // and `runner/tests/narrow.rs` is where that question is asked.
     let mut kernel = Kernel::<I8>::new(shape()).expect("built");
     let value = kernel.load::<32>(0).expect("loaded");
     let total = kernel
@@ -354,9 +303,6 @@ fn a_narrow_reduction_is_valid_spirv() {
 
 #[test]
 fn a_narrow_kernel_declares_the_stride_its_type_occupies() {
-    // Not a validity question — a validator has no opinion about a stride of 4 on a buffer of
-    // bytes, and a device reading one would return every fourth element. The decoration is the
-    // whole of the memory-traffic claim, so it is asserted rather than assumed.
     use simdr::decode;
     use simdr::module::op;
     use simdr::spec::Decoration;
@@ -386,9 +332,6 @@ fn a_narrow_kernel_declares_the_stride_its_type_occupies() {
 
 #[test]
 fn a_narrow_conversion_from_a_loop_counter_is_valid_spirv() {
-    // `OpSConvert` and `OpUConvert` differ only in the signedness of the result type, and the
-    // validator is the only thing that checks the pairing. A signed kernel and an unsigned one
-    // reach different opcodes from the same source line.
     fn counted<T: Element>(label: &str) {
         let mut kernel = Kernel::<T>::new(shape()).expect("built");
         let value = kernel.load::<32>(0).expect("loaded");
@@ -417,9 +360,6 @@ fn a_narrow_conversion_from_a_loop_counter_is_valid_spirv() {
 
 #[test]
 fn an_integer_dot_product_is_valid_spirv() {
-    // Two capabilities and an extension between them, and the validator is what says all three are
-    // present. It is also the only thing that checks the result type is wide enough — four 8-bit
-    // products do not fit in an 8-bit result and `OpSDot` says so.
     let mut kernel = Kernel::<U32>::new(shape()).expect("built");
     let packed = kernel.load::<32>(0).expect("loaded");
     let totals = {
@@ -462,9 +402,6 @@ fn a_saturating_dot_product_chain_is_valid_spirv() {
 
 #[test]
 fn an_atomic_scatter_is_valid_spirv() {
-    // Where the validator earns its place here: the scope and the semantics are ids of constants,
-    // and an atomic naming a literal where an id belongs is rejected for a type mismatch rather
-    // than assembling into something else.
     let mut kernel = Kernel::<U32>::new(shape()).expect("built");
     let value = kernel.load::<32>(0).expect("loaded");
     let bin = {

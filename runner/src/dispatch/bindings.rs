@@ -1,36 +1,8 @@
-//! Dispatching over as many buffers as the kernel binds.
-//!
-//! [`crate::Gpu::run`] binds exactly two — 0 read, 1 written — which is what every kernel in
-//! `kernels/` needed until one did not. The NNUE layer has weights and activations, two arrays
-//! from two places, and had to be handed over concatenated into one buffer with the join passed
-//! as an offset. That works and it is not the shape of the problem.
-//!
-//! The emitter never had this limit: `simdr::kernel::Shape` has always taken a buffer count. This
-//! is the runner catching up.
-//!
-//! # The convention
-//!
-//! Bindings `0..n-1` are read and binding `n-1` is written, which extends the two-buffer rule
-//! rather than replacing it. Each buffer is sized to its own contents, so a kernel reading a large
-//! weight table and writing one value per invocation does not have to allocate the larger of the
-//! two twice.
-
 use super::pipeline::Pipeline;
 use crate::buffer::Buffer;
 use crate::{Error, Gpu};
 
 impl Gpu {
-    /// Run `spirv` with one buffer per entry of `inputs`, plus an output of `output_len` words.
-    ///
-    /// The inputs are bound at 0, 1, … in order and the output last. Every buffer is device-local
-    /// and reached through one staging buffer, so nothing here measures the bus except the
-    /// upload it has to do anyway.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::NoPipeline`] if `inputs` is empty or `output_len` is zero, [`Error::Overrun`] if
-    /// the dispatch would touch more of a binding than that binding holds, otherwise as
-    /// [`Gpu::run`].
     pub fn run_bound(
         &self,
         spirv: &[u32],
@@ -42,22 +14,11 @@ impl Gpu {
             return Err(Error::NoPipeline);
         }
 
-        // **Per binding, because that is what this call is for.** Each buffer here is sized to its
-        // own contents, so the one-length check `Gpu::run` makes has nothing to compare against;
-        // `extent::Bounds` reads which binding each access lands in and holds each to its own size.
-        //
-        // This path had no check at all. `Gpu::run` has had one since the day a kernel with a
-        // hard-coded lane count was found reading eight times its buffer, and the five other ways
-        // this crate dispatches went on not having one.
         let held: Vec<usize> = inputs
             .iter()
             .map(|words| words.len())
             .chain(std::iter::once(output_len))
             .collect();
-        // `Specialization::none()`, and the same one the pipeline below is built with: this path
-        // does not specialize, so every constant in the module resolves to its declared default and
-        // the two agree by construction. The bound takes it as an argument rather than assuming it,
-        // because the path that *does* specialize used to assume the opposite.
         if let Some(overrun) = super::extent::Bounds::of(spirv, &super::Specialization::none())
             .overrun(super::Grid::linear(workgroups), &held)
         {
@@ -101,11 +62,6 @@ impl Gpu {
         }
     }
 
-    /// Upload each input, dispatch, read the last buffer back.
-    ///
-    /// # Safety
-    ///
-    /// The buffers must be live and the device idle with respect to them.
     #[expect(
         clippy::too_many_arguments,
         reason = "every one is a distinct thing the run needs; bundling them into a struct only \
@@ -121,8 +77,6 @@ impl Gpu {
         output_len: usize,
         workgroups: u32,
     ) -> Result<Vec<u32>, Error> {
-        // One staging buffer, reused: each input goes through it in turn. Sequential rather than
-        // concurrent, and untimed, because a benchmark of PCIe is not what anyone asked for.
         for (index, words) in inputs.iter().enumerate() {
             let Some(target) = devices.get(index) else {
                 return Err(Error::NoPipeline);

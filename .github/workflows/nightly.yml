@@ -1,41 +1,8 @@
-# A long differential sweep, on a schedule, because the short one is not the same check.
-#
-# Every push runs the fuzzer at 256 rounds per domain — enough to catch a broken generator and not
-# enough to be a search. `notes/NEXT.md` calls the differential fuzzer the most valuable thing in
-# this tree, and what makes it valuable is that nobody chose what it looks for: 30 000 generated
-# programs found `reduce_min` folding its strips with a maximum, an `OpUDot` that had been invalid
-# since the day it shipped, and a driver that faults compiling a valid module. None of those came
-# from a benchmark and none of them came from 256 rounds.
-#
-# **The workload is throughput-shaped by construction** — thousands of independent questions with no
-# caller waiting on any one of them — which is exactly the shape `decisions/DR-0008` says is worth
-# running at all. So it runs overnight rather than in front of somebody.
-#
-# It is a *separate* workflow rather than a schedule on `ci.yml` on purpose: a nightly run of the
-# whole matrix would say nothing new about formatting or the MSRV, and a failure here has to be
-# readable as one thing rather than as one red mark among five.
-#
-# # And the examples, for the same reason
-#
-# `notes/CLAIMS.md` counts 378 measured numbers across these documents and observes that CI runs
-# none of the programs that produced them: `cargo clippy --all-targets` **compiles** every example
-# and runs none. So a `Gpu::open` that started refusing, a kernel that started erroring, a harness
-# that stopped dispatching — none of it would be noticed by anything, while the numbers those
-# programs printed went on being quoted.
-#
-# The check is **liveness, not the numbers**. A shared runner's wall clock is not evidence about
-# throughput — `session.rs` skips its own speed ratio when `CI` is set, for exactly that reason — so
-# this asks one question per program: does it still run to a clean exit. It is here rather than in
-# `ci.yml` because seventeen programs on a software rasteriser is minutes rather than seconds, and
-# nobody should wait for that on a push.
-
 name: nightly
 
 on:
   schedule:
-    # 03:00 UTC. A time nobody is waiting on the answer.
     - cron: "0 3 * * *"
-  # And on demand, because a run somebody cannot start is a run nobody trusts.
   workflow_dispatch:
     inputs:
       rounds:
@@ -54,9 +21,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Four and sixteen: the two ends of what lavapipe can be pinned to, and the two widths that
-        # have found things. Eight is skipped here because it is the default the push builds
-        # already sweep, and this job is for the reach the short run does not have.
         include:
           - vector: 128
             width: 4
@@ -71,9 +35,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y mesa-vulkan-drivers libvulkan1 vulkan-tools spirv-tools
 
-      # Discovered rather than assumed, and failing when it is not there. `common::device` skips
-      # loudly when no device opens, so a missing driver would leave a sweep reporting green over
-      # nothing — which is the one outcome a fuzzer must never be able to produce.
       - name: find the software driver
         run: |
           icd=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json 2>/dev/null | head -n1)
@@ -93,17 +54,6 @@ jobs:
           cargo test -p runner --release --test fuzzing -- --test-threads=1 --nocapture \
             2>&1 | tee "$RUNNER_TEMP/fuzz.log"
 
-          # **The sweep has to have run.** Every domain prints one line saying how many rounds
-          # agreed, and a run that produced none of them is a run that found nothing because it did
-          # nothing. `SIMDR_FUZZ_ROUNDS` refusing to parse is already an error rather than a silent
-          # default — this is the other half of the same guard, on the other side of the harness.
-          #
-          # **Occurrences rather than lines, and unanchored**, which is the same correction
-          # `ci.yml` carries three files away and which this one had to make on its first run. With
-          # `--nocapture`, `libtest` writes `test <name> ... ` and only finishes the line after the
-          # body has run — so a domain's own output lands *mid-line* behind the name of the test it
-          # belongs to. Anchored, this counted four of eight and failed a sweep in which all eight
-          # had agreed. The guard's first catch was itself.
           domains=$(grep -o 'fuzz [A-Z][A-Za-z]* over ' "$RUNNER_TEMP/fuzz.log" | wc -l)
           echo "$domains domains swept at subgroup ${{ matrix.width }}"
           if [ "$domains" -ne 8 ]; then
@@ -124,8 +74,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y mesa-vulkan-drivers libvulkan1 spirv-tools
 
-      # Without a driver every example reports no device and exits **zero**, which is the shape of
-      # green this whole workflow exists to refuse.
       - name: find the software driver
         run: |
           icd=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json 2>/dev/null | head -n1)
@@ -135,28 +83,9 @@ jobs:
           fi
           echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
 
-      # **Discovered and counted, not listed.** A loop that finds no examples exits zero and prints
-      # nothing, so the number found is compared against the number the tree holds — the same shape
-      # `tests/documented.rs` uses for the same reason.
-      #
-      # `--release`, because several of these measure something and a debug build of a sweep over a
-      # million elements on a software rasteriser is not a wait anybody needs. And a timeout per
-      # program, because one that hangs must fail rather than take the job's hour with it.
-      # **This job had never once been green, and that is the finding rather than the bug.** It was
-      # added to notice an example that stopped running, it noticed four on its first night, and it
-      # went on saying so every night after — into a schedule nobody reads. Meanwhile `CLAIMS.md`
-      # recorded the check as done and `NEXT.md` recorded all seventeen as running, both of which
-      # were true of a workstation and had never been true here.
-      #
-      # Three of the four are examples written for a subgroup of 32 or 64. They decline now, by
-      # name and with a reason, and exit cleanly — the shape the test harness already uses. The
-      # fourth wanted an argument, below.
       - name: run them
         env:
           SPIRV_VAL: /usr/bin/spirv-val
-          # Pinned so the skip count below is a fact rather than whatever Mesa defaults to this
-          # month. 256 is llvmpipe's own default and reports a subgroup of 8, which is what the
-          # three refusals are counted at. `ci.yml`'s matrix pins the same knob for the same reason.
           LP_NATIVE_VECTOR_WIDTH: 256
         run: |
           set -o pipefail
@@ -165,10 +94,6 @@ jobs:
 
           examples=$(find . -path ./target -prune -o -name '*.rs' -path '*/examples/*' -print)
           expected=$(echo "$examples" | wc -l)
-          # How many of them decline at a subgroup of 8, with a reason they print. Asserted rather
-          # than printed, on the grounds the step below and `ci.yml` both give: a check that starts
-          # over-skipping reports the same green as one that ran everything. Adding an example that
-          # cannot run at this width means changing this number in a diff somebody reads.
           declining=3
           ran=0
           failed=""
@@ -180,20 +105,12 @@ jobs:
               *)          crate="-p simdr" ;;
             esac
 
-            # `emit_minimal` is the one example that takes an argument — it writes the module it
-            # built to a path, and a path is not something this loop can invent for every program.
-            # Naming it here is one line somebody reads, which is the trade `NOT_MUTATED` makes in
-            # `tests/integrity.rs` and for the same reason. Running it bare is not a failure of the
-            # example: a program that requires a path and prints its usage without one is working.
             case "$name" in
               emit_minimal) arguments="$RUNNER_TEMP/minimal.spv" ;;
               *)            arguments="" ;;
             esac
 
             echo "::group::$name"
-            # `tee` into the log so the refusals can be counted afterwards, and `pipefail` above so
-            # that piping into it does not hide the example's own exit status — which is the whole
-            # thing this step measures.
             if timeout 240 cargo run $crate --release --example "$name" -- $arguments 2>&1 | tee -a "$log"; then
               ran=$((ran + 1))
             else

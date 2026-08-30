@@ -1,41 +1,9 @@
-//! Elementwise operations that core SPIR-V does not have.
-//!
-//! `min`, `max`, `abs`, `sqrt` and the rest are not opcodes. They live in the GLSL.std.450
-//! extended instruction set, reached through `OpExtInst` — one instruction, exactly like an
-//! `OpFAdd`, with the set's id and an instruction number in front of the operands. So everything
-//! here costs one instruction per strip, the same as [`super::arithmetic`], and the lane count
-//! still never reaches an instruction.
-//!
-//! # Why these and not the other seventy
-//!
-//! The set has transcendentals, packing helpers, matrix operations and geometry. What is exposed
-//! here is what a lane program has been observed to want: the two extremes and the clamp between
-//! them, magnitude, and the four float functions that a normalisation or an activation reaches
-//! for. The rest is a larger surface with no caller, and [`crate::module::Module::ext_inst`] is
-//! public for anyone who has one.
-//!
-//! # What this did not buy
-//!
-//! Speed, on the kernel that motivated it. `runner/examples/nnue.rs` timed a clamped and an
-//! unclamped kernel at 6.50 µs and 6.47 µs, either side wobbling by more than the difference,
-//! because that kernel waits on memory rather than on arithmetic. Four instructions per element
-//! became one and nothing moved. This is an expressiveness change and should be read as one.
-
 use super::element::Signed;
 use super::{Element, F32, LaneError, Lanes, Vector};
 use crate::module::Id;
 use crate::spec::Glsl;
 
 impl Lanes<'_> {
-    /// The smaller of two elements — `Simd::simd_min`.
-    ///
-    /// Signed and unsigned integers reach different instructions, and for floats the choice with
-    /// a NaN in it is left undefined by the specification. `runner/tests/floats.rs` records what
-    /// this machine does with one.
-    ///
-    /// # Errors
-    ///
-    /// [`LaneError`] if the instructions cannot be emitted.
     pub fn min<T: Element, const LANES: u32>(
         &mut self,
         left: Vector<T, LANES>,
@@ -44,11 +12,6 @@ impl Lanes<'_> {
         self.zip_extended(T::MIN, left, right)
     }
 
-    /// The larger of two elements — `Simd::simd_max`.
-    ///
-    /// # Errors
-    ///
-    /// As [`Lanes::min`].
     pub fn max<T: Element, const LANES: u32>(
         &mut self,
         left: Vector<T, LANES>,
@@ -57,19 +20,6 @@ impl Lanes<'_> {
         self.zip_extended(T::MAX, left, right)
     }
 
-    /// `value` held between `low` and `high` — `Simd::simd_clamp`.
-    ///
-    /// One instruction, against the two comparisons and two selects the core spelling costs. The
-    /// bounds are vectors rather than scalars because a clamp whose bounds vary per lane is the
-    /// general case and a splat is how the constant one is written.
-    ///
-    /// **`low` above `high` is undefined**, and deliberately not checked: the bounds are ids by
-    /// the time they reach here, so there is nothing to compare without emitting instructions that
-    /// would then be paid for on every call. GLSL.std.450 says the same thing about `FClamp`.
-    ///
-    /// # Errors
-    ///
-    /// [`LaneError`] if the instructions cannot be emitted.
     pub fn clamp<T: Element, const LANES: u32>(
         &mut self,
         value: Vector<T, LANES>,
@@ -79,14 +29,6 @@ impl Lanes<'_> {
         self.zip3_extended(T::CLAMP, value, low, high)
     }
 
-    /// Magnitude — `Simd::abs`.
-    ///
-    /// Only for the types that have a sign: `abs` of a `u32` is the value, and the set has no
-    /// `UAbs` to emit for it. See [`Signed`].
-    ///
-    /// # Errors
-    ///
-    /// [`LaneError`] if the instructions cannot be emitted.
     pub fn abs<T: Signed, const LANES: u32>(
         &mut self,
         value: Vector<T, LANES>,
@@ -94,14 +36,6 @@ impl Lanes<'_> {
         self.map_extended(T::ABS, value)
     }
 
-    /// Square root.
-    ///
-    /// Float-only, and concretely so: there is no integer square root in the set, and a generic
-    /// signature would have to refuse two of the three element types at runtime.
-    ///
-    /// # Errors
-    ///
-    /// [`LaneError`] if the instructions cannot be emitted.
     pub fn sqrt<const LANES: u32>(
         &mut self,
         value: Vector<F32, LANES>,
@@ -109,11 +43,6 @@ impl Lanes<'_> {
         self.map_extended(Glsl::Sqrt, value)
     }
 
-    /// One over the square root, in one instruction rather than a divide after a root.
-    ///
-    /// # Errors
-    ///
-    /// [`LaneError`] if the instructions cannot be emitted.
     pub fn inverse_sqrt<const LANES: u32>(
         &mut self,
         value: Vector<F32, LANES>,
@@ -121,11 +50,6 @@ impl Lanes<'_> {
         self.map_extended(Glsl::InverseSqrt, value)
     }
 
-    /// e raised to each element.
-    ///
-    /// # Errors
-    ///
-    /// [`LaneError`] if the instructions cannot be emitted.
     pub fn exp<const LANES: u32>(
         &mut self,
         value: Vector<F32, LANES>,
@@ -133,11 +57,6 @@ impl Lanes<'_> {
         self.map_extended(Glsl::Exp, value)
     }
 
-    /// The natural logarithm of each element.
-    ///
-    /// # Errors
-    ///
-    /// [`LaneError`] if the instructions cannot be emitted.
     pub fn log<const LANES: u32>(
         &mut self,
         value: Vector<F32, LANES>,
@@ -145,25 +64,6 @@ impl Lanes<'_> {
         self.map_extended(Glsl::Log, value)
     }
 
-    /// `a * b + c`, rounded once.
-    ///
-    /// Not the same value as [`Lanes::mul`] followed by [`Lanes::add`], which rounds twice. It is
-    /// usually the more accurate of the two and it is never bit-identical **in general**, so a
-    /// kernel that must agree with a CPU reference exactly has to make the same choice on both
-    /// sides.
-    ///
-    /// **That sentence used to end "which is why the fuzzer's vocabulary has `min`, `max` and
-    /// `clamp` in it and not this", and it outlived its own scope.** The fuzzer's float corpus is
-    /// small integers below 2²⁴ by construction — that is what lets any float comparison there be
-    /// exact — and in that range a product and a sum are both exact, so the fused and unfused
-    /// spellings give the *same bits*. `Op::FusedMulAdd` generates it now and holds the pair to
-    /// agreeing, which is what `Op::RepeatAdd` and `Op::RolledAdd` are for one level down.
-    ///
-    /// The general claim stands and the conclusion drawn from it did not.
-    ///
-    /// # Errors
-    ///
-    /// [`LaneError`] if the instructions cannot be emitted.
     pub fn fma<const LANES: u32>(
         &mut self,
         a: Vector<F32, LANES>,
@@ -173,7 +73,6 @@ impl Lanes<'_> {
         self.zip3_extended(Glsl::Fma, a, b, c)
     }
 
-    /// One extended instruction per strip, over one operand.
     fn map_extended<T: Element, const LANES: u32>(
         &mut self,
         instruction: Glsl,
@@ -193,7 +92,6 @@ impl Lanes<'_> {
         self.from_strips(&ids)
     }
 
-    /// One extended instruction per strip, over two operands.
     fn zip_extended<T: Element, const LANES: u32>(
         &mut self,
         instruction: Glsl,
@@ -214,11 +112,6 @@ impl Lanes<'_> {
         self.from_strips(&ids)
     }
 
-    /// One extended instruction per strip, over three operands.
-    ///
-    /// The three-operand shape is its own function rather than a slice of vectors because a slice
-    /// would need an index per strip, and an index needs a bound to check that the types have
-    /// already made true. Three arities, three signatures, no unreachable branch in any of them.
     fn zip3_extended<T: Element, const LANES: u32>(
         &mut self,
         instruction: Glsl,
@@ -245,11 +138,6 @@ impl Lanes<'_> {
         self.from_strips(&ids)
     }
 
-    /// The imported GLSL.std.450 set, importing it if this is the first call.
-    ///
-    /// Asked for per instruction rather than held on [`Lanes`]: the import is interned, so this is
-    /// a hash lookup, and a module that ends up emitting no extended instruction ends up with no
-    /// import either. A field would have imported the set for every kernel that built a `Lanes`.
     fn glsl(&mut self) -> Result<Id, LaneError> {
         Ok(self.module().ext_inst_import(Glsl::SET_NAME)?)
     }
@@ -257,7 +145,6 @@ impl Lanes<'_> {
 
 #[cfg(test)]
 mod tests {
-    // A test may panic — that is how it reports.
     #![allow(clippy::expect_used, clippy::indexing_slicing)]
 
     use super::*;
@@ -269,11 +156,9 @@ mod tests {
         Module::new(Version::V1_3)
     }
 
-    /// The instruction number of every `OpExtInst` in `words`, in order.
     fn extended_calls(words: &[u32]) -> Vec<u32> {
         decode::body(words)
             .filter(|instruction| instruction.opcode() == op::EXT_INST)
-            // Result type, result id, set, then the instruction number.
             .filter_map(|instruction| instruction.operands().get(3).copied())
             .collect()
     }
@@ -285,7 +170,6 @@ mod tests {
         }
     }
 
-    /// The extended calls a single `min` of `LANES` float lanes emits.
     fn one_min<const LANES: u32>() -> Vec<u32> {
         let mut module = built();
         let mut lanes = Lanes::new(&mut module, 32).expect("built");
@@ -313,8 +197,6 @@ mod tests {
 
     #[test]
     fn the_three_element_types_reach_three_different_instructions() {
-        // The one mistake this layer can make that nothing downstream would catch: a `u32` maximum
-        // emitted as `SMax` is right for every value below 2³¹ and wrong above it.
         let mut module = built();
         let mut lanes = Lanes::new(&mut module, 32).expect("built");
         let float = lanes.splat_bits::<F32, 32>(0).expect("f32");
@@ -333,8 +215,6 @@ mod tests {
 
     #[test]
     fn a_clamp_is_one_instruction_and_not_four() {
-        // The core spelling is two comparisons and two selects. This is the whole reason the set
-        // is imported, so it is worth asserting the absence as well as the presence.
         let mut module = built();
         let mut lanes = Lanes::new(&mut module, 32).expect("built");
         let value = lanes.splat_bits::<I32, 32>(7).expect("7");
@@ -355,8 +235,6 @@ mod tests {
 
     #[test]
     fn a_clamp_names_its_value_then_its_bounds_in_that_order() {
-        // `SClamp x minVal maxVal`. Transposing the last two gives an instruction that assembles,
-        // validates, and returns the *low* bound for every input in range.
         let mut module = built();
         let mut lanes = Lanes::new(&mut module, 32).expect("built");
         let value = lanes.splat_bits::<I32, 32>(7).expect("7");
@@ -380,9 +258,6 @@ mod tests {
 
     #[test]
     fn every_call_carries_the_arity_its_instruction_declares() {
-        // The structural check that a helper of the wrong arity would fail: `Glsl::operands` says
-        // how many an instruction takes, and the emitted call has to hold exactly that many after
-        // the result type, result id, set and number.
         let mut module = built();
         let mut lanes = Lanes::new(&mut module, 32).expect("built");
         let value = lanes
@@ -447,8 +322,6 @@ mod tests {
 
     #[test]
     fn a_module_that_calls_nothing_extended_imports_nothing() {
-        // The reason the import is asked for per call rather than held on `Lanes`: every kernel
-        // builds one of these, and most of them never reach the set.
         let mut module = built();
         let mut lanes = Lanes::new(&mut module, 32).expect("built");
         let value = lanes
@@ -504,8 +377,6 @@ mod tests {
 
     #[test]
     fn an_extended_result_is_an_ordinary_vector_that_keeps_composing() {
-        // `OpExtInst` yields a value of the result type, so nothing downstream needs to know it
-        // came from a set. This is the assertion that the strip bookkeeping survived the trip.
         let mut module = built();
         let mut lanes = Lanes::new(&mut module, 32).expect("built");
         let value = lanes

@@ -1,14 +1,8 @@
-//! The compute pipeline and the descriptors that point it at its buffers.
-//!
-//! Built once per run and reused across every timed iteration, which is the other half of making
-//! [`crate::Gpu::time`] mean something: creating a pipeline costs far more than running one.
-
 use super::Specialization;
 use crate::buffer::Buffer;
 use crate::{Error, Gpu};
 use ash::vk;
 
-/// A compute pipeline, its layout, and a descriptor set bound to two storage buffers.
 pub(crate) struct Pipeline {
     handle: vk::Pipeline,
     layout: vk::PipelineLayout,
@@ -19,14 +13,6 @@ pub(crate) struct Pipeline {
 }
 
 impl Pipeline {
-    /// Build everything needed to dispatch `spirv` over the two buffers.
-    ///
-    /// # Safety
-    ///
-    /// The buffers must outlive this, and [`Pipeline::destroy`] must run before the device goes.
-    /// `bound` is one entry per binding, in binding order: the buffer and how much of it the
-    /// shader may see. Two is the common case and the shape every kernel in `kernels/` emits, but
-    /// the emitter's `Shape` has always taken a count and there is no reason this could not.
     pub(crate) unsafe fn new(
         gpu: &Gpu,
         spirv: &[u32],
@@ -65,9 +51,6 @@ impl Pipeline {
         let sets = unsafe { device.allocate_descriptor_sets(&allocate) }?;
         let descriptors = sets.first().copied().ok_or(Error::NoPipeline)?;
 
-        // The infos have to outlive the `update_descriptor_sets` call, so they are collected
-        // first and borrowed second — a `map` producing both at once would drop each one while
-        // the write still pointed at it.
         let infos: Vec<[vk::DescriptorBufferInfo; 1]> = bound
             .iter()
             .map(|&(buffer, bytes)| [buffer_info(buffer.handle, bytes)])
@@ -91,9 +74,6 @@ impl Pipeline {
         // SAFETY: `set_layouts` holds the layout created above and outlives the call.
         let layout = unsafe { device.create_pipeline_layout(&layout_info, None) }?;
 
-        // Declared before the stage that borrows them, and left in scope until the pipeline is
-        // created: `SpecializationInfo` holds raw pointers into both, so a temporary would be
-        // freed while the driver still had the address.
         let entries = specialization.map_entries();
         let data = specialization.data();
         let info = vk::SpecializationInfo::default()
@@ -105,8 +85,6 @@ impl Pipeline {
             .module(shader)
             .name(c"main");
         if !specialization.is_empty() {
-            // Attached only when there is something to say. An empty block is legal and this
-            // keeps the common path byte-identical to what it was before specialization existed.
             stage = stage.specialization_info(&info);
         }
 
@@ -132,26 +110,18 @@ impl Pipeline {
         })
     }
 
-    /// The pipeline to bind.
     pub(crate) const fn handle(&self) -> vk::Pipeline {
         self.handle
     }
 
-    /// Its layout, which binding descriptors needs.
     pub(crate) const fn layout(&self) -> vk::PipelineLayout {
         self.layout
     }
 
-    /// The descriptor set pointing at the buffers.
     pub(crate) const fn descriptors(&self) -> vk::DescriptorSet {
         self.descriptors
     }
 
-    /// Release everything.
-    ///
-    /// # Safety
-    ///
-    /// No submission using this may still be in flight.
     pub(crate) unsafe fn destroy(self, gpu: &Gpu) {
         let device = gpu.device();
         // SAFETY: `self` is taken by value, so nothing else names these handles, and the caller's
@@ -169,24 +139,6 @@ impl Pipeline {
 }
 
 impl Gpu {
-    /// Build a pipeline for each entry of `builds` and destroy them, so a caller can time it.
-    ///
-    /// The same shape as [`Gpu::probe_resident`], and it exists for the same reason: a claim about
-    /// where the setup cost goes needs the parts measured apart. `notes/NEXT.md` argued for
-    /// specialization constants on the grounds that "one module per parameter value" is expensive
-    /// in *pipeline creation*, and pipeline creation had never been timed on its own.
-    ///
-    /// **A batch rather than one at a time, and that is the whole point.** The two buffers a
-    /// descriptor set needs are allocated once here and reused for every pipeline. The first
-    /// version of this took a single module and allocated a pair per call — so the number it
-    /// produced was pipeline creation *plus two allocations*, and allocation is the larger half.
-    /// It reported 485 µs where the pipeline itself is nearer 180, and that wrong number reached
-    /// three documents before `runner/examples/reducer.rs` measured a whole reduction and did not
-    /// add up.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Vulkan`] if any call fails, [`Error::NoPipeline`] if the driver returns none.
     pub fn probe_pipelines(&self, builds: &[(&[u32], &Specialization)]) -> Result<(), Error> {
         let bytes = 256;
 
@@ -219,7 +171,6 @@ impl Gpu {
     }
 }
 
-/// One storage-buffer binding, visible to compute.
 fn storage_binding(binding: u32) -> vk::DescriptorSetLayoutBinding<'static> {
     vk::DescriptorSetLayoutBinding::default()
         .binding(binding)
@@ -228,7 +179,6 @@ fn storage_binding(binding: u32) -> vk::DescriptorSetLayoutBinding<'static> {
         .stage_flags(vk::ShaderStageFlags::COMPUTE)
 }
 
-/// The whole of `handle` as a descriptor's target.
 fn buffer_info(handle: vk::Buffer, bytes: u64) -> vk::DescriptorBufferInfo {
     vk::DescriptorBufferInfo::default()
         .buffer(handle)
@@ -236,7 +186,6 @@ fn buffer_info(handle: vk::Buffer, bytes: u64) -> vk::DescriptorBufferInfo {
         .range(bytes)
 }
 
-/// Point `binding` of `set` at `info`.
 fn storage_write<'a>(
     set: vk::DescriptorSet,
     binding: u32,

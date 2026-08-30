@@ -1,8 +1,3 @@
-//! Emit the minimal compute module and write it to the path given as the first argument.
-//!
-//! This exists to be fed to `spirv-val`. It is the shortest path from "the tests are green" to
-//! "Khronos agrees", and those are very different claims.
-
 use simdr::module::{Module, Section, Version, op};
 use simdr::spec::{
     AddressingModel, Capability, ExecutionMode, ExecutionModel, FunctionControl, MemoryModel,
@@ -26,10 +21,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &[AddressingModel::Logical.word(), MemoryModel::Glsl450.word()],
     )?;
 
-    // Through `Module::entry_point` rather than an `emit` of its own. The instruction lists the
-    // `Input` and `Output` variables the entry point reaches, and that list is not closed until the
-    // module is — a built-in asked for while the body is being built has to reach it. This example
-    // declares none, and still says so the way a kernel does.
     module.entry_point(ExecutionModel::GlCompute, main, "main")?;
 
     module.emit(

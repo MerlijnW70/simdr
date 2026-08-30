@@ -1,10 +1,3 @@
-//! One module, several pipelines, different answers.
-//!
-//! That sentence is the whole feature and it is the only thing a validator cannot check: a module
-//! with a specialization constant validates identically whether or not anything ever replaces the
-//! value, and the default is a perfectly good answer. So the test that means something is the one
-//! that runs the **same words** twice and gets two different numbers out.
-
 mod common;
 
 use common::{device, elements, runnable};
@@ -12,9 +5,6 @@ use runner::Specialization;
 use runner::kernels::{self, WORKGROUP_SIZE, specialized::spec_id};
 use simdr::lanes::U32;
 
-/// A ramp as long as a kernel of 32 lanes reads on a `width`-wide device.
-///
-/// The length is not `WORKGROUP_SIZE`: see `common::elements`.
 fn ramp(width: u32) -> Vec<u32> {
     (0..elements(width, 32) as u32).collect()
 }
@@ -26,7 +16,6 @@ fn one_module_gives_two_answers_under_two_specializations() {
     };
     let limits = gpu.limits().clone();
 
-    // Built once. Everything below dispatches these same words.
     let spirv = kernels::specialized_add::<U32, 32>(limits.subgroup_size, 1).expect("built");
     let input = ramp(limits.subgroup_size);
 
@@ -63,9 +52,6 @@ fn one_module_gives_two_answers_under_two_specializations() {
 
 #[test]
 fn an_unspecialized_pipeline_uses_the_default_the_module_declared() {
-    // The other half, and the one a wrong `SpecId` would pass: if nothing replaces the constant,
-    // the default has to survive. A module whose constant was decorated with an id nobody sets is
-    // indistinguishable from an ordinary constant, which is exactly the failure mode.
     let Some(gpu) = device("specialize-default") else {
         return;
     };
@@ -96,10 +82,6 @@ fn an_unspecialized_pipeline_uses_the_default_the_module_declared() {
 
 #[test]
 fn two_constants_are_told_apart_by_their_ids_and_not_by_their_order() {
-    // The failure a single-constant test cannot see: entries carry a `constant_id` and an offset
-    // into the data block, and swapping the two would give an answer that is still a number.
-    // `factor` and `offset` are chosen so that transposing them is visible — 3x + 100 and
-    // 100x + 3 differ everywhere except x = 1.
     let Some(gpu) = device("specialize-two") else {
         return;
     };
@@ -169,9 +151,6 @@ fn the_order_the_entries_are_set_in_does_not_matter() {
 
 #[test]
 fn a_derived_constant_is_computed_from_the_value_the_pipeline_supplied() {
-    // `OpSpecConstantOp` doubling an open constant. If the derivation were evaluated against the
-    // *default* instead of the supplied value, this would add 2 rather than 20 — and the module
-    // would still be valid, so only a dispatch says which happened.
     let Some(gpu) = device("specialize-derived") else {
         return;
     };
@@ -196,14 +175,6 @@ fn a_derived_constant_is_computed_from_the_value_the_pipeline_supplied() {
     );
 }
 
-/// Can the *cluster size* be deferred to pipeline creation?
-///
-/// `notes/NEXT.md` asked, on the grounds that `ClusterSize` must be a constant instruction and a
-/// specialization constant is one. This is the answer, observed rather than argued —
-/// `decisions/DR-0005` writes it up.
-///
-/// The reference is computed from whatever size the pipeline was given, so a driver that silently
-/// used the *default* instead would fail here rather than agreeing with itself.
 #[test]
 fn a_clustered_reduction_takes_its_cluster_size_from_the_pipeline() {
     let Some(gpu) = device("specialize-cluster") else {
@@ -216,8 +187,6 @@ fn a_clustered_reduction_takes_its_cluster_size_from_the_pipeline() {
         return;
     }
 
-    // The default is 32 — the whole subgroup — so every override below asks for something the
-    // default would not have given.
     let spirv = kernels::specialized_cluster(32, 32).expect("built");
     if !runnable(&gpu, "specialize-cluster", &[&spirv]) {
         return;
@@ -245,8 +214,6 @@ fn a_clustered_reduction_takes_its_cluster_size_from_the_pipeline() {
         assert_eq!(output, expected, "cluster size {cluster}");
     }
 
-    // And the default, so that "it read the specialization" is distinguishable from "it ignored
-    // the operand and reduced the whole subgroup" — which is what a 32-wide answer looks like.
     let defaulted = gpu.run_u32(&spirv, &input, 1).expect("dispatched");
     let whole: Vec<u32> = (0..elements(limits.subgroup_size, 32))
         .map(|lane| {
@@ -257,13 +224,6 @@ fn a_clustered_reduction_takes_its_cluster_size_from_the_pipeline() {
     assert_eq!(defaulted, whole);
 }
 
-/// The open-offset fold computes what the baked-in one computes.
-///
-/// `fold_halves_open` exists because a measurement needed it — `runner/examples/specialize.rs`
-/// compares one module specialized N ways against N modules, and the answer was that it saves 1%.
-/// The kernel is kept anyway, and a kernel that is kept has to be right: this is the comparison
-/// that says the address arithmetic behind an offset-by-value lands in the same place as the
-/// address arithmetic behind an offset-by-constant.
 #[test]
 fn an_offset_supplied_at_pipeline_time_reads_the_same_elements_as_a_baked_in_one() {
     let Some(gpu) = device("fold-open") else {
@@ -271,10 +231,6 @@ fn an_offset_supplied_at_pipeline_time_reads_the_same_elements_as_a_baked_in_one
     };
     let limits = gpu.limits().clone();
 
-    // Two workgroups of input, folded at 64: out[i] = in[i] + in[i + 64].
-    //
-    // `fold_halves` is built for the device's own width, so it reads one element per invocation at
-    // every width — the 32-lane sizing the tests above need would be eight times too much here.
     let half = WORKGROUP_SIZE;
     let input: Vec<f32> = (0..elements(limits.subgroup_size, limits.subgroup_size) * 2)
         .map(|index| index as f32)
@@ -318,9 +274,6 @@ fn an_offset_supplied_at_pipeline_time_reads_the_same_elements_as_a_baked_in_one
 
 #[test]
 fn an_open_offset_of_a_different_value_reads_different_elements() {
-    // The other half: one module, two offsets, two answers. Without this the test above would
-    // pass against a kernel that ignored the specialization and folded at whatever its default
-    // said — which is zero, and would give `in[i] + in[i]`.
     let Some(gpu) = device("fold-open-two") else {
         return;
     };
@@ -328,10 +281,6 @@ fn an_open_offset_of_a_different_value_reads_different_elements() {
 
     let spirv = kernels::fold_halves_open(limits.subgroup_size).expect("built");
 
-    // Floats, and *converted* rather than reinterpreted. Passing the integers 0..128 as raw words
-    // into an `f32` kernel makes every one of them a denormal — and this device flushes denormals
-    // to zero, so the first version of this test compared two buffers of zeros and reported that
-    // the specialization had been ignored.
     let input: Vec<f32> = (0..elements(limits.subgroup_size, limits.subgroup_size) * 2)
         .map(|index| index as f32)
         .collect();
@@ -372,9 +321,6 @@ fn an_open_offset_of_a_different_value_reads_different_elements() {
 
 #[test]
 fn a_specialization_naming_an_id_the_module_does_not_have_is_ignored() {
-    // Vulkan says an entry whose `constant_id` matches nothing is ignored. Worth pinning because
-    // the alternative — a driver refusing the pipeline — would make a caller's spare entry a
-    // crash, and code that sets a superset of what a module declares is an easy thing to write.
     let Some(gpu) = device("specialize-unknown") else {
         return;
     };

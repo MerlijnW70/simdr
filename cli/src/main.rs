@@ -1,62 +1,16 @@
-//! `simdr probe` — ask a device what has to be known before a module can be built.
-//!
-//! # Why this exists, and why it stays small
-//!
-//! `decisions/DR-0002` is the reason. A module is specialised to a subgroup width, the width is
-//! fixed by the hardware, and `Lanes::new` takes it as an argument so that no caller can forget
-//! it exists. Which left an awkward gap: the only way to find out what to pass was to write a Rust
-//! program that opens a device.
-//!
-//! So the design forces a question and there was no way to ask it. That is what this answers.
-//!
-//! `simdr list` is the second subcommand and arrived for the same reason: this machine turned out
-//! to have two devices at two different subgroup widths, and there was no way to see the second
-//! one without writing a program either.
-//!
-//! It stops there. A `simdr validate` would be three lines around `spirv-val` and is better as a
-//! line in the README; a `simdr emit` would need a kernel description language, which is a second
-//! and worse API beside the one that already exists — the value of the library is that kernels are
-//! Rust with types. Benchmarks are `cargo run --example`.
-//!
-//! # What it reports, and why each line is there
-//!
-//! - **Subgroup width**, because nothing can be built without it.
-//! - **Which subgroup features**, because a kernel declaring a capability the device lacks fails
-//!   at *pipeline creation* rather than at validation — later and less clearly than it should.
-//! - **Narrow element types**, because they are six separate permissions and one of them —
-//!   `shaderSubgroupExtendedTypes` — leaves no trace in the module at all.
-//! - **Memory types**, because a host-visible type without `HOST_CACHED` is write-combined and
-//!   reading a mapping back out of one runs at a fraction of the bus. That cost 8× on transfers
-//!   here before anybody looked, and looking is now one command.
-
-// A tool that reports on a device should not be the thing that crashes. Every failure below is an
-// exit code and a sentence on stderr.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use runner::Gpu;
 use std::process::ExitCode;
 
-/// What the arguments asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Command {
-    /// Describe the device.
     Probe,
-    /// Name every device that could run compute work.
-    ///
-    /// Worth its own subcommand because a machine with two GPUs usually has two *subgroup widths*,
-    /// and until there was a way to see the second one, only the first had ever been built for.
     List,
-    /// Explain the tool.
     Help,
-    /// Something that is not a subcommand, kept so the message can name it.
     Unknown(String),
 }
 
-/// Decide what to do, from the arguments after the program name.
-///
-/// Separated from `main` so it can be tested: it is the only thing here that decides anything, and
-/// everything else prints. No arguments at all means `probe`, because there is one useful thing to
-/// do and making a reader type it adds nothing.
 fn parse(arguments: &[String]) -> Command {
     match arguments.first().map(String::as_str) {
         None | Some("probe") => Command::Probe,
@@ -84,7 +38,6 @@ fn main() -> ExitCode {
     }
 }
 
-/// What this tool does, in the form a reader can act on.
 fn usage() {
     println!("simdr — what a device offers, before a module is built for it");
     println!();
@@ -92,11 +45,10 @@ fn usage() {
     println!("  simdr probe     report the subgroup width, the features, and the memory types");
     println!("  simdr list      name every device that could run compute work");
     println!();
-    println!("The subgroup width is the one number a kernel cannot be built without: see");
-    println!("decisions/DR-0002. Pass it to `Lanes::new` or `Shape::new`.");
+    println!("The subgroup width is the one number a kernel cannot be built without.");
+    println!("Pass it to `Lanes::new` or `Shape::new`.");
 }
 
-/// Name every device that could run compute work.
 fn list() -> ExitCode {
     let names = match Gpu::names() {
         Ok(names) => names,
@@ -120,7 +72,6 @@ fn list() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Open the first compute device and describe it.
 fn probe() -> ExitCode {
     let gpu = match Gpu::open() {
         Ok(Some(gpu)) => gpu,
@@ -155,10 +106,6 @@ fn probe() -> ExitCode {
         }
     );
 
-    // **Seven rows, and it was four — two of them naming operations they do not permit.** The
-    // votes sat under `ballot` and the shifts under `shuffle`; both are separate feature bits and
-    // separate capabilities, and this is the tool a caller asks *before* writing a kernel. It was
-    // right on every device here, because no implementation offers one of these without the others.
     println!("\n  subgroup features");
     for (name, present, needed_for) in [
         (
@@ -198,12 +145,6 @@ fn probe() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// What this device offers for elements narrower than a lane.
-///
-/// Four flags rather than one line, because they are four permissions and a device may hold any
-/// subset — `decisions/DR-0004`. The last of them is the one worth printing loudest: nothing in a
-/// module says it is needed, so a kernel that reduces over `i8` looks fine everywhere and runs
-/// only here.
 fn narrow(limits: &runner::Limits) {
     let narrow = limits.narrow;
     println!("\n  narrow element types");
@@ -260,7 +201,6 @@ fn narrow(limits: &runner::Limits) {
     }
 }
 
-/// The memory types, and whether the staging path can get a cached one.
 fn memory(gpu: &Gpu) {
     let types = gpu.memory_types();
     println!("\n  memory types");
@@ -294,7 +234,6 @@ fn memory(gpu: &Gpu) {
     );
 }
 
-/// What to do with the number, so the output is not just facts.
 fn advice(width: u32) {
     println!("\n  what to pass");
     println!("    Shape::new({width}, 64, 2)      a two-buffer kernel, 64 invocations");
@@ -308,7 +247,6 @@ fn advice(width: u32) {
     println!("    wider strip-mines. Anything that is neither is refused by name.");
 }
 
-/// `yes` or `no`, aligned.
 const fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
 }
@@ -323,7 +261,6 @@ mod tests {
 
     #[test]
     fn no_arguments_probes() {
-        // There is one useful thing to do, so making a reader type it adds nothing.
         assert_eq!(parse(&[]), Command::Probe);
     }
 
@@ -338,8 +275,6 @@ mod tests {
 
     #[test]
     fn an_unknown_subcommand_is_carried_out_by_name() {
-        // Named rather than swallowed: "no subcommand `prboe`" is a message somebody can act on
-        // and "usage:" alone is not.
         assert_eq!(
             parse(&arguments(&["prboe"])),
             Command::Unknown("prboe".to_owned())

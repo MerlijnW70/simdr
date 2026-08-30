@@ -1,9 +1,3 @@
-//! A whole compute kernel, from the lane API down.
-//!
-//! [`crate::lanes`] turns lane operations into instructions; this turns a kernel into a module.
-//! Buffer bindings, layout decorations, the entry point, the invocation index and the capability
-//! declarations are all its business, so a kernel is the few lines that say what to compute:
-//!
 //! ```
 //! # use simdr::kernel::{Kernel, Shape};
 //! # use simdr::lanes::F32;
@@ -15,11 +9,6 @@
 //! kernel.finish()
 //! # }
 //! ```
-//!
-//! `access` has the reads and writes, and the address arithmetic that decides where each element
-//! lives; `plane` has the same thing on two axes; `binding` has the interface every kernel starts
-//! from; `shared` has workgroup memory and the barrier; `scatter` has the writes whose address
-//! comes from the data. All five are private — what they add appears as methods on [`Kernel`].
 
 mod access;
 mod binding;
@@ -32,31 +21,15 @@ pub use self::shared::Shared;
 use crate::lanes::{Element, LaneError, Lanes};
 use crate::module::{Id, Module};
 
-/// How a kernel is laid out before anything is built into it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Shape {
-    /// The device's subgroup width. See `decisions/DR-0002` for why this is not discoverable
-    /// later.
     pub subgroup: u32,
-    /// Invocations per workgroup along x.
-    ///
-    /// For a grid this is the workgroup's *width*: `workgroup × rows` invocations in all.
     pub workgroup: u32,
-    /// Invocations per workgroup along y, and `None` for a kernel with no second axis at all.
-    ///
-    /// `Some(1)` and `None` emit the same `LocalSize`, and they are not the same shape: the first
-    /// says the dispatch has a y dimension and one invocation row per workgroup, the second says
-    /// there is no y and a row index would be meaningless. Only the first admits
-    /// [`Kernel::load_row`].
     pub rows: Option<u32>,
-    /// How many storage buffers to bind, in descriptor set 0 at bindings `0..buffers`.
     pub buffers: u32,
 }
 
 impl Shape {
-    /// A kernel over `buffers` storage buffers, `workgroup` invocations at a time.
-    ///
-    /// One axis: every address is a single index and the dispatch's y and z are 1.
     #[must_use]
     pub const fn new(subgroup: u32, workgroup: u32, buffers: u32) -> Self {
         Self {
@@ -67,18 +40,6 @@ impl Shape {
         }
     }
 
-    /// The same, with a second axis: `workgroup × rows` invocations per group.
-    ///
-    /// A grid kernel addresses `(row, column)` rather than a single index — see
-    /// [`Kernel::load_row`]. `rows` may be 1, and that is the common case: one invocation row per
-    /// workgroup and one workgroup per image row.
-    ///
-    /// **`workgroup` is what the subgroups are cut from.** SPIR-V numbers a workgroup's
-    /// invocations x-fastest, so subgroups fill along x first; a `workgroup` that is a multiple of
-    /// the subgroup width keeps each subgroup inside one row, and one that is not lets a subgroup
-    /// straddle two. Nothing here refuses that, because the same is true of a one-axis kernel
-    /// whose `workgroup` is not a multiple of the width — but on a grid it silently makes a
-    /// row-wise reduction sum parts of two rows.
     #[must_use]
     pub const fn grid(subgroup: u32, workgroup: u32, rows: u32, buffers: u32) -> Self {
         Self {
@@ -90,7 +51,6 @@ impl Shape {
     }
 }
 
-/// A compute kernel over storage buffers of `T`, under construction.
 pub struct Kernel<T: Element> {
     module: Module,
     shape: Shape,
@@ -99,11 +59,8 @@ pub struct Kernel<T: Element> {
     uint: Id,
     zero: Id,
     buffers: Vec<Id>,
-    /// This invocation's position within its workgroup, and which workgroup that is.
     local: Id,
     group: Id,
-    /// This invocation's row in the whole dispatch, for a grid kernel, and `None` for a linear
-    /// one — where there is no second axis to have a position on.
     row: Option<Id>,
     marker: core::marker::PhantomData<T>,
 }
@@ -115,11 +72,6 @@ impl<T: Element> crate::lanes::loops::Emits for Kernel<T> {
 }
 
 impl<T: Element> Kernel<T> {
-    /// Set up the interface and open `main`, ready for loads and lane operations.
-    ///
-    /// # Errors
-    ///
-    /// [`LaneError`] if the shape is unusable or the module cannot be built.
     pub fn new(shape: Shape) -> Result<Self, LaneError> {
         binding::build::<T>(shape).map(|parts| Self {
             module: parts.module,
@@ -136,45 +88,14 @@ impl<T: Element> Kernel<T> {
         })
     }
 
-    /// The lane builder, for this kernel's subgroup width.
-    ///
-    /// Cheap to make and thrown away after each use, which is what lets loads and lane operations
-    /// interleave without either borrowing the other for longer than a statement.
-    ///
-    /// # Errors
-    ///
-    /// [`LaneError`] if the width is not usable.
     pub fn lanes(&mut self) -> Result<Lanes<'_>, LaneError> {
         Lanes::new(&mut self.module, self.shape.subgroup)
     }
 
-    /// The module underneath, for anything this layer does not cover.
     pub const fn module(&mut self) -> &mut Module {
         &mut self.module
     }
 
-    /// Repeat `body` a fixed number of times as a **real loop**, threading one value through it.
-    ///
-    /// The same shape as [`Lanes::repeat_rolled`] and the same fixed trip count, with one
-    /// difference that is the whole reason it exists: the body is handed the kernel, so it can read
-    /// and write the buffers. A `Lanes` holds a module and a width and has no bindings to offer, so
-    /// a rolled loop over one can compute and cannot fetch — which makes it useless for the shape
-    /// that wants it most, a reduction over a run too long to unroll.
-    ///
-    /// `body` receives the carried value and the *iteration number*, a `u32` id that is 0 on the
-    /// first trip and `times - 1` on the last. It is one value rather than one per iteration,
-    /// because the body is built once: a body that wants `data[i]` indexes with it.
-    ///
-    /// # When to prefer unrolling
-    ///
-    /// A plain Rust `for` around the body, which is what every kernel here did before this existed.
-    /// It produces better SPIR-V and keeps each iteration's values in registers, so it is right
-    /// whenever the count is small and known. This is for when it is not: the module a loop emits
-    /// is one body however many trips it takes.
-    ///
-    /// # Errors
-    ///
-    /// [`LaneError::Build`] if any instruction cannot be emitted, or whatever `body` returns.
     pub fn repeat_rolled<F>(
         &mut self,
         times: u32,
@@ -188,23 +109,6 @@ impl<T: Element> Kernel<T> {
         crate::lanes::loops::rolled(self, times, carried_type, initial, body)
     }
 
-    /// The same, carrying **several** values rather than one.
-    ///
-    /// One phi a value at the loop header, and the body is handed all of them and returns all of
-    /// them. Every value shares `carried_type`.
-    ///
-    /// # What it is for
-    ///
-    /// A reduction that keeps more than one running total while reading each input once. Carrying
-    /// one value forces one loop a total, and every one of those loops reads the same data again —
-    /// so a weighted sum over sixteen vectors reads its input sixteen times, which is a bandwidth
-    /// problem rather than an arithmetic one and does not show up until it is measured.
-    ///
-    /// # Errors
-    ///
-    /// [`LaneError::BadCarry`] where the body returns a different number of values than it was
-    /// handed — the phis promised how many before the body was built, so this cannot be discovered
-    /// later. [`LaneError::Build`] if an instruction cannot be emitted, or whatever `body` returns.
     pub fn repeat_rolled_many<F>(
         &mut self,
         times: u32,
@@ -218,100 +122,57 @@ impl<T: Element> Kernel<T> {
         crate::lanes::loops::rolled_many(self, times, carried_type, initial, body)
     }
 
-    /// The SPIR-V type of `T`.
     #[must_use]
     pub const fn element(&self) -> Id {
         self.element
     }
 
-    /// How this kernel was shaped.
     #[must_use]
     pub const fn shape(&self) -> Shape {
         self.shape
     }
 
-    /// This invocation's index within its workgroup.
-    ///
-    /// The slot a workgroup handover writes to: every invocation has a different one, so no two
-    /// collide and the write needs no synchronisation of its own. See [`Kernel::store_shared`].
     #[must_use]
     pub const fn local_index(&self) -> Id {
         self.local
     }
 
-    /// Which workgroup this invocation is in — the dispatch's x index.
-    ///
-    /// **The slot a per-block result belongs at.** Everything else in this interface addresses by
-    /// *invocation*: [`Kernel::store_scalar`] writes one value per invocation, and a workgroup of
-    /// 64 therefore writes 64 of them. A chained algorithm often wants one value per *workgroup* —
-    /// a block's total, its maximum, how many elements it kept — and there was no way to say where
-    /// that goes, because the only index available counted invocations.
-    ///
-    /// It was loaded all along and used internally to work out where a workgroup's run begins; this
-    /// exposes the number rather than computing anything new.
-    ///
-    /// The x index and not a vector of three. `decisions/DR-0006` allows two dispatch axes, and the
-    /// y one is [`Kernel::row`] — which is a different question with a different answer, so they
-    /// are different functions rather than components of one.
     #[must_use]
     pub const fn workgroup_index(&self) -> Id {
         self.group
     }
 
-    /// The type this kernel's addresses are computed in — a 32-bit *unsigned* integer.
-    ///
-    /// What a caller building an offset needs. [`Kernel::load_offset_by`] and
-    /// [`Kernel::element_pointer_to`] both take an [`Id`] and both add it to an address, so the
-    /// value has to be of this type; a caller that asks the module for one itself is
-    /// reconstructing a decision this kernel already made, and can reconstruct it differently.
-    ///
-    /// It came from a mutation survivor. `runner/src/kernels/reduce.rs` wrote
-    /// `module().type_int(32, false)` and flipping that `false` changed nothing observable —
-    /// `OpIAdd` is sign-agnostic, so a signed spec constant computes the same address. The sign was
-    /// untestable because it was never load-bearing, and the honest fix is not a test for it but
-    /// not writing it down twice.
     #[must_use]
     pub const fn index_type(&self) -> Id {
         self.uint
     }
 
-    /// Close `main` and hand back the finished module.
-    ///
-    /// # Errors
-    ///
-    /// [`LaneError::Build`] if the closing instructions cannot be emitted.
     pub fn finish(mut self) -> Result<Vec<u32>, LaneError> {
         self.module.return_void()?;
         self.module.end_function()?;
         Ok(self.module.finish())
     }
 
-    /// A pointer to one element of a buffer.
     pub(super) const fn element_pointer(&self) -> Id {
         self.element_pointer
     }
 
-    /// The unsigned integer type the addresses are computed in.
     pub(super) const fn uint(&self) -> Id {
         self.uint
     }
 
-    /// The constant zero, which every access chain starts with — buffers hold one struct member.
     pub(super) const fn zero(&self) -> Id {
         self.zero
     }
 
-    /// This invocation's index within its workgroup, and which workgroup that is.
     pub(super) const fn position(&self) -> (Id, Id) {
         (self.local, self.group)
     }
 
-    /// This invocation's row, or `None` for a kernel with no second axis.
     pub(super) const fn row_index(&self) -> Option<Id> {
         self.row
     }
 
-    /// The variable bound at `index`.
     pub(super) fn buffer(&self, index: u32) -> Result<Id, LaneError> {
         self.buffers
             .get(index as usize)
@@ -325,7 +186,6 @@ impl<T: Element> Kernel<T> {
 
 #[cfg(test)]
 mod tests {
-    // A test may panic — that is how it reports.
     #![allow(clippy::expect_used, clippy::indexing_slicing)]
 
     use super::*;
@@ -340,7 +200,6 @@ mod tests {
             .count()
     }
 
-    /// Whether `words` declares `capability`.
     fn declares(words: &[u32], capability: Capability) -> bool {
         decode::body(words)
             .filter(|instruction| instruction.opcode() == op::CAPABILITY)
@@ -349,10 +208,6 @@ mod tests {
 
     #[test]
     fn a_rolled_loop_over_a_kernel_builds_one_body_that_reads_a_buffer() {
-        // **The capability itself.** Before this the shape was unreachable: `Lanes::repeat_rolled`
-        // hands its body a `Lanes`, which holds a module and a width and no bindings, so a rolled
-        // body could compute and could not fetch. Every kernel therefore unrolled and paid a body
-        // an iteration, which is fine for a run of sixty-four and not for one of eight thousand.
         let mut kernel = Kernel::<F32>::new(Shape::new(32, 32, 2)).expect("built");
         let element = kernel.element();
         let nought = F32::constant_from_bits(kernel.module(), 0.0_f32.to_bits()).expect("nought");
@@ -384,10 +239,6 @@ mod tests {
 
     #[test]
     fn a_rolled_loop_can_carry_several_running_totals_at_once() {
-        // **What one carried value costs.** A weighted sum over four vectors, keeping four totals
-        // and reading the input once — where carrying one would be four loops and four reads of the
-        // same data. That is a bandwidth problem, and it does not announce itself: the answer is
-        // right either way.
         let mut kernel = Kernel::<F32>::new(Shape::new(32, 32, 2)).expect("built");
         let element = kernel.element();
         let nought = F32::constant_from_bits(kernel.module(), 0.0_f32.to_bits()).expect("nought");
@@ -408,8 +259,6 @@ mod tests {
         kernel.store_at(1, at, out[0]).expect("stored");
         let words = kernel.finish().expect("finished");
 
-        // One loop and one body carrying four totals, which is what says the input is read once:
-        // four loops would be four merges and four reads of the same data.
         assert_eq!(count(&words, op::LOOP_MERGE), 1, "one loop and not four");
         assert_eq!(count(&words, op::PHI), 5, "the counter and four values");
         assert_eq!(count(&words, op::F_ADD), 4, "one body, four totals");
@@ -417,9 +266,6 @@ mod tests {
 
     #[test]
     fn a_rolled_body_that_carries_the_wrong_number_out_is_refused() {
-        // The phis promise how many values arrive before the body exists, so a body returning fewer
-        // leaves one naming an id nothing produced — which the validator reports as a bad id rather
-        // than as a broken promise. Both numbers are still known here.
         let mut kernel = Kernel::<F32>::new(Shape::new(32, 32, 2)).expect("built");
         let element = kernel.element();
         let nought = F32::constant_from_bits(kernel.module(), 0.0_f32.to_bits()).expect("nought");
@@ -460,8 +306,6 @@ mod tests {
 
     #[test]
     fn a_full_width_kernel_does_not_declare_the_clustered_capability() {
-        // Declaring it would make the module refuse to run on a device that offers everything
-        // else, which is worse than noise.
         let mut kernel = Kernel::<F32>::new(Shape::new(32, 64, 2)).expect("built");
         let value = kernel.load::<32>(0).expect("loaded");
         let total = kernel
@@ -535,14 +379,6 @@ mod tests {
 
     #[test]
     fn a_shape_whose_subgroup_is_not_a_power_of_two_is_refused_at_the_kernel() {
-        // **The field that was not checked.** `Shape` carries four numbers and this validated
-        // three of them, so `Shape::new(0, 64, 2)` built a kernel, stored to a buffer and finished
-        // a module `spirv-val` accepts — the width never questioned, because the only thing that
-        // questioned it was `Lanes::new`, which a kernel with no lane operation never reaches.
-        //
-        // A width is not a detail of the lane API. `decisions/DR-0002` makes it the number the
-        // whole module is specialised to, and a shape naming an impossible one describes nothing
-        // in the same way a workgroup of no invocations does.
         for width in [0_u32, 3, 24, 63, u32::MAX] {
             assert_eq!(
                 Kernel::<F32>::new(Shape::new(width, 64, 2)).err(),
@@ -551,14 +387,11 @@ mod tests {
             );
         }
 
-        // And the same for a grid, which goes through the same builder.
         assert_eq!(
             Kernel::<F32>::new(Shape::grid(24, 64, 4, 2)).err(),
             Some(LaneError::BadWidth { width: 24 })
         );
 
-        // Every power of two a device could report still builds, including the ones no device
-        // does: this refuses what cannot be a width, not what is unlikely to be one.
         for width in [1_u32, 4, 8, 16, 32, 64, 128] {
             assert!(
                 Kernel::<F32>::new(Shape::new(width, 64, 2)).is_ok(),
@@ -569,9 +402,6 @@ mod tests {
 
     #[test]
     fn the_workgroup_index_is_the_workgroup_built_in_and_not_the_invocation_one() {
-        // Two accessors returning ids of the same type, one of which is a plausible wrong answer
-        // for the other. Swapping them compiles, validates, and puts every block's result in the
-        // slot belonging to a lane — so the assertion traces the id back to the decoration.
         use crate::spec::BuiltIn;
 
         let kernel = Kernel::<F32>::new(Shape::new(32, 64, 2)).expect("built");
@@ -581,7 +411,6 @@ mod tests {
 
         let words = kernel.finish().expect("finished");
 
-        // Which variable each built-in decorates.
         let decorated = |wanted: u32| {
             decode::body(&words)
                 .filter(|instruction| instruction.opcode() == op::DECORATE)
@@ -595,8 +424,6 @@ mod tests {
                 })
         };
 
-        // `group` is a component extracted from the loaded vector, so the chain to follow is
-        // extract <- load <- variable. Both are traced the same way, and only the built-in differs.
         let source_of = |value: Id| {
             let extracted = decode::body(&words)
                 .filter(|instruction| instruction.opcode() == op::COMPOSITE_EXTRACT)
@@ -612,8 +439,6 @@ mod tests {
                 })
         };
 
-        // Both sides found, before they are compared. Two `None`s are equal, and a version of
-        // this test that skipped this would pass for a module containing neither built-in.
         let from_group = source_of(group).expect("workgroup_index traces back to a variable");
         let from_local = source_of(local).expect("local_index traces back to a variable");
         let workgroup_id =
@@ -634,8 +459,6 @@ mod tests {
 
     #[test]
     fn the_index_type_is_unsigned_because_the_built_ins_are() {
-        // `LocalInvocationId` and `WorkgroupId` are vectors of 32-bit *unsigned* integers, so the
-        // scalar the addresses are computed in has to match.
         let kernel = Kernel::<F32>::new(Shape::new(32, 64, 1)).expect("built");
         let words = kernel.finish().expect("finished");
 

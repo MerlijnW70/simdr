@@ -1,32 +1,7 @@
-//! Kernels whose output slot depends on the data.
-//!
-//! Everything else in `kernels/` writes to an address derived from the invocation index, so the
-//! answer is a `map` and no two invocations collide. These are the other kind: a histogram's bin
-//! comes from the value being counted, and two invocations counting the same value must both be
-//! counted.
-//!
-//! # The index is clamped, and that is not a detail
-//!
-//! An out-of-range index into a storage buffer is undefined behaviour, not an error — so the bin
-//! is held inside the buffer with `Lanes::min` before it is used. That costs one instruction per
-//! element and is the price of letting the data choose an address.
-
 use super::{shape, whole_subgroup};
 use simdr::kernel::{Kernel, Shape};
 use simdr::lanes::{LaneError, U32};
 
-/// Count how many inputs fall in each of `bins` bins, one bin per distinct value.
-///
-/// `out[in[i] % bins] += 1`, atomically. Written as a clamp of a masked value rather than a
-/// modulus because the masking is what keeps the index in range and the clamp is what makes that
-/// true even if the mask is wrong.
-///
-/// Binding 1 must hold at least `bins` elements and start at zero — this adds to whatever is
-/// there, which is what an atomic counter does.
-///
-/// # Errors
-///
-/// [`LaneError`] if the module cannot be built.
 fn histogram_at<const LANES: u32>(
     subgroup: u32,
     workgroup: u32,
@@ -37,8 +12,6 @@ fn histogram_at<const LANES: u32>(
 
     let bin = {
         let mut lanes = kernel.lanes()?;
-        // `min(value, bins - 1)` rather than a modulus: it is one instruction, and it makes the
-        // index in-range by construction rather than by an argument about the input.
         let ceiling = lanes.splat_bits::<U32, LANES>(bins.saturating_sub(1))?;
         lanes.min(value, ceiling)?
     };
@@ -48,14 +21,6 @@ fn histogram_at<const LANES: u32>(
     kernel.finish()
 }
 
-/// The same, counting with `OpAtomicIIncrement` instead of an add of one.
-///
-/// A different instruction for the same arithmetic, which is why it is worth having both: they
-/// must agree, and only one of them takes a value operand.
-///
-/// # Errors
-///
-/// As [`histogram`].
 fn histogram_incrementing_at<const LANES: u32>(
     subgroup: u32,
     workgroup: u32,
@@ -74,24 +39,10 @@ fn histogram_incrementing_at<const LANES: u32>(
     kernel.finish()
 }
 
-/// `histogram_at` with one element per invocation, whatever the subgroup width is.
-///
-/// The lane count has to match the width. A histogram is elementwise and could in principle use
-/// any mapping, but the scatter takes `bin.id()` — the *first* strip — so a strip-mined vector
-/// would count a quarter of its elements and report a plausible total.
-///
-/// # Errors
-///
-/// [`LaneError`] if the module cannot be built, or the width is not one the dispatcher lists.
 pub fn histogram(subgroup: u32, workgroup: u32, bins: u32) -> Result<Vec<u32>, LaneError> {
     whole_subgroup!(subgroup, histogram_at, workgroup, bins)
 }
 
-/// `histogram_incrementing_at`, the same way.
-///
-/// # Errors
-///
-/// As [`histogram`].
 pub fn histogram_incrementing(
     subgroup: u32,
     workgroup: u32,
@@ -100,35 +51,15 @@ pub fn histogram_incrementing(
     whole_subgroup!(subgroup, histogram_incrementing_at, workgroup, bins)
 }
 
-/// Every invocation claims a consecutive slot from one counter, and writes its own index there.
-///
-/// The allocator shape, and the one that shows what an atomic *returns*: `OpAtomicIAdd` yields the
-/// value the slot held before, so no two invocations get the same answer and the answers cover
-/// `0..n` exactly. The output is therefore a permutation of the invocation indices — which is a
-/// stronger statement than a histogram's, because a lost or duplicated claim shows up as a
-/// repeated or missing entry rather than as an off-by-one in a total.
-///
-/// Slot 0 of binding 1 is the counter; the claims are written from slot 1 onwards.
-///
-/// # Errors
-///
-/// As [`histogram`].
 pub fn claim_slots(subgroup: u32) -> Result<Vec<u32>, LaneError> {
     let mut kernel = Kernel::<U32>::new(shape(subgroup))?;
 
-    // The kernel's own index type. Asking the module for `type_int(32, false)` returned the same
-    // id — the module interns types — and asking for a *signed* one would have returned a second
-    // 32-bit integer type that computes the same answers, because `OpIAdd` is sign-agnostic. So
-    // the sign was a decision written down twice where only one copy could matter, which is
-    // exactly what `Kernel::index_type` exists to stop. The test below still says so.
     let uint = kernel.index_type();
     let counter = kernel.module().constant_u32(0)?;
     let one = kernel.module().constant_u32(1)?;
 
-    // The slot this invocation was given, which is different in every one of them.
     let claimed = kernel.atomic_add_at(1, counter, one)?;
 
-    // Written one further along, so the counter itself is not overwritten by a claim.
     let slot = kernel.module().i_add(uint, claimed, one)?;
     let local = kernel.local_index();
     let pointer = kernel.element_pointer_to(1, slot)?;
@@ -137,20 +68,6 @@ pub fn claim_slots(subgroup: u32) -> Result<Vec<u32>, LaneError> {
     kernel.finish()
 }
 
-/// Every invocation swaps its own index into slot 0 and keeps whatever it displaced.
-///
-/// **What an exchange says that an add cannot.** An atomic add accumulates, so a lost one shows up
-/// only as a wrong total; an exchange forms a *chain* — the slot holds `initial`, then each
-/// invocation in some order replaces it and receives the previous occupant. Whatever the order, the
-/// values handed out plus the one left in the slot are exactly `{initial}` together with every
-/// invocation index, each once. A lost exchange duplicates a value; a torn one invents one.
-///
-/// Binding 1 holds the slot at 0 and the answers from 1 onwards, so the counter is not overwritten
-/// by an answer.
-///
-/// # Errors
-///
-/// As [`histogram`].
 pub fn exchange_chain(subgroup: u32) -> Result<Vec<u32>, LaneError> {
     let mut kernel = Kernel::<U32>::new(shape(subgroup))?;
 
@@ -158,9 +75,6 @@ pub fn exchange_chain(subgroup: u32) -> Result<Vec<u32>, LaneError> {
     let slot = kernel.module().constant_u32(0)?;
     let one = kernel.module().constant_u32(1)?;
 
-    // This invocation's own index, which is what it puts in — distinct in every invocation of the
-    // workgroup, so the chain's links are distinguishable. One workgroup, for that reason: the
-    // index repeats across workgroups and the invariant below counts each link once.
     let mine = kernel.local_index();
     let displaced = kernel.atomic_exchange_at(1, slot, mine)?;
 
@@ -171,20 +85,6 @@ pub fn exchange_chain(subgroup: u32) -> Result<Vec<u32>, LaneError> {
     kernel.finish()
 }
 
-/// `out[i] = in[in[i]]` — a gather whose address the data chooses, read atomically.
-///
-/// **The read that is not a race.** Every other load in this library computes its address from the
-/// invocation index, so nothing else can be writing it. An address the data chose has no such
-/// promise, and a plain `OpLoad` of a location another invocation may be writing is undefined
-/// rather than merely stale. `OpAtomicLoad` is the read that is defined there.
-///
-/// Nothing writes binding 0 during this dispatch, which is deliberate: what is under test is the
-/// instruction and its addressing, and an answer that depends on which invocation ran first would
-/// be a test of the scheduler.
-///
-/// # Errors
-///
-/// As [`histogram`].
 pub fn atomic_gather(subgroup: u32) -> Result<Vec<u32>, LaneError> {
     whole_subgroup!(subgroup, atomic_gather_at)
 }
@@ -193,8 +93,6 @@ fn atomic_gather_at<const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneErr
     let mut kernel = Kernel::<U32>::new(shape(subgroup))?;
     let index = kernel.load::<LANES>(0)?;
 
-    // Held inside the buffer, for the reason the header gives: an out-of-range index is undefined
-    // behaviour rather than an error, and the caller's data decides this one.
     let last = kernel
         .module()
         .constant_u32(super::WORKGROUP_SIZE.saturating_sub(1))?;
@@ -215,15 +113,6 @@ mod tests {
     use simdr::decode;
     use simdr::module::op;
 
-    /// The allocator's index arithmetic reuses the kernel's own `u32`.
-    ///
-    /// A mutation run flipped the signedness of that declaration and the whole suite stayed green,
-    /// which is correct as far as the *answer* goes: `OpIAdd` does not care, and neither does an
-    /// access chain's index. What changes is the module — a second `OpTypeInt 32` appears, and the
-    /// kernel is then carrying two types that mean the same thing.
-    ///
-    /// One 32-bit integer type is the invariant worth stating, and it is not one any dispatch
-    /// could have told us.
     #[test]
     fn the_allocator_declares_one_32_bit_integer_type_and_not_two() {
         let words = claim_slots(32).expect("built");
@@ -238,7 +127,6 @@ mod tests {
             1,
             "two integer types of the same width: {integers:?}"
         );
-        // Result id, width, signedness.
         assert_eq!(
             integers.first().and_then(|operands| operands.get(1)),
             Some(&32)

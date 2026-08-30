@@ -1,8 +1,3 @@
-//! Print what each kernel actually returns, for eyeballing.
-//!
-//! The tests assert against a reference; this prints the numbers, which is what you want the
-//! first time a kernel runs on a device you have not tried before.
-
 use runner::Gpu;
 use runner::kernels::{self, WORKGROUP_SIZE};
 use simdr::lanes::{F32, U32};
@@ -24,16 +19,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         limits.subgroup_shuffle
     );
 
-    // Built for a subgroup of 32 or 64, which is what the buffers below are sized for.
-    // `Simd<f32, 32>` is one strip at width 32 and four at width 8, and four strips read four
-    // times the elements — `Overrun { needed: 256, held: 64 }`, from the dispatch bound that
-    // exists to catch a kernel reading past what it was given.
-    //
-    // This one prints numbers for eyeballing on a device you have not tried before, so it could
-    // reasonably size itself from the width. It does not, because the vectors are the subject:
-    // the whole point of the listing is that `Simd<f32, 4>`, `<f32, 32>` and `<f32, 64>` are
-    // three different mappings, and choosing them from the device would print three rows that
-    // are the same mapping under different names.
     if width < 32 {
         println!(
             "SKIPPED show: these kernels are built for a subgroup of at least 32 and this device \
@@ -47,8 +32,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let input: Vec<f32> = (0..count as u32).map(|index| index as f32).collect();
     println!("in            {:?}", &input[..8]);
 
-    // One piece of source at three lane counts. Nothing below names a reduction shape or a
-    // cluster size — the kernel derives both from the width printed above.
     println!("\nreduce_sum, one source at three widths:");
     for (label, spirv) in [
         ("Simd<f32,4> ", kernels::lane_sum::<F32, 4>(width)?),
@@ -78,8 +61,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let voted = gpu.run(&kernels::any_above(width, 40.0)?, &input, 1)?;
     println!("  any(x > 40)   {:?}", &voted[..8]);
 
-    // Wider than the subgroup: two elements per lane, folded before the reduce. The input has to
-    // be twice as long, because the second strip lives past the first.
     println!("\nstrip-mined, and an integer:");
     let long: Vec<f32> = (0..count as u32 * 2).map(|index| index as f32).collect();
     let strided = gpu.run(&kernels::lane_sum::<F32, 64>(width)?, &long, 1)?;

@@ -1,42 +1,14 @@
-//! Asking the device how long it took, instead of asking the clock on this side of the bus.
-//!
-//! `Instant` around a submit-and-wait measures everything between the two calls: the driver's
-//! scheduling, the operating system's, whatever else wanted the GPU. At a few microseconds of
-//! actual work that is mostly not the kernel — and it is why this project's sweep disagreed with
-//! itself by twenty times and had no way to say so.
-//!
-//! A timestamp query is written *into the command stream*, so the two readings bracket the work
-//! on the device's own clock. The difference is in ticks; `timestampPeriod` converts them to
-//! nanoseconds.
-//!
-//! Not every queue supports them. `timestampValidBits` is zero on some transfer queues, and the
-//! whole feature is optional — so this reports `None` rather than pretending, and the caller
-//! falls back to the host clock knowing that is what it has.
-
 use crate::{Error, Gpu};
 use ash::vk;
 use std::time::Duration;
 
-/// Timestamp queries bracketing one submission, and optionally marking points inside it.
-///
-/// Query 0 opens and query 1 closes; anything after them is a **mark** a caller wrote part way
-/// through. That is what turns a breakdown into the call rather than a set of probes resembling it:
-/// a mark after each pass of a chain is measured *in company*, paying whatever the pass beside it
-/// makes it pay, where a probe timed on its own pays its own fixed costs and nothing else's.
 pub(super) struct Timestamps {
     pool: vk::QueryPool,
-    /// Nanoseconds per tick, from the device's limits.
     period: f32,
-    /// How many marks this pool has room for, past the opening and closing pair.
     marks: u32,
 }
 
 impl Timestamps {
-    /// Create a query pool, or `None` if this device cannot answer.
-    ///
-    /// # Safety
-    ///
-    /// [`Timestamps::destroy`] must run before the device goes away.
     pub(super) unsafe fn new(gpu: &Gpu, marks: u32) -> Result<Option<Self>, Error> {
         let period = gpu.limits().timestamp_period_ns;
         if period <= 0.0 {
@@ -59,14 +31,6 @@ impl Timestamps {
         }))
     }
 
-    /// Reset the pool and write the opening timestamp.
-    ///
-    /// The reset has to be recorded too: a query pool's contents are undefined until it is, and a
-    /// second submission would otherwise read the first one's answer.
-    ///
-    /// # Safety
-    ///
-    /// `command` must be a command buffer in the recording state.
     pub(super) unsafe fn begin(&self, gpu: &Gpu, command: vk::CommandBuffer) {
         let device = gpu.device();
         // SAFETY: `command` is in the recording state, which this function's contract requires,
@@ -78,11 +42,6 @@ impl Timestamps {
         }
     }
 
-    /// Write the closing timestamp.
-    ///
-    /// # Safety
-    ///
-    /// As [`Timestamps::begin`], and after it.
     pub(super) unsafe fn end(&self, gpu: &Gpu, command: vk::CommandBuffer) {
         // SAFETY: as `begin`, and query 1 is the second of the two the pool was created with —
         // reset by the `begin` this function's contract says came first.
@@ -96,18 +55,6 @@ impl Timestamps {
         }
     }
 
-    /// Write mark `index`, which a caller records part way through its own command buffer.
-    ///
-    /// **`BOTTOM_OF_PIPE`, so the mark lands after the work before it has finished** rather than
-    /// after it was merely issued. A `TOP_OF_PIPE` mark between two dispatches would say when the
-    /// second was *submitted*, which on a device that overlaps them is not when the first ended.
-    ///
-    /// Out-of-range indices are dropped rather than written: the pool was sized for a promise the
-    /// caller made, and writing past it is undefined where doing nothing costs one measurement.
-    ///
-    /// # Safety
-    ///
-    /// As [`Timestamps::begin`].
     pub(super) unsafe fn mark(&self, gpu: &Gpu, command: vk::CommandBuffer, index: u32) {
         if index >= self.marks {
             return;
@@ -124,14 +71,6 @@ impl Timestamps {
         }
     }
 
-    /// How long each marked span took, in order, measured from the opening timestamp.
-    ///
-    /// Span `i` runs from mark `i - 1` to mark `i`, and span 0 from the opening timestamp. Empty
-    /// if the device gave nothing usable, which is the same fallback [`Timestamps::read`] takes.
-    ///
-    /// # Safety
-    ///
-    /// As [`Timestamps::read`].
     pub(super) unsafe fn spans(&self, gpu: &Gpu) -> Result<Vec<Duration>, Error> {
         if self.marks == 0 {
             return Ok(Vec::new());
@@ -155,8 +94,6 @@ impl Timestamps {
             let Some(at) = ticks.get(2 + index).copied() else {
                 break;
             };
-            // A device may reorder these; a negative interval is not a measurement, so it becomes
-            // zero rather than an enormous number wrapped round.
             let elapsed = at.saturating_sub(previous);
             previous = at;
             spans.push(Duration::from_nanos(
@@ -166,11 +103,6 @@ impl Timestamps {
         Ok(spans)
     }
 
-    /// Read the elapsed device time, once the submission has completed.
-    ///
-    /// # Safety
-    ///
-    /// The fence for the submission that wrote these must have been waited on.
     pub(super) unsafe fn read(&self, gpu: &Gpu) -> Result<Option<Duration>, Error> {
         let mut ticks = [0_u64; 2];
         // SAFETY: the submission that wrote these has been waited on, which this function's
@@ -185,8 +117,6 @@ impl Timestamps {
             )
         }?;
 
-        // A device may report the two in either order if the pipeline stages allowed reordering;
-        // a negative interval is not a measurement, so it becomes `None` rather than a wrap.
         let Some(elapsed) = ticks
             .get(1)
             .and_then(|end| ticks.first().and_then(|start| end.checked_sub(*start)))
@@ -198,11 +128,6 @@ impl Timestamps {
         Ok(Some(Duration::from_nanos(nanos as u64)))
     }
 
-    /// Release the pool.
-    ///
-    /// # Safety
-    ///
-    /// No submission using it may still be in flight.
     pub(super) unsafe fn destroy(self, gpu: &Gpu) {
         // SAFETY: `self` is taken by value so nothing else names this pool, and the caller's
         // contract says no submission using it is still in flight.

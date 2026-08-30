@@ -1,21 +1,7 @@
-//! Reductions and scans across a subgroup — what `Simd::reduce_*` lowers to.
-//!
-//! Needs `GroupNonUniformArithmetic`, and `GroupNonUniformClustered` as well for
-//! [`Reduction::Clustered`].
-
 use super::Reduction;
 use crate::module::{BuildError, Id, Module, op};
 
 impl Module {
-    /// Any group arithmetic instruction, named by opcode.
-    ///
-    /// The wrappers below are the readable spelling. This one exists because a layer above may
-    /// hold the opcode as data — [`crate::lanes::Element`] carries one reduction opcode per
-    /// element type, so that `reduce_sum` is one function rather than one per type.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError`] if the instruction cannot be emitted.
     pub fn subgroup_reduce(
         &mut self,
         opcode: u16,
@@ -27,11 +13,6 @@ impl Module {
         self.group_arithmetic(opcode, result_type, scope, reduction, value)
     }
 
-    /// Floating-point add across the group — what `Simd::reduce_sum` lowers to.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError`] if the instruction cannot be emitted.
     pub fn subgroup_f_add(
         &mut self,
         result_type: Id,
@@ -48,11 +29,6 @@ impl Module {
         )
     }
 
-    /// Integer add across the group.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError`] if the instruction cannot be emitted.
     pub fn subgroup_i_add(
         &mut self,
         result_type: Id,
@@ -69,11 +45,6 @@ impl Module {
         )
     }
 
-    /// Floating-point maximum across the group — what `Simd::reduce_max` lowers to.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError`] if the instruction cannot be emitted.
     pub fn subgroup_f_max(
         &mut self,
         result_type: Id,
@@ -90,11 +61,6 @@ impl Module {
         )
     }
 
-    /// Floating-point minimum across the group.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError`] if the instruction cannot be emitted.
     pub fn subgroup_f_min(
         &mut self,
         result_type: Id,
@@ -111,10 +77,6 @@ impl Module {
         )
     }
 
-    /// The shape every group arithmetic instruction shares.
-    ///
-    /// `<scope id> <operation literal> <value> [cluster size id]` — the mixed encoding named in
-    /// this module's documentation, written once so no call site has to remember it.
     fn group_arithmetic(
         &mut self,
         opcode: u16,
@@ -133,7 +95,6 @@ impl Module {
 
 #[cfg(test)]
 mod tests {
-    // A test may panic — that is how it reports.
     #![allow(clippy::expect_used, clippy::indexing_slicing)]
 
     use super::*;
