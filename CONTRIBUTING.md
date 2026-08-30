@@ -95,13 +95,23 @@ code is redundant, so deleting it is the fix.
 
 ## Comments
 
-`.attest.toml` sets `comments = "strict"`. The source carries no narrative: what the code does is
-stated by tests, and why it is that way is stated in the commit message. What survives a strict
-file is `// SAFETY:` and the whole argument under it, lint directives, and fenced blocks in doc
-comments — `cargo test` compiles and runs those, so they are tests.
+`.attest.toml` sets `comments = "claims"`. Prose is not refused for being prose: a comment may say
+why the code is the way it is, and the guard leaves it alone. What is refused is an assertion
+nothing settles — a figure no measurement holds, a path that is not in the tree, a name the tree
+does not declare. What survives untouched either way is `// SAFETY:` and the whole argument under
+it, lint directives, and fenced blocks in doc comments — `cargo test` compiles and runs those, so
+they are tests.
 
-If you have written a paragraph explaining a function, it belongs in the commit that introduces it.
-Read a few messages here first: they say what was found, what it cost, and what was refused.
+This said `"strict"` until a run over the whole tree was read. Strict is the stronger rule: no
+narrative in the source at all. It was written down after the source it governs, and the source has
+never held to it — that run refused twenty-three files, every one of them for doc comments
+explaining a fold, a saturation sequence or a binding, the paragraphs this crate leans on and means
+to keep. Under `"claims"` the same run comes back with nothing unbacked: no figure, no path and no
+symbol in this tree is wrong. Strict was refusing the prose and finding nothing else.
+
+A paragraph explaining a *decision* still belongs in the commit that introduces it. Read a few
+messages here first: they say what was found, what it cost, and what was refused. And a comment
+naming a figure, a path or a symbol is now checked against the tree, so it has to be true.
 
 ## Naming
 

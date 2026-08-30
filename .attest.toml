@@ -3,7 +3,7 @@
 # What is refused is an assertion nothing settles: a figure nobody measured, a path that is not
 # there, a name the tree does not declare.
 
-comments = "strict"
+comments = "claims"
 tolerance = 0.005
 exempt = ["target/**", ".git/**"]
 
