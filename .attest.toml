@@ -27,11 +27,16 @@ timeout = 900
 
 # The gate a passing suite cannot supply, delegated to the prober this repository already uses.
 #
-# `proved` is empty because no baseline exists. `.noha/baseline.tsv` is present on this machine and
-# holds its header line and nothing else -- zero rows, so the ratchet floor is unseeded and `noha
-# prober` refuses until `--update` has written one. That run is the whole workspace at `max: 4000`,
-# which is hours. Seed it in shards, one invocation at a time, and add paths here as each earns a
-# run with no survivors.
+# The emitter's floor is seeded: `noha prober --update` over `src/` killed 301 of 301 viable
+# mutants. It cannot be seeded in shards, which an earlier note here claimed -- `NOHA_ONLY` and
+# `NOHA_SHARD` narrow a reading run, but with `--update` noha refuses them outright, since a
+# shard's survivor set written as the floor launders every out-of-shard survivor out of it. The
+# full run is minutes rather than the hours `max: 4000` suggests, because test-impact analysis
+# picks the kill set per mutant.
+#
+# `proved` is still empty, and that is a separate step: a path here makes `attest check` refuse it
+# until attest's own `prove` has a record of a clean probe *of that commit*. noha's baseline is not
+# that record. Add paths as each earns one.
 #
 # That the file is here says nothing about any other checkout. This machine's global gitignore
 # excludes `.noha/` from every repository on it, so neither the baseline nor the test-impact matrix

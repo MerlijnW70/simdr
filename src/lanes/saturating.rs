@@ -91,6 +91,7 @@ mod tests {
     use crate::decode;
     use crate::lanes::{I8, I16, I32, U8, U16, U32};
     use crate::module::{Module, Version, op};
+    use std::collections::HashMap;
 
     fn count(words: &[u32], opcode: u16) -> usize {
         decode::body(words)
@@ -196,6 +197,49 @@ mod tests {
         assert_eq!(count(&words, op::SHIFT_RIGHT_ARITHMETIC), 1);
         assert_eq!(count(&words, op::S_LESS_THAN), 1, "signed, not unsigned");
         assert_eq!(count(&words, op::SELECT), 1);
+    }
+
+    fn shift_amount_of<T: Integer>() -> u32 {
+        let mut module = Module::new(Version::V1_3);
+        let mut lanes = Lanes::new(&mut module, 32).expect("built");
+        let value = lanes.splat_bits::<T, 32>(3).expect("splat");
+
+        lanes.saturating_add(value, value).expect("added");
+
+        let words = module.finish();
+        let constants: HashMap<u32, u32> = decode::body(&words)
+            .filter(|instruction| instruction.opcode() == op::CONSTANT)
+            .map(|instruction| {
+                let operands = instruction.operands();
+                (operands[1], operands[2])
+            })
+            .collect();
+
+        let spread = decode::body(&words)
+            .find(|instruction| instruction.opcode() == op::SHIFT_RIGHT_ARITHMETIC)
+            .expect("the signed sequence spreads the sign");
+
+        constants[&spread.operands()[3]]
+    }
+
+    #[test]
+    fn the_sign_spread_shifts_by_one_less_than_the_width_and_never_past_it() {
+        for (name, taken, bits) in [
+            ("i8", shift_amount_of::<I8>(), I8::BITS),
+            ("i16", shift_amount_of::<I16>(), I16::BITS),
+            ("i32", shift_amount_of::<I32>(), I32::BITS),
+        ] {
+            assert_eq!(
+                taken,
+                bits - 1,
+                "{name} shifts by {taken}, not by {}",
+                bits - 1
+            );
+            assert!(
+                taken < bits,
+                "{name} shifts by {taken}, which is outside a {bits}-bit type"
+            );
+        }
     }
 
     #[test]

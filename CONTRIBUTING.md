@@ -85,8 +85,14 @@ The three `noha.yaml` files are excluded by many contributors' global gitignore 
 the repository. They are recorded verbatim in the commit that split them, and
 `tests/integrity.rs` skips its checks rather than failing when they are absent.
 
-The emitter surface stands at zero survivors. Keep it there: a change that adds a survivor is a
-change whose behaviour nothing checks.
+The emitter surface stands at zero survivors — 301 viable mutants, all killed. Keep it there: a
+change that adds a survivor is a change whose behaviour nothing checks.
+
+Seeding that floor is one run and cannot be split. `NOHA_ONLY` and `NOHA_SHARD` narrow a *reading*
+run, but `noha` refuses them together with `--update`, because writing a shard's survivor set as
+the floor would launder every out-of-shard survivor out of it. The full run over the emitter is
+minutes, not the hours the surface's size suggests, because test-impact analysis picks the kill
+set per mutant.
 
 When a survivor will not die, read the code before writing another test. Four survivors here were
 all the same shape — two operators agreeing on every value the suite happened to pass, `& 0xff`
