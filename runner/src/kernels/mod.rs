@@ -447,6 +447,29 @@ pub fn lane_prefix_whole(
     whole_subgroup!(subgroup, lane_prefix, running, exclusive)
 }
 
+/// The look-up table this crate could not express until a binding could hold a
+/// type of its own: `u32` indices into an `f32` table.
+///
+/// Binding 0 is the table and 1 holds the indices, declared for `u32` rather
+/// than for what the kernel holds; 2 is where the answer goes. That is the
+/// order the runner binds inputs and then the output in.
+pub fn lane_lookup(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup!(subgroup, lane_lookup_at)
+}
+
+fn lane_lookup_at<const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    use simdr::lanes::{F32, U32};
+
+    let mut kernel = Kernel::<F32>::new(Shape::new(subgroup, WORKGROUP_SIZE, 1))?;
+    let slots = kernel.bind::<U32>()?;
+    let answers = kernel.bind::<F32>()?;
+
+    let indices = kernel.load_from::<U32, LANES>(slots)?;
+    let picked = kernel.gather::<LANES>(0, indices)?;
+    kernel.store_into(answers, picked)?;
+    kernel.finish()
+}
+
 pub fn lane_affine<const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
     use simdr::lanes::F32;
 

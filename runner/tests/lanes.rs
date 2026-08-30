@@ -1340,3 +1340,35 @@ fn a_strip_mined_scan_carries_its_own_fold_between_the_strips() {
         assert_eq!(output, expected, "{running:?} across two strips");
     }
 }
+
+#[test]
+fn a_table_of_one_type_is_looked_up_by_indices_of_another() {
+    let Some(gpu) = device("lookup") else {
+        return;
+    };
+
+    let width = gpu.limits().subgroup_size;
+    let count = WORKGROUP_SIZE as usize;
+
+    // A table of floats that are not whole, so a lane reading its own slot
+    // instead of the one it was given shows up as the wrong fraction.
+    let table: Vec<f32> = (0..count).map(|index| index as f32 * 0.25 - 4.0).collect();
+    let slots: Vec<u32> = (0..count as u32)
+        .map(|index| (index * 7 + 3) % count as u32)
+        .collect();
+
+    let spirv = kernels::lane_lookup(width).expect("built");
+    let words: Vec<u32> = table.iter().map(|value| value.to_bits()).collect();
+    let output = gpu
+        .run_bound(&spirv, &[&words, &slots], count, 1)
+        .expect("dispatched");
+    let output: Vec<f32> = output.into_iter().map(f32::from_bits).collect();
+
+    let expected: Vec<f32> = slots.iter().map(|slot| table[*slot as usize]).collect();
+    assert_eq!(output, expected);
+    assert_ne!(output, table, "a lookup that read its own lane is not one");
+    assert!(
+        output.iter().any(|value| *value < 0.0),
+        "the table straddles zero, so a lookup reading the wrong half would show"
+    );
+}
