@@ -24,7 +24,7 @@
 //! validator can see — an implementation may support the instruction and lower it to the four
 //! multiplies it replaces. `simdr probe` reports what this machine says.
 
-use super::{F32, I32, LaneError, Lanes, U32, Vector};
+use super::{Element, F32, I32, LaneError, Lanes, U32, Vector};
 use crate::spec::PackedVectorFormat;
 
 impl Lanes<'_> {
@@ -196,6 +196,64 @@ impl Lanes<'_> {
                 self.module()
                     .unary(crate::module::op::CONVERT_S_TO_F, float, strip)?,
             );
+        }
+
+        self.from_strips(&ids)
+    }
+
+    /// The `u32` a lane's `f32` denotes, **truncated toward zero**.
+    ///
+    /// [`Lanes::to_f32`] backwards, and the direction a quantiser goes: scale a float into the
+    /// range a byte holds, then take the whole number. 7.9 becomes 7 rather than 8 — this is not a
+    /// rounding, and a caller that wants one adds the half itself.
+    ///
+    /// **A negative value, or one past what a `u32` holds, is undefined and not clamped.** SPIR-V
+    /// says so and nothing here checks it, for [`Lanes::shift_left`]'s reason: the value is an id
+    /// by the time it arrives, so a check would be a comparison and a select emitted on every
+    /// call. A caller that cannot promise the range wants [`Lanes::clamp`] first, which is one
+    /// instruction and says what it is doing.
+    ///
+    /// # Errors
+    ///
+    /// [`LaneError`] if the instructions cannot be emitted.
+    pub fn to_u32<const LANES: u32>(
+        &mut self,
+        value: Vector<F32, LANES>,
+    ) -> Result<Vector<U32, LANES>, LaneError> {
+        self.convert(crate::module::op::CONVERT_F_TO_U, value)
+    }
+
+    /// The `i32` a lane's `f32` denotes, **truncated toward zero**.
+    ///
+    /// As [`Lanes::to_u32`], and named apart from it for the reason the two right shifts are:
+    /// they agree on every value a `u32` can hold and disagree on the rest, which is the shape of
+    /// mistake this crate keeps finding. −7.9 becomes −7 here, so truncation is a floor only where
+    /// the value is not negative.
+    ///
+    /// # Errors
+    ///
+    /// [`LaneError`] if the instructions cannot be emitted.
+    pub fn to_i32<const LANES: u32>(
+        &mut self,
+        value: Vector<F32, LANES>,
+    ) -> Result<Vector<I32, LANES>, LaneError> {
+        self.convert(crate::module::op::CONVERT_F_TO_S, value)
+    }
+
+    /// One conversion instruction per strip, from a float to whatever `T` the caller asked for.
+    ///
+    /// Its own helper because the operand's element type and the result's differ, which is what
+    /// [`Lanes::zip`] is not written for — the same argument [`Lanes::shift`]'s helper makes.
+    fn convert<T: Element, const LANES: u32>(
+        &mut self,
+        opcode: u16,
+        value: Vector<F32, LANES>,
+    ) -> Result<Vector<T, LANES>, LaneError> {
+        let element = self.type_of::<T>()?;
+        let mut ids = Vec::with_capacity(value.strip_count());
+
+        for &strip in value.strips() {
+            ids.push(self.module().unary(opcode, element, strip)?);
         }
 
         self.from_strips(&ids)

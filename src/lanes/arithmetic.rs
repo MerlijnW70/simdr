@@ -8,8 +8,8 @@
 //! `Vector<F32, 32>` do not combine, and neither do `Vector<F32, 8>` and `Vector<I32, 8>`.
 
 use super::vector::Strips;
-use super::{Element, LaneError, Lanes, Vector};
-use crate::module::Id;
+use super::{Element, Integer, LaneError, Lanes, Vector};
+use crate::module::{Id, op};
 
 impl Lanes<'_> {
     /// `a + b`, elementwise.
@@ -75,6 +75,30 @@ impl Lanes<'_> {
         right: Vector<T, LANES>,
     ) -> Result<Predicate<LANES>, LaneError> {
         self.compare(T::EQUAL, left, right)
+    }
+
+    /// `a ^ b`, elementwise: the bits set in one side or the other but not in both.
+    ///
+    /// [`Integer`] rather than [`Element`], for [`Lanes::shift_left`]'s reason and not a weaker
+    /// one: SPIR-V's bitwise instructions take integer operands, so a float here builds a module
+    /// `spirv-val` rejects rather than one that means something surprising. The bound is how that
+    /// is said, because there is no answer a `LaneError` could give at run time that the type
+    /// system cannot give before anything runs.
+    ///
+    /// **The odd one out of the three bitwise instructions, and the reason it is here.** `and` and
+    /// `or` are emitted inside [`Lanes::butterfly`]'s address arithmetic and reach no caller;
+    /// `xor` is what a caller wants directly — a parity, a mask flipped, a lane's partner in a
+    /// butterfly written by hand rather than by [`Lanes::butterfly`].
+    ///
+    /// # Errors
+    ///
+    /// [`LaneError`] if the instructions cannot be emitted.
+    pub fn xor<T: Integer, const LANES: u32>(
+        &mut self,
+        left: Vector<T, LANES>,
+        right: Vector<T, LANES>,
+    ) -> Result<Vector<T, LANES>, LaneError> {
+        self.zip(op::BITWISE_XOR, left, right)
     }
 
     /// Pick `when_true` or `when_false` per element, according to `predicate`.

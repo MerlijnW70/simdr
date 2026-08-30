@@ -133,7 +133,7 @@ Each of these was asked for, argued, and left out. The reasoning is in `notes/NE
   measured rather than assumed — it read `1.97` once, with a comment claiming it was measured,
   excluding nine releases' worth of callers for no reason.
 * **The public surface is checked for consumers, not frozen.** `src/lanes/` declares
-  <!--count:lane-operations-->65 public functions and `src/module/op.rs` <!--count:opcodes-->100
+  <!--count:lane-operations-->68 public functions and `src/module/op.rs` <!--count:opcodes-->103
   opcodes; both numbers are asserted rather than typed, and both have moved. Seven opcodes were
   deleted in one commit for having no emitter.
 * **Bounds tighten.** `Lanes::shift_left` took `T: Element` until it turned out that shifting a

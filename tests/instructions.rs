@@ -183,6 +183,51 @@ fn the_shifts_are_valid_spirv() {
 }
 
 #[test]
+fn the_float_to_integer_conversions_are_valid_spirv() {
+    // **Two opcodes that were declared and emitted by nothing**, which `tests/integrity.rs` says
+    // is the state in which `spirv-val` has never seen the number at all. They are the direction
+    // `to_f32` does not go: a float scaled into a byte's range, then truncated.
+    //
+    // Both are built here because they differ only in signedness — the pair the shifts are, and
+    // the reason each is named rather than one being a default. `clamp` stands where the doc
+    // comments say it should: the conversion is undefined past the width, so a test that hands it
+    // a loaded buffer has to bound it first or be asserting nothing about a real caller.
+    let mut kernel = Kernel::<F32>::new(shape()).expect("built");
+    let value = kernel.load::<32>(0).expect("loaded");
+
+    let counted = {
+        let mut lanes = kernel.lanes().expect("lanes");
+        let low = lanes
+            .splat_bits::<F32, 32>(0.0_f32.to_bits())
+            .expect("nought");
+        let high = lanes
+            .splat_bits::<F32, 32>(255.0_f32.to_bits())
+            .expect("full");
+
+        let bounded = lanes.clamp(value, low, high).expect("clamp");
+        let unsigned = lanes.to_u32(bounded).expect("to u32");
+        let signed = lanes.to_i32(bounded).expect("to i32");
+        // Back to one type so there is a single thing to store, and through the bitcast rather
+        // than a second conversion — the two results are the same number here by construction.
+        let same = lanes.reinterpret(signed).expect("as bits");
+        // Nought at every lane, since the two conversions agree over a clamped range — and the
+        // third opcode with no emitter, reached where a caller would reach it.
+        let difference = lanes.xor(unsigned, same).expect("xor");
+        // Back to the kernel's own element, because `store` writes a `Vector<F32, _>` and this
+        // kernel is an `F32` one.
+        let signed = lanes.reinterpret_unsigned(difference).expect("as signed");
+        lanes.to_f32(signed).expect("to f32")
+    };
+
+    kernel.store(1, counted).expect("stored");
+    expect_valid(
+        &kernel.finish().expect("finished"),
+        "kernel-float-to-integer",
+        VULKAN_1_1,
+    );
+}
+
+#[test]
 fn the_rest_of_the_extended_set_is_valid_spirv() {
     // `sqrt` and `clamp` were covered; `log`, `fma`, `inverse_sqrt` and `max` were not. Each is a
     // different instruction number in GLSL.std.450 and `fma` takes three operands rather than one.

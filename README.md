@@ -156,7 +156,7 @@ suite looks on `PATH` and skips loudly if it finds nothing.
 
 ## How it is checked
 
-<!--count:test-functions-->905 `#[test]` functions, which is not what `cargo test --workspace`
+<!--count:test-functions-->906 `#[test]` functions, which is not what `cargo test --workspace`
 prints — that number moves with the machine, and this one is a property of the source.
 On 2026-08-26: **496 passing in the emitter**, **409 in the runner at subgroup 32 with no skips**,
 and **398 at subgroup 64 with 17**, sixteen of which say `written for a 32-wide subgroup`.

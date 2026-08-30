@@ -83,6 +83,17 @@ pub const MEMBER_DECORATE: u16 = 72;
 pub const COMPOSITE_EXTRACT: u16 = 81;
 /// `OpCopyObject` — the same value under a new id.
 pub const COPY_OBJECT: u16 = 83;
+/// `OpConvertFToU` — a float's numeric value, as an unsigned integer, truncated toward zero.
+///
+/// A *conversion*, not a reinterpretation: 7.9f32 becomes 7u32 rather than `0x40fccccd`. Truncation
+/// is toward zero rather than downward, so this is a floor only where the value is not negative —
+/// and a negative value, or one past what the width holds, is undefined rather than clamped. A
+/// caller that cannot promise the range wants [`crate::spec::Glsl::FClamp`] first.
+pub const CONVERT_F_TO_U: u16 = 109;
+/// `OpConvertFToS` — a float's numeric value, as a signed integer, truncated toward zero.
+///
+/// As [`CONVERT_F_TO_U`], and with the same undefined result past the width.
+pub const CONVERT_F_TO_S: u16 = 110;
 /// `OpConvertSToF` — a signed integer's numeric value, as a float.
 ///
 /// What a dot product's result needs on the way into float arithmetic: a *conversion*, so −7
@@ -148,6 +159,11 @@ pub const SHIFT_LEFT_LOGICAL: u16 = 196;
 /// the authority and not from memory, and the authority answers questions as well as publishing
 /// them — the grammar JSON is not installed here and the tool that consumes it is.
 pub const BITWISE_AND: u16 = 199;
+/// `OpBitwiseXor` — the bits set in one operand or the other but not in both.
+///
+/// Between [`BITWISE_OR`] and [`BITWISE_AND`] in the specification's numbering, which is the only
+/// place the order of these three can be read off.
+pub const BITWISE_XOR: u16 = 198;
 /// `OpBitwiseOr` — bitwise or.
 ///
 /// **197, below the and.** The bitwise instructions run *downwards* in the grammar — or, xor, and
