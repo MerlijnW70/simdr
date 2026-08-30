@@ -34,6 +34,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let limits = gpu.limits();
     println!("{} — subgroup {}", limits.name, limits.subgroup_size);
 
+    // **Written for a subgroup of 32 or 64, and it now says so instead of failing.** The whole
+    // measurement is about strip mining: `Simd<i8, 128>` is four strips at width 32 and *sixteen*
+    // at width 8, which the lane API refuses by name — `TooManyStrips { strips: 16, limit: 8 }`.
+    //
+    // A narrower device could be handed a narrower vector, and then the row labelled "four strips"
+    // would not be four strips. So the honest answer is a refusal rather than a smaller number,
+    // which is the same argument `Domain::exact_limit` makes about a half leaving its range.
+    //
+    // Printed as `SKIPPED` and exited cleanly, which is the shape the test harness already uses for
+    // "cannot run here" and what `nightly.yml` counts. Ahead of the narrow-feature gate below so
+    // that a device reporting a small subgroup declines for one reason rather than two.
+    if limits.subgroup_size < 32 {
+        println!(
+            "SKIPPED narrow: four i8 strips need a subgroup of at least 32 and this device              reports {}. The comparison is about strip mining, and sixteen strips is a refusal              rather than a smaller number.",
+            limits.subgroup_size
+        );
+        return Ok(());
+    }
+
     let narrow = limits.narrow;
     println!(
         "  shaderInt8 {}   storageBuffer8BitAccess {}   shaderInt16 {}   storageBuffer16BitAccess {}",

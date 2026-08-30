@@ -24,6 +24,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         limits.subgroup_shuffle
     );
 
+    // Built for a subgroup of 32 or 64, which is what the buffers below are sized for.
+    // `Simd<f32, 32>` is one strip at width 32 and four at width 8, and four strips read four
+    // times the elements — `Overrun { needed: 256, held: 64 }`, from the dispatch bound that
+    // exists to catch a kernel reading past what it was given.
+    //
+    // This one prints numbers for eyeballing on a device you have not tried before, so it could
+    // reasonably size itself from the width. It does not, because the vectors are the subject:
+    // the whole point of the listing is that `Simd<f32, 4>`, `<f32, 32>` and `<f32, 64>` are
+    // three different mappings, and choosing them from the device would print three rows that
+    // are the same mapping under different names.
+    if width < 32 {
+        println!(
+            "SKIPPED show: these kernels are built for a subgroup of at least 32 and this device \
+             reports {width}. The vectors are the subject here, so picking them from the width \
+             would print the same mapping three times under three names."
+        );
+        return Ok(());
+    }
+
     let count = WORKGROUP_SIZE as usize;
     let input: Vec<f32> = (0..count as u32).map(|index| index as f32).collect();
     println!("in            {:?}", &input[..8]);

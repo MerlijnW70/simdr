@@ -60,6 +60,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{} — subgroup {width}", limits.name);
     println!("every figure below is host wall clock: submit, wait, and read the answer back.\n");
 
+    // The round trip is timed over `Simd<f32, 32>`, which is one strip at a subgroup of 32 and
+    // four at a subgroup of 8 — four times the buffer these fixed-size inputs hold, and an
+    // `Overrun` from the bound that exists to catch exactly that.
+    //
+    // Sizing the input from the width instead would make it run and would not make it mean
+    // anything: `decisions/DR-0008` is a statement about a discrete card's round trip, and a
+    // software rasteriser's wall clock is not evidence about one. What CI can check is that the
+    // program still runs where it has something to say, which is what this refusal leaves intact.
+    if width < 32 {
+        println!(
+            "SKIPPED latency: the round trip is timed over `Simd<f32, 32>`, one strip at a \
+             subgroup of 32 and four at {width} — which needs four times the buffer this fixed \
+             input holds. The numbers are a device's anyway, and a software rasteriser has none \
+             to give."
+        );
+        return Ok(());
+    }
+
     let spirv = kernels::lane_sum::<F32, 32>(width)?;
     let one = vec![1.0_f32; WORKGROUP_SIZE as usize];
     // One subgroup sum per subgroup in the workgroup, which is how many answers a dispatch of one
