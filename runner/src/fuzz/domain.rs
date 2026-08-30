@@ -1,3 +1,5 @@
+use super::program::Fold;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BitShift {
     Left,
@@ -154,6 +156,30 @@ impl Domain {
     }
 
     #[must_use]
+    /// The fold itself, and the value a lane with nothing before it takes.
+    /// Both have to come from the domain, because the identity of a minimum is
+    /// the largest value the *type* holds and not the largest `u32`.
+    pub fn fold(self, fold: Fold, left: u32, right: u32) -> u32 {
+        match fold {
+            Fold::Product => self.mul(left, right),
+            Fold::Min => self.min(left, right),
+            Fold::Max => self.max(left, right),
+            Fold::And => self.bitand(left, right),
+            Fold::Or => self.bitor(left, right),
+            Fold::Xor => self.bitxor(left, right),
+        }
+    }
+
+    pub fn identity(self, fold: Fold) -> u32 {
+        match fold {
+            Fold::Product => self.encode(1),
+            Fold::Min => self.largest(),
+            Fold::Max => self.smallest(),
+            Fold::And => self.truncate(u32::MAX),
+            Fold::Or | Fold::Xor => 0,
+        }
+    }
+
     pub fn sub(self, left: u32, right: u32) -> u32 {
         if self.is_float() {
             self.encode_float(self.decode(left) - self.decode(right))

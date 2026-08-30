@@ -5,7 +5,7 @@ mod coverage;
 
 use self::vocabulary::{CLUSTERED, Kind, STRIPPED, WHOLE, by_element, fill};
 use super::domain::Domain;
-use super::program::{Finish, Program};
+use super::program::{Finish, Fold, Program};
 use simdr::lanes::{LaneError, Mapping};
 
 #[derive(Debug, Clone)]
@@ -71,20 +71,59 @@ pub fn generate(rng: &mut Rng, domain: Domain, subgroup: u32, workgroup: u32) ->
 }
 
 fn finish(rng: &mut Rng, domain: Domain, mapping: Result<Mapping, LaneError>) -> Finish {
-    match rng.below(if matches!(mapping, Ok(Mapping::Clusters { .. })) {
-        5
-    } else {
-        6
-    }) {
+    // `SumOrMax` carries a value out of a branch, and a clustered vector has no
+    // branch to carry it out of, so it is drawn only for the other mappings.
+    let clustered = matches!(mapping, Ok(Mapping::Clusters { .. }));
+
+    match rng.below(if clustered { 7 } else { 8 }) {
         0 => Finish::Sum,
         1 => Finish::Max,
         2 => Finish::Min,
         3 => Finish::Scan,
         4 => Finish::ScanExclusive,
+        // A domain with no fold left to draw falls back to the flat variant
+        // rather than inventing one it would be compared wrongly on. A float
+        // reaches that here: the bitwise three have no float form, a product
+        // depends on the order the device folds in, and a minimum and a maximum
+        // are already reduced by the variants above.
+        5 => one_of(rng, domain, Draw::Reduction).map_or(Finish::Sum, Finish::ReduceBy),
+        6 => {
+            let exclusive = rng.below(2) == 1;
+            one_of(rng, domain, Draw::Scan).map_or(
+                if exclusive {
+                    Finish::ScanExclusive
+                } else {
+                    Finish::Scan
+                },
+                |fold| Finish::ScanBy { fold, exclusive },
+            )
+        }
         _ => Finish::SumOrMax {
             when_any_above: rng.below(u64::from(domain.ceiling())) as u32,
         },
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Draw {
+    Reduction,
+    Scan,
+}
+
+/// The folds this domain can be held to in this form, which for a reduction
+/// over a float is none at all.
+fn folds_for(domain: Domain, draw: Draw) -> Vec<Fold> {
+    Fold::EVERY
+        .into_iter()
+        .filter(|fold| !domain.is_float() || !fold.needs_an_integer())
+        .filter(|fold| draw == Draw::Scan || !fold.reduces_under_another_name())
+        .collect()
+}
+
+fn one_of(rng: &mut Rng, domain: Domain, draw: Draw) -> Option<Fold> {
+    let allowed = folds_for(domain, draw);
+    let at = rng.below(allowed.len().max(1) as u64) as usize;
+    allowed.get(at).copied()
 }
 
 #[cfg(test)]

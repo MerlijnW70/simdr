@@ -1,7 +1,7 @@
 mod steps;
 
 use self::steps::apply;
-use super::program::{Finish, Op, Program};
+use super::program::{Finish, Fold, Op, Program};
 
 #[derive(Debug, Clone)]
 pub struct Reference {
@@ -48,8 +48,11 @@ pub fn reference(program: &Program, input: &[u32]) -> Reference {
     }
 
     let Some(combine) = Combine::of(program.finish) else {
-        let exclusive = matches!(program.finish, Finish::ScanExclusive);
-        let values = scanned(program, &held, exclusive);
+        let (fold, exclusive) = match program.finish {
+            Finish::ScanBy { fold, exclusive } => (Some(fold), exclusive),
+            other => (None, matches!(other, Finish::ScanExclusive)),
+        };
+        let values = scanned(program, &held, fold, exclusive);
         let exact = exact && within(domain, limit, std::slice::from_ref(&values));
         return Reference { values, exact };
     };
@@ -104,6 +107,9 @@ pub fn reference(program: &Program, input: &[u32]) -> Reference {
 
                     if takes_the_sum { sum() } else { max() }
                 }
+                Combine::By(fold) => values.iter().fold(domain.identity(fold), |total, &value| {
+                    domain.fold(fold, total, value)
+                }),
             }
         })
         .collect();
@@ -119,6 +125,7 @@ enum Combine {
     Max,
     Min,
     SumOrMax { when_any_above: u32 },
+    By(Fold),
 }
 
 impl Combine {
@@ -128,23 +135,25 @@ impl Combine {
             Finish::Max => Some(Self::Max),
             Finish::Min => Some(Self::Min),
             Finish::SumOrMax { when_any_above } => Some(Self::SumOrMax { when_any_above }),
-            Finish::Scan | Finish::ScanExclusive => None,
+            Finish::Scan | Finish::ScanExclusive | Finish::ScanBy { .. } => None,
+            Finish::ReduceBy(fold) => Some(Self::By(fold)),
         }
     }
 }
 
-fn scanned(program: &Program, held: &[Vec<u32>], exclusive: bool) -> Vec<u32> {
+fn scanned(program: &Program, held: &[Vec<u32>], fold: Option<Fold>, exclusive: bool) -> Vec<u32> {
     let domain = program.domain;
     let group = (program.lanes.min(program.subgroup) as usize).max(1);
     let workgroup = program.workgroup as usize;
     let strips = strips_of(program);
     let invocations = held.len();
 
-    let mut values = vec![domain.zero(); invocations * strips];
+    let seed = fold.map_or_else(|| domain.zero(), |fold| domain.identity(fold));
+    let mut values = vec![seed; invocations * strips];
 
     for first in (0..invocations).step_by(group) {
         let members = group.min(invocations.saturating_sub(first));
-        let mut running = domain.zero();
+        let mut running = seed;
 
         for position in 0..members * strips {
             let lane = position % group;
@@ -155,7 +164,10 @@ fn scanned(program: &Program, held: &[Vec<u32>], exclusive: bool) -> Vec<u32> {
                 continue;
             };
 
-            let inclusive = domain.add(running, *element);
+            let inclusive = fold.map_or_else(
+                || domain.add(running, *element),
+                |fold| domain.fold(fold, running, *element),
+            );
             let answer = if exclusive { running } else { inclusive };
             running = inclusive;
 

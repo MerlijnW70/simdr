@@ -71,9 +71,80 @@ pub enum Finish {
     Sum,
     Max,
     Min,
-    SumOrMax { when_any_above: u32 },
+    SumOrMax {
+        when_any_above: u32,
+    },
     Scan,
     ScanExclusive,
+    /// A reduction by a fold the flat variants above do not name.
+    ReduceBy(Fold),
+    /// A running fold, in either form. The sum is `Scan` and `ScanExclusive`
+    /// above; every other fold arrives here.
+    ScanBy {
+        fold: Fold,
+        exclusive: bool,
+    },
+}
+
+/// What a reduction or a running fold combines with.
+///
+/// The bitwise three are integer-only, and the emitter refuses them on a float
+/// the way it refuses a bit shift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Fold {
+    Product,
+    Min,
+    Max,
+    And,
+    Or,
+    Xor,
+}
+
+impl Fold {
+    pub const EVERY: [Self; 6] = [
+        Self::Product,
+        Self::Min,
+        Self::Max,
+        Self::And,
+        Self::Or,
+        Self::Xor,
+    ];
+
+    /// Whether this fold can only be compared over an integer.
+    ///
+    /// The bitwise three because SPIR-V has no float form of them. The product
+    /// for a different reason, found by running it: a float product is not
+    /// associative, so the answer depends on the order the device folds in,
+    /// which this reference cannot know. Over `f16` a handful of lanes reaches
+    /// infinity, and one more multiplication by zero makes a NaN out of what
+    /// the reference had as nought.
+    #[must_use]
+    pub const fn needs_an_integer(self) -> bool {
+        matches!(self, Self::And | Self::Or | Self::Xor | Self::Product)
+    }
+
+    /// Whether [`Finish`] already reduces this way under a flat name.
+    ///
+    /// `Min` and `Max` are here because a running minimum needs the fold and a
+    /// reduction to a minimum predates it, so the generator draws the fold for
+    /// scans and the flat variant for reductions, and neither operation is ever
+    /// reached under two names.
+    #[must_use]
+    pub const fn reduces_under_another_name(self) -> bool {
+        matches!(self, Self::Min | Self::Max)
+    }
+
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Product => "product",
+            Self::Min => "fold-min",
+            Self::Max => "fold-max",
+            Self::And => "fold-and",
+            Self::Or => "fold-or",
+            Self::Xor => "fold-xor",
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -221,6 +292,14 @@ impl Program {
             }
             Finish::ScanExclusive => {
                 let scanned = kernel.lanes()?.prefix_sum_exclusive(value)?;
+                kernel.store(1, scanned)?;
+            }
+            Finish::ReduceBy(fold) => {
+                let total = T::reduce_by(&mut kernel.lanes()?, fold, value)?;
+                kernel.store_scalar(1, total)?;
+            }
+            Finish::ScanBy { fold, exclusive } => {
+                let scanned = T::scan_by(&mut kernel.lanes()?, fold, exclusive, value)?;
                 kernel.store(1, scanned)?;
             }
         }

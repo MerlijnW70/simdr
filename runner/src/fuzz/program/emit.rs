@@ -1,7 +1,8 @@
-use super::{BitShift, Domain, Missing, Op, ProgramError};
+use super::{BitShift, Domain, Fold, Missing, Op, ProgramError};
 use simdr::lanes::{
     Element, F16, F32, I8, I16, I32, Integer, LaneError, Lanes, Signed, U8, U16, U32, Vector,
 };
+use simdr::module::Id;
 
 pub trait Emit: Element {
     fn bit_shift<const LANES: u32>(
@@ -144,6 +145,65 @@ pub trait Emit: Element {
             element: <Self as Element>::NAME,
         })
     }
+
+    /// The folds every element can be reduced by. The bitwise three go through
+    /// [`Emit::reduce_bitwise`], which a float refuses.
+    fn reduce_by<const LANES: u32>(
+        lanes: &mut Lanes<'_>,
+        fold: Fold,
+        value: Vector<Self, LANES>,
+    ) -> Result<Id, ProgramError> {
+        Ok(match fold {
+            Fold::Product => lanes.reduce_product(value)?,
+            Fold::Min => lanes.reduce_min(value)?,
+            Fold::Max => lanes.reduce_max(value)?,
+            Fold::And | Fold::Or | Fold::Xor => return Self::reduce_bitwise(lanes, fold, value),
+        })
+    }
+
+    fn scan_by<const LANES: u32>(
+        lanes: &mut Lanes<'_>,
+        fold: Fold,
+        exclusive: bool,
+        value: Vector<Self, LANES>,
+    ) -> Result<Vector<Self, LANES>, ProgramError> {
+        Ok(match (fold, exclusive) {
+            (Fold::Product, false) => lanes.prefix_product(value)?,
+            (Fold::Product, true) => lanes.prefix_product_exclusive(value)?,
+            (Fold::Min, false) => lanes.prefix_min(value)?,
+            (Fold::Min, true) => lanes.prefix_min_exclusive(value)?,
+            (Fold::Max, false) => lanes.prefix_max(value)?,
+            (Fold::Max, true) => lanes.prefix_max_exclusive(value)?,
+            (Fold::And | Fold::Or | Fold::Xor, _) => {
+                return Self::scan_bitwise(lanes, fold, exclusive, value);
+            }
+        })
+    }
+
+    fn reduce_bitwise<const LANES: u32>(
+        lanes: &mut Lanes<'_>,
+        fold: Fold,
+        value: Vector<Self, LANES>,
+    ) -> Result<Id, ProgramError> {
+        let _ = (lanes, fold, value);
+        Err(ProgramError::NotInThisDomain {
+            missing: Missing::Bitwise,
+            element: <Self as Element>::NAME,
+        })
+    }
+
+    fn scan_bitwise<const LANES: u32>(
+        lanes: &mut Lanes<'_>,
+        fold: Fold,
+        exclusive: bool,
+        value: Vector<Self, LANES>,
+    ) -> Result<Vector<Self, LANES>, ProgramError> {
+        let _ = (lanes, fold, exclusive, value);
+        Err(ProgramError::NotInThisDomain {
+            missing: Missing::Bitwise,
+            element: <Self as Element>::NAME,
+        })
+    }
 }
 
 fn shifted<T: Integer, const LANES: u32>(
@@ -221,6 +281,34 @@ macro_rules! emit_for {
         }
     };
     (@can bitwise) => {
+        fn reduce_bitwise<const LANES: u32>(
+            lanes: &mut Lanes<'_>,
+            fold: Fold,
+            value: Vector<Self, LANES>,
+        ) -> Result<Id, ProgramError> {
+            Ok(match fold {
+                Fold::And => lanes.reduce_and(value)?,
+                Fold::Or => lanes.reduce_or(value)?,
+                _ => lanes.reduce_xor(value)?,
+            })
+        }
+
+        fn scan_bitwise<const LANES: u32>(
+            lanes: &mut Lanes<'_>,
+            fold: Fold,
+            exclusive: bool,
+            value: Vector<Self, LANES>,
+        ) -> Result<Vector<Self, LANES>, ProgramError> {
+            Ok(match (fold, exclusive) {
+                (Fold::And, false) => lanes.prefix_and(value)?,
+                (Fold::And, true) => lanes.prefix_and_exclusive(value)?,
+                (Fold::Or, false) => lanes.prefix_or(value)?,
+                (Fold::Or, true) => lanes.prefix_or_exclusive(value)?,
+                (_, false) => lanes.prefix_xor(value)?,
+                (_, true) => lanes.prefix_xor_exclusive(value)?,
+            })
+        }
+
         fn bitand<const LANES: u32>(
             lanes: &mut Lanes<'_>,
             value: Vector<Self, LANES>,
