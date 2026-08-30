@@ -394,6 +394,59 @@ fn lane_transcendental_at<const LANES: u32>(
     kernel.finish()
 }
 
+/// Which running fold [`lane_prefix`] applies, and whether it leaves each lane
+/// its own element out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Running {
+    Sum,
+    Product,
+    Min,
+    Max,
+    And,
+    Or,
+    Xor,
+}
+
+pub fn lane_prefix<const LANES: u32>(
+    subgroup: u32,
+    running: Running,
+    exclusive: bool,
+) -> Result<Vec<u32>, LaneError> {
+    use simdr::lanes::U32;
+
+    let mut kernel = Kernel::<U32>::new(shape(subgroup))?;
+    let value = kernel.load::<LANES>(0)?;
+    let scanned = {
+        let mut lanes = kernel.lanes()?;
+        match (running, exclusive) {
+            (Running::Sum, false) => lanes.prefix_sum(value)?,
+            (Running::Sum, true) => lanes.prefix_sum_exclusive(value)?,
+            (Running::Product, false) => lanes.prefix_product(value)?,
+            (Running::Product, true) => lanes.prefix_product_exclusive(value)?,
+            (Running::Min, false) => lanes.prefix_min(value)?,
+            (Running::Min, true) => lanes.prefix_min_exclusive(value)?,
+            (Running::Max, false) => lanes.prefix_max(value)?,
+            (Running::Max, true) => lanes.prefix_max_exclusive(value)?,
+            (Running::And, false) => lanes.prefix_and(value)?,
+            (Running::And, true) => lanes.prefix_and_exclusive(value)?,
+            (Running::Or, false) => lanes.prefix_or(value)?,
+            (Running::Or, true) => lanes.prefix_or_exclusive(value)?,
+            (Running::Xor, false) => lanes.prefix_xor(value)?,
+            (Running::Xor, true) => lanes.prefix_xor_exclusive(value)?,
+        }
+    };
+    kernel.store(1, scanned)?;
+    kernel.finish()
+}
+
+pub fn lane_prefix_whole(
+    subgroup: u32,
+    running: Running,
+    exclusive: bool,
+) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup!(subgroup, lane_prefix, running, exclusive)
+}
+
 pub fn lane_affine<const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
     use simdr::lanes::F32;
 

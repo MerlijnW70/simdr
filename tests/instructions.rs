@@ -845,3 +845,60 @@ fn a_gather_is_valid_spirv() {
         VULKAN_1_1,
     );
 }
+
+#[test]
+fn every_scan_beyond_the_sum_is_valid_spirv() {
+    let mut kernel = Kernel::<U32>::new(shape()).expect("built");
+    let value = kernel.load::<32>(0).expect("loaded");
+
+    let combined = {
+        let mut lanes = kernel.lanes().expect("lanes");
+        let running = [
+            lanes.prefix_product(value).expect("product"),
+            lanes.prefix_min(value).expect("min"),
+            lanes.prefix_max(value).expect("max"),
+            lanes.prefix_and(value).expect("and"),
+            lanes.prefix_or(value).expect("or"),
+            lanes.prefix_xor(value).expect("xor"),
+        ];
+
+        let mut total = running[0];
+        for next in &running[1..] {
+            total = lanes.xor(total, *next).expect("combined");
+        }
+        lanes.reduce_sum(total).expect("summed")
+    };
+
+    kernel.store_scalar(1, combined).expect("stored");
+    expect_valid(
+        &kernel.finish().expect("finished"),
+        "kernel-scans",
+        VULKAN_1_1,
+    );
+}
+
+#[test]
+fn the_exclusive_scans_are_valid_spirv_whole_and_in_clusters() {
+    let build = |narrow: bool| {
+        let mut kernel = Kernel::<U32>::new(shape()).expect("built");
+        let total = if narrow {
+            let value = kernel.load::<4>(0).expect("loaded");
+            let mut lanes = kernel.lanes().expect("lanes");
+            let running = lanes.prefix_max_exclusive(value).expect("max");
+            let masked = lanes.prefix_and_exclusive(running).expect("and");
+            lanes.reduce_sum(masked).expect("summed")
+        } else {
+            let value = kernel.load::<32>(0).expect("loaded");
+            let mut lanes = kernel.lanes().expect("lanes");
+            let running = lanes.prefix_product_exclusive(value).expect("product");
+            let smallest = lanes.prefix_min_exclusive(running).expect("min");
+            lanes.reduce_sum(smallest).expect("summed")
+        };
+
+        kernel.store_scalar(1, total).expect("stored");
+        kernel.finish().expect("finished")
+    };
+
+    expect_valid(&build(false), "kernel-scans-exclusive", VULKAN_1_1);
+    expect_valid(&build(true), "kernel-scans-clustered", VULKAN_1_1);
+}

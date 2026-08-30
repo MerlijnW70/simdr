@@ -5,7 +5,7 @@ type BitwisePair = (Bitwise, fn(u32, u32) -> u32);
 type Approximated = (Transcendental, fn(f32) -> f32, f32);
 
 use common::{device, grouped_sums, ramp, ramp_u32, runnable};
-use runner::kernels::{self, Bitwise, Comparison, Transcendental, WORKGROUP_SIZE};
+use runner::kernels::{self, Bitwise, Comparison, Running, Transcendental, WORKGROUP_SIZE};
 use simdr::lanes::{F32, I32, U32};
 
 #[test]
@@ -1174,4 +1174,169 @@ fn a_strip_mined_gather_reaches_the_index_of_its_own_strip() {
         output, first_strip_only,
         "both strips read the first strip's index, which one strip could never show"
     );
+}
+
+type Folding = (Running, fn(u32, u32) -> u32, u32);
+
+/// The seven folds, each with the operation it runs and the value a lane with
+/// nothing before it should hold.
+fn every_running_fold() -> [Folding; 7] {
+    [
+        (Running::Sum, |a, b| a.wrapping_add(b), 0),
+        (Running::Product, |a, b| a.wrapping_mul(b), 1),
+        (Running::Min, u32::min, u32::MAX),
+        (Running::Max, u32::max, 0),
+        (Running::And, |a, b| a & b, u32::MAX),
+        (Running::Or, |a, b| a | b, 0),
+        (Running::Xor, |a, b| a ^ b, 0),
+    ]
+}
+
+fn scanned(
+    input: &[u32],
+    group: usize,
+    fold: fn(u32, u32) -> u32,
+    seed: u32,
+    exclusive: bool,
+) -> Vec<u32> {
+    (0..input.len())
+        .map(|position| {
+            let first = position / group * group;
+            let upto = if exclusive { position } else { position + 1 };
+            input[first..upto]
+                .iter()
+                .fold(seed, |total, value| fold(total, *value))
+        })
+        .collect()
+}
+
+#[test]
+fn every_scan_runs_its_own_fold_over_the_whole_subgroup() {
+    let Some(gpu) = device("scan-whole") else {
+        return;
+    };
+
+    let limits = gpu.limits().clone();
+    let width = limits.subgroup_size as usize;
+    let count = WORKGROUP_SIZE as usize;
+
+    // Small factors, so a running product stays exact rather than wrapping,
+    // and bits that differ, so and, or and xor disagree.
+    let input: Vec<u32> = (0..count)
+        .map(|index| (index % 3 + 1) as u32 | 0b1000)
+        .collect();
+
+    let mut seen: Vec<Vec<u32>> = Vec::new();
+    for (running, fold, seed) in every_running_fold() {
+        for exclusive in [false, true] {
+            let spirv = kernels::lane_prefix_whole(limits.subgroup_size, running, exclusive)
+                .expect("built");
+            let output = gpu.run_u32(&spirv, &input, 1).expect("dispatched");
+
+            assert_eq!(
+                output,
+                scanned(&input, width, fold, seed, exclusive),
+                "{running:?}, exclusive: {exclusive}"
+            );
+            seen.push(output);
+        }
+    }
+
+    for (index, answer) in seen.iter().enumerate() {
+        for another in seen.iter().skip(index + 1) {
+            assert_ne!(
+                answer, another,
+                "two of the fourteen scans answer alike over this input, so one could stand in                  for the other"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_clustered_scan_starts_each_cluster_from_the_identity_of_its_own_fold() {
+    let Some(gpu) = device("scan-clusters") else {
+        return;
+    };
+
+    let limits = gpu.limits().clone();
+    if limits.subgroup_size < 4 {
+        eprintln!(
+            "SKIPPED scan-clusters: a subgroup of {} has no cluster of four",
+            limits.subgroup_size
+        );
+        return;
+    }
+
+    let count = WORKGROUP_SIZE as usize;
+    let input: Vec<u32> = (0..count)
+        .map(|index| (index % 3 + 1) as u32 | 0b1000)
+        .collect();
+
+    // The clustered path is emulated rather than one instruction, and the
+    // exclusive form is where the identity reaches the lane at the edge -- an
+    // `and` seeded with nought would empty the first lane of every cluster.
+    for (running, fold, seed) in every_running_fold() {
+        for exclusive in [false, true] {
+            let spirv =
+                kernels::lane_prefix::<4>(limits.subgroup_size, running, exclusive).expect("built");
+            let output = gpu.run_u32(&spirv, &input, 1).expect("dispatched");
+
+            assert_eq!(
+                output,
+                scanned(&input, 4, fold, seed, exclusive),
+                "{running:?} in clusters of four, exclusive: {exclusive}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_strip_mined_scan_carries_its_own_fold_between_the_strips() {
+    let Some(gpu) = device("scan-strips") else {
+        return;
+    };
+
+    let limits = gpu.limits().clone();
+    if limits.subgroup_size != 32 {
+        eprintln!(
+            "SKIPPED scan-strips: no case written for a subgroup of {}",
+            limits.subgroup_size
+        );
+        return;
+    }
+
+    let count = WORKGROUP_SIZE as usize;
+    let stride = count;
+    let wide: Vec<u32> = (0..count * 2)
+        .map(|index| (index % 3 + 1) as u32 | 0b1000)
+        .collect();
+
+    for (running, fold, seed) in every_running_fold() {
+        let spirv = kernels::lane_prefix::<64>(32, running, false).expect("built");
+        let output = gpu.run_u32(&spirv, &wide, 1).expect("dispatched");
+
+        // Lane `l` of strip `s` holds element `l + s * stride`, and the scan
+        // runs over the strips in order within each subgroup.
+        let expected: Vec<u32> = (0..count * 2)
+            .map(|position| {
+                let lane = position % stride;
+                let strip = position / stride;
+                let first = lane / 32 * 32;
+                let mut total = seed;
+                for earlier in 0..=strip {
+                    let upto = if earlier == strip {
+                        lane + 1
+                    } else {
+                        first + 32
+                    };
+                    for other in first..upto {
+                        total = fold(total, wide[other + earlier * stride]);
+                    }
+                }
+                total
+            })
+            .collect();
+
+        assert_eq!(output, expected, "{running:?} across two strips");
+    }
 }

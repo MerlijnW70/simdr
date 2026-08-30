@@ -32,6 +32,13 @@ pub trait Element: Copy + core::fmt::Debug + 'static {
 
     const FROM_U32: u16;
 
+    /// The bits of the value a fold starts from when there is nothing before
+    /// it: one for a product, the far end of the range for a minimum or a
+    /// maximum. An exclusive scan hands these to the lane at the edge.
+    const ONE: u32;
+    const LOWEST: u32;
+    const HIGHEST: u32;
+
     fn type_id(module: &mut Module) -> Result<Id, BuildError>;
 
     fn constant_from_bits(module: &mut Module, bits: u32) -> Result<Id, BuildError>;
@@ -89,6 +96,9 @@ impl Element for F32 {
     const MAX: Glsl = Glsl::FMax;
     const CLAMP: Glsl = Glsl::FClamp;
     const FROM_U32: u16 = op::CONVERT_U_TO_F;
+    const ONE: u32 = 0x3f80_0000;
+    const LOWEST: u32 = 0xff80_0000;
+    const HIGHEST: u32 = 0x7f80_0000;
 
     fn type_id(module: &mut Module) -> Result<Id, BuildError> {
         module.type_float(32)
@@ -123,6 +133,9 @@ impl Element for I32 {
     const MAX: Glsl = Glsl::SMax;
     const CLAMP: Glsl = Glsl::SClamp;
     const FROM_U32: u16 = op::BITCAST;
+    const ONE: u32 = 1;
+    const LOWEST: u32 = 0x8000_0000;
+    const HIGHEST: u32 = 0x7fff_ffff;
 
     fn type_id(module: &mut Module) -> Result<Id, BuildError> {
         module.type_int(32, true)
@@ -157,6 +170,9 @@ impl Element for U32 {
     const MAX: Glsl = Glsl::UMax;
     const CLAMP: Glsl = Glsl::UClamp;
     const FROM_U32: u16 = op::COPY_OBJECT;
+    const ONE: u32 = 1;
+    const LOWEST: u32 = 0;
+    const HIGHEST: u32 = 0xffff_ffff;
 
     fn type_id(module: &mut Module) -> Result<Id, BuildError> {
         module.type_int(32, false)

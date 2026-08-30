@@ -196,7 +196,7 @@ impl Lanes<'_> {
         self.from_strips(&ids)
     }
 
-    fn glsl(&mut self) -> Result<Id, LaneError> {
+    pub(super) fn glsl(&mut self) -> Result<Id, LaneError> {
         Ok(self.module().ext_inst_import(Glsl::SET_NAME)?)
     }
 }

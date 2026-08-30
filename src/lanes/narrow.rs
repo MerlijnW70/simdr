@@ -26,6 +26,9 @@ impl Element for I8 {
     const MAX: Glsl = Glsl::SMax;
     const CLAMP: Glsl = Glsl::SClamp;
     const FROM_U32: u16 = op::S_CONVERT;
+    const ONE: u32 = 1;
+    const LOWEST: u32 = 0x80;
+    const HIGHEST: u32 = 0x7f;
 
     fn type_id(module: &mut Module) -> Result<Id, BuildError> {
         module.require_capability(Capability::Int8)?;
@@ -71,6 +74,9 @@ impl Element for U8 {
     const MAX: Glsl = Glsl::UMax;
     const CLAMP: Glsl = Glsl::UClamp;
     const FROM_U32: u16 = op::U_CONVERT;
+    const ONE: u32 = 1;
+    const LOWEST: u32 = 0;
+    const HIGHEST: u32 = 0xff;
 
     fn type_id(module: &mut Module) -> Result<Id, BuildError> {
         module.require_capability(Capability::Int8)?;
@@ -111,6 +117,9 @@ impl Element for I16 {
     const MAX: Glsl = Glsl::SMax;
     const CLAMP: Glsl = Glsl::SClamp;
     const FROM_U32: u16 = op::S_CONVERT;
+    const ONE: u32 = 1;
+    const LOWEST: u32 = 0x8000;
+    const HIGHEST: u32 = 0x7fff;
 
     fn type_id(module: &mut Module) -> Result<Id, BuildError> {
         module.require_capability(Capability::Int16)?;
@@ -156,6 +165,9 @@ impl Element for U16 {
     const MAX: Glsl = Glsl::UMax;
     const CLAMP: Glsl = Glsl::UClamp;
     const FROM_U32: u16 = op::U_CONVERT;
+    const ONE: u32 = 1;
+    const LOWEST: u32 = 0;
+    const HIGHEST: u32 = 0xffff;
 
     fn type_id(module: &mut Module) -> Result<Id, BuildError> {
         module.require_capability(Capability::Int16)?;
@@ -196,6 +208,9 @@ impl Element for F16 {
     const MAX: Glsl = Glsl::FMax;
     const CLAMP: Glsl = Glsl::FClamp;
     const FROM_U32: u16 = op::CONVERT_U_TO_F;
+    const ONE: u32 = 0x3c00;
+    const LOWEST: u32 = 0xfc00;
+    const HIGHEST: u32 = 0x7c00;
 
     fn type_id(module: &mut Module) -> Result<Id, BuildError> {
         module.require_capability(Capability::Float16)?;
