@@ -60,9 +60,9 @@ fails the build, so nothing here is stated on trust.
 
 | | |
 | --- | --- |
-| SPIR-V opcodes declared | <!--count:opcodes-->115 |
-| lane operations | <!--count:lane-operations-->75 |
-| `#[test]` functions | <!--count:test-functions-->917 |
+| SPIR-V opcodes declared | <!--count:opcodes-->116 |
+| lane operations | <!--count:lane-operations-->78 |
+| `#[test]` functions | <!--count:test-functions-->925 |
 | checks in `tests/integrity.rs` | <!--count:integrity-tests-->17 |
 | checks in `tests/documented.rs` | <!--count:documented-tests-->12 |
 | counters behind this table | <!--count:counters-->10 |

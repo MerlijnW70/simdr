@@ -213,6 +213,68 @@ fn lane_divide_unsigned_at<const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, 
     kernel.finish()
 }
 
+/// The mask each bitwise kernel works against, chosen so that no two of the
+/// four operations agree on any input.
+pub const BITWISE_MASK: u32 = 0b1010;
+
+/// A mask apiece, and a weight apiece. Distinct masks keep `x | a` from being
+/// `(x & a) + (x ^ a)`, which would let `and` and `xor` trade places unseen;
+/// distinct weights keep any other two from doing the same.
+pub const BITWISE_AND_MASK: u32 = 0b1010;
+pub const BITWISE_OR_MASK: u32 = 0b0101;
+pub const BITWISE_XOR_MASK: u32 = 0b1100;
+
+pub fn lane_bitwise(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup!(subgroup, lane_bitwise_at)
+}
+
+fn lane_bitwise_at<const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    use simdr::lanes::U32;
+
+    let mut kernel = Kernel::<U32>::new(shape(subgroup))?;
+    let value = kernel.load::<LANES>(0)?;
+    let result = {
+        let mut lanes = kernel.lanes()?;
+
+        let and_mask = lanes.splat_bits::<U32, LANES>(BITWISE_AND_MASK)?;
+        let or_mask = lanes.splat_bits::<U32, LANES>(BITWISE_OR_MASK)?;
+        let xor_mask = lanes.splat_bits::<U32, LANES>(BITWISE_XOR_MASK)?;
+
+        let weighed = [
+            (lanes.and(value, and_mask)?, 1_u32),
+            (lanes.or(value, or_mask)?, 3),
+            (lanes.xor(value, xor_mask)?, 5),
+            (lanes.not(value)?, 7),
+        ];
+
+        let mut total = lanes.splat_bits::<U32, LANES>(0)?;
+        for (term, weight) in weighed {
+            let factor = lanes.splat_bits::<U32, LANES>(weight)?;
+            let scaled = lanes.mul(term, factor)?;
+            total = lanes.add(total, scaled)?;
+        }
+        total
+    };
+    kernel.store(1, result)?;
+    kernel.finish()
+}
+
+/// The complement on a signed type is the one's complement and not a negation,
+/// which `-x` and `!x` disagree about by exactly one.
+pub fn lane_complement_signed(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    whole_subgroup!(subgroup, lane_complement_signed_at)
+}
+
+fn lane_complement_signed_at<const LANES: u32>(subgroup: u32) -> Result<Vec<u32>, LaneError> {
+    use simdr::lanes::I32;
+
+    let mut kernel = Kernel::<I32>::new(shape(subgroup))?;
+    let value = kernel.load::<LANES>(0)?;
+    let result = kernel.lanes()?.not(value)?;
+    kernel.store(1, result)?;
+    kernel.finish()
+}
+
 pub fn square(subgroup: u32) -> Result<Vec<u32>, LaneError> {
     whole_subgroup!(subgroup, square_at)
 }

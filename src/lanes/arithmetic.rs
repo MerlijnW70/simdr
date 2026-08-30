@@ -42,14 +42,7 @@ impl Lanes<'_> {
         &mut self,
         value: Vector<T, LANES>,
     ) -> Result<Vector<T, LANES>, LaneError> {
-        let element = self.type_of::<T>()?;
-        let mut ids = Vec::with_capacity(value.strip_count());
-
-        for &strip in value.strips() {
-            ids.push(self.module().unary(T::NEGATE, element, strip)?);
-        }
-
-        self.from_strips(&ids)
+        self.map_strips::<T, LANES>(T::NEGATE, value)
     }
 
     pub fn greater_than<T: Element, const LANES: u32>(
@@ -102,12 +95,37 @@ impl Lanes<'_> {
         self.compare(T::NOT_EQUAL, left, right)
     }
 
+    pub fn and<T: Integer, const LANES: u32>(
+        &mut self,
+        left: Vector<T, LANES>,
+        right: Vector<T, LANES>,
+    ) -> Result<Vector<T, LANES>, LaneError> {
+        self.zip(op::BITWISE_AND, left, right)
+    }
+
+    pub fn or<T: Integer, const LANES: u32>(
+        &mut self,
+        left: Vector<T, LANES>,
+        right: Vector<T, LANES>,
+    ) -> Result<Vector<T, LANES>, LaneError> {
+        self.zip(op::BITWISE_OR, left, right)
+    }
+
     pub fn xor<T: Integer, const LANES: u32>(
         &mut self,
         left: Vector<T, LANES>,
         right: Vector<T, LANES>,
     ) -> Result<Vector<T, LANES>, LaneError> {
         self.zip(op::BITWISE_XOR, left, right)
+    }
+
+    /// `OpNot` complements every bit, so on a signed type this is the one's
+    /// complement — `!x`, not `-x`. The two differ by one.
+    pub fn not<T: Integer, const LANES: u32>(
+        &mut self,
+        value: Vector<T, LANES>,
+    ) -> Result<Vector<T, LANES>, LaneError> {
+        self.map_strips::<T, LANES>(op::NOT, value)
     }
 
     pub fn select<T: Element, const LANES: u32>(
@@ -150,6 +168,21 @@ impl Lanes<'_> {
                 strips: ids.len(),
                 limit: super::MAX_STRIPS,
             })
+    }
+
+    fn map_strips<T: Element, const LANES: u32>(
+        &mut self,
+        opcode: u16,
+        value: Vector<T, LANES>,
+    ) -> Result<Vector<T, LANES>, LaneError> {
+        let element = self.type_of::<T>()?;
+        let mut ids = Vec::with_capacity(value.strip_count());
+
+        for &strip in value.strips() {
+            ids.push(self.module().unary(opcode, element, strip)?);
+        }
+
+        self.from_strips(&ids)
     }
 
     fn zip<T: Element, const LANES: u32>(
@@ -574,5 +607,125 @@ mod tests {
             vec![float.word(), negated.id().word(), value.id().word()],
             "a unary instruction names one operand and no more"
         );
+    }
+
+    #[test]
+    fn the_three_bitwise_pairs_are_three_different_instructions() {
+        let emitted = |build: Build| {
+            let mut module = Module::new(Version::V1_3);
+            let mut lanes = Lanes::new(&mut module, 32).expect("built");
+            build(&mut lanes);
+            module.finish()
+        };
+
+        let cases: [(&str, u16, Build); 4] = [
+            ("and", op::BITWISE_AND, |lanes| {
+                let v = lanes.splat_bits::<U32, 32>(0b1100).expect("splat");
+                lanes.and(v, v).expect("and");
+            }),
+            ("or", op::BITWISE_OR, |lanes| {
+                let v = lanes.splat_bits::<U32, 32>(0b1100).expect("splat");
+                lanes.or(v, v).expect("or");
+            }),
+            ("xor", op::BITWISE_XOR, |lanes| {
+                let v = lanes.splat_bits::<U32, 32>(0b1100).expect("splat");
+                lanes.xor(v, v).expect("xor");
+            }),
+            ("not", op::NOT, |lanes| {
+                let v = lanes.splat_bits::<U32, 32>(0b1100).expect("splat");
+                lanes.not(v).expect("not");
+            }),
+        ];
+
+        for (name, expected, build) in cases {
+            let words = emitted(build);
+            assert_eq!(count(&words, expected), 1, "{name}");
+            for (other, opcode) in [
+                ("and", op::BITWISE_AND),
+                ("or", op::BITWISE_OR),
+                ("xor", op::BITWISE_XOR),
+                ("not", op::NOT),
+            ] {
+                if other != name {
+                    assert_eq!(
+                        count(&words, opcode),
+                        0,
+                        "{name} also emitted the instruction {other} is for"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_bitwise_pair_is_one_instruction_whichever_integer_it_is_handed() {
+        let mut module = Module::new(Version::V1_3);
+        let mut lanes = Lanes::new(&mut module, 32).expect("built");
+        let signed = lanes.splat_bits::<I32, 32>(0b1010).expect("i32");
+        let unsigned = lanes.splat_bits::<U32, 32>(0b1010).expect("u32");
+
+        lanes.and(signed, signed).expect("signed &");
+        lanes.and(unsigned, unsigned).expect("unsigned &");
+        lanes.not(signed).expect("signed !");
+        lanes.not(unsigned).expect("unsigned !");
+
+        let words = module.finish();
+        assert_eq!(
+            count(&words, op::BITWISE_AND),
+            2,
+            "signedness does not reach a bitwise instruction"
+        );
+        assert_eq!(count(&words, op::NOT), 2);
+    }
+
+    #[test]
+    fn a_complement_is_not_a_negation() {
+        let mut module = Module::new(Version::V1_3);
+        let mut lanes = Lanes::new(&mut module, 32).expect("built");
+        let value = lanes.splat_bits::<I32, 32>(7).expect("seven");
+
+        lanes.not(value).expect("complemented");
+        lanes.neg(value).expect("negated");
+
+        let words = module.finish();
+        assert_eq!(count(&words, op::NOT), 1);
+        assert_eq!(
+            count(&words, op::S_NEGATE),
+            1,
+            "the two are separate instructions and neither stands in for the other"
+        );
+    }
+
+    #[test]
+    fn a_strip_mined_complement_is_one_instruction_per_strip() {
+        let mut module = Module::new(Version::V1_3);
+        let mut lanes = Lanes::new(&mut module, 32).expect("built");
+        let wide = lanes.splat_bits::<U32, 128>(1).expect("splat");
+
+        let complemented = lanes.not(wide).expect("complemented");
+
+        assert_eq!(complemented.strip_count(), 4);
+        assert_eq!(count(&module.finish(), op::NOT), 4);
+    }
+
+    #[test]
+    fn a_disjunction_does_not_cross_its_operands() {
+        let mut module = Module::new(Version::V1_3);
+        let mut lanes = Lanes::new(&mut module, 32).expect("built");
+        let low = lanes.splat_bits::<U32, 32>(0b0011).expect("low");
+        let high = lanes.splat_bits::<U32, 32>(0b1100).expect("high");
+
+        let joined = lanes.or(low, high).expect("or");
+
+        let words = module.finish();
+        let operands = decode::body(&words)
+            .find(|instruction| instruction.opcode() == op::BITWISE_OR)
+            .expect("emitted")
+            .operands()
+            .to_vec();
+
+        assert_eq!(operands[1], joined.id().word());
+        assert_eq!(operands[2], low.id().word());
+        assert_eq!(operands[3], high.id().word());
     }
 }

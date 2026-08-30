@@ -446,3 +446,79 @@ fn the_two_integer_families_divide_with_their_own_instruction() {
         "the same bits read as unsigned halve as unsigned"
     );
 }
+
+#[test]
+fn the_four_bitwise_operations_each_produce_the_bits_they_are_named_for() {
+    let Some(gpu) = device("bitwise") else {
+        return;
+    };
+
+    let width = gpu.limits().subgroup_size;
+    let count = WORKGROUP_SIZE as usize;
+    let input: Vec<u32> = (0..count as u32).collect();
+
+    let expected: Vec<u32> = input
+        .iter()
+        .map(|value| {
+            [
+                (value & kernels::BITWISE_AND_MASK, 1_u32),
+                (value | kernels::BITWISE_OR_MASK, 3),
+                (value ^ kernels::BITWISE_XOR_MASK, 5),
+                (!value, 7),
+            ]
+            .iter()
+            .fold(0_u32, |total, (term, weight)| {
+                total.wrapping_add(term.wrapping_mul(*weight))
+            })
+        })
+        .collect();
+
+    assert!(
+        expected.windows(2).any(|pair| pair[0] != pair[1]),
+        "an expectation that does not vary with its input is one the identity          `(x | m) == (x & m) + (x ^ m)` has collapsed, and it would pass with two          of the four traded"
+    );
+
+    let output = gpu
+        .run_u32(&kernels::lane_bitwise(width).expect("built"), &input, 1)
+        .expect("dispatched");
+
+    assert_eq!(output, expected);
+}
+
+#[test]
+fn a_complement_on_a_signed_lane_is_ones_complement_and_not_a_negation() {
+    let Some(gpu) = device("complement") else {
+        return;
+    };
+
+    let width = gpu.limits().subgroup_size;
+    let count = WORKGROUP_SIZE as usize;
+    let signed: Vec<i32> = (0..count as i32).map(|index| index - 32).collect();
+    let words: Vec<u32> = signed
+        .iter()
+        .map(|value| u32::from_ne_bytes(value.to_ne_bytes()))
+        .collect();
+
+    let output = gpu
+        .run_u32(
+            &kernels::lane_complement_signed(width).expect("built"),
+            &words,
+            1,
+        )
+        .expect("dispatched");
+    let output: Vec<i32> = output
+        .iter()
+        .map(|word| i32::from_ne_bytes(word.to_ne_bytes()))
+        .collect();
+
+    let expected: Vec<i32> = signed.iter().map(|value| !value).collect();
+    assert_eq!(output, expected);
+
+    for (complemented, value) in output.iter().zip(&signed) {
+        assert_eq!(
+            *complemented,
+            -value - 1,
+            "the complement and the negation differ by one, and this is the complement"
+        );
+    }
+}

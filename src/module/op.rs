@@ -57,6 +57,7 @@ pub const SHIFT_LEFT_LOGICAL: u16 = 196;
 pub const BITWISE_AND: u16 = 199;
 pub const BITWISE_XOR: u16 = 198;
 pub const BITWISE_OR: u16 = 197;
+pub const NOT: u16 = 200;
 pub const LOGICAL_OR: u16 = 166;
 pub const LOGICAL_AND: u16 = 167;
 pub const SELECT: u16 = 169;

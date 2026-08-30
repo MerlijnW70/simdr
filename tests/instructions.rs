@@ -660,3 +660,49 @@ fn the_whole_comparison_set_is_valid_spirv_and_selects_on_every_one() {
         VULKAN_1_1,
     );
 }
+
+#[test]
+fn the_bitwise_family_is_valid_spirv_over_both_integer_families() {
+    let signed = {
+        let mut kernel = Kernel::<I32>::new(shape()).expect("built");
+        let value = kernel.load::<32>(0).expect("loaded");
+
+        let total = {
+            let mut lanes = kernel.lanes().expect("lanes");
+            let mask = lanes.splat_bits::<I32, 32>(0b1010).expect("mask");
+
+            let kept = lanes.and(value, mask).expect("and");
+            let joined = lanes.or(kept, mask).expect("or");
+            let flipped = lanes.xor(joined, mask).expect("xor");
+            let complemented = lanes.not(flipped).expect("not");
+
+            lanes.reduce_sum(complemented).expect("summed")
+        };
+
+        kernel.store_scalar(1, total).expect("stored");
+        kernel.finish().expect("finished")
+    };
+
+    let unsigned = {
+        let mut kernel = Kernel::<U32>::new(shape()).expect("built");
+        let value = kernel.load::<32>(0).expect("loaded");
+
+        let total = {
+            let mut lanes = kernel.lanes().expect("lanes");
+            let mask = lanes.splat_bits::<U32, 32>(0b1010).expect("mask");
+
+            let kept = lanes.and(value, mask).expect("and");
+            let joined = lanes.or(kept, mask).expect("or");
+            let flipped = lanes.xor(joined, mask).expect("xor");
+            let complemented = lanes.not(flipped).expect("not");
+
+            lanes.reduce_sum(complemented).expect("summed")
+        };
+
+        kernel.store_scalar(1, total).expect("stored");
+        kernel.finish().expect("finished")
+    };
+
+    expect_valid(&signed, "kernel-bitwise-i32", VULKAN_1_1);
+    expect_valid(&unsigned, "kernel-bitwise-u32", VULKAN_1_1);
+}
