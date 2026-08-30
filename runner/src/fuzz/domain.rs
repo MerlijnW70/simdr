@@ -154,6 +154,70 @@ impl Domain {
     }
 
     #[must_use]
+    pub fn sub(self, left: u32, right: u32) -> u32 {
+        if self.is_float() {
+            self.encode_float(self.decode(left) - self.decode(right))
+        } else {
+            self.truncate(left.wrapping_sub(right))
+        }
+    }
+
+    /// Clamped to this domain rather than to `u32`, so an `i8` stops at 127 and
+    /// not at the top of the word it is carried in.
+    pub fn saturating_add(self, left: u32, right: u32) -> u32 {
+        if self.is_signed() {
+            let sum = i64::from(self.signed_value(left)) + i64::from(self.signed_value(right));
+            self.clamp_signed(sum)
+        } else {
+            let sum = u64::from(left) + u64::from(right);
+            self.truncate(sum.min(u64::from(self.largest())) as u32)
+        }
+    }
+
+    pub fn saturating_sub(self, left: u32, right: u32) -> u32 {
+        if self.is_signed() {
+            let difference =
+                i64::from(self.signed_value(left)) - i64::from(self.signed_value(right));
+            self.clamp_signed(difference)
+        } else {
+            self.truncate(left.saturating_sub(right))
+        }
+    }
+
+    fn clamp_signed(self, value: i64) -> u32 {
+        let high = i64::from(self.signed_value(self.largest()));
+        let low = i64::from(self.signed_value(self.smallest()));
+        self.truncate(value.clamp(low, high) as u32)
+    }
+
+    pub fn bitand(self, left: u32, right: u32) -> u32 {
+        self.truncate(left & right)
+    }
+
+    pub fn bitor(self, left: u32, right: u32) -> u32 {
+        self.truncate(left | right)
+    }
+
+    pub fn bitxor(self, left: u32, right: u32) -> u32 {
+        self.truncate(left ^ right)
+    }
+
+    pub fn not(self, bits: u32) -> u32 {
+        self.truncate(!bits)
+    }
+
+    pub fn floor(self, bits: u32) -> u32 {
+        self.encode_float(self.decode(bits).floor())
+    }
+
+    pub fn ceil(self, bits: u32) -> u32 {
+        self.encode_float(self.decode(bits).ceil())
+    }
+
+    pub fn trunc(self, bits: u32) -> u32 {
+        self.encode_float(self.decode(bits).trunc())
+    }
+
     pub fn greater(self, left: u32, right: u32) -> bool {
         if self.is_float() {
             return self.decode(left) > self.decode(right);

@@ -40,6 +40,110 @@ pub trait Emit: Element {
             element: <Self as Element>::NAME,
         })
     }
+
+    fn saturating_add<const LANES: u32>(
+        lanes: &mut Lanes<'_>,
+        value: Vector<Self, LANES>,
+        by: Vector<Self, LANES>,
+    ) -> Result<Vector<Self, LANES>, ProgramError> {
+        let _ = (lanes, value, by);
+        Err(ProgramError::NotInThisDomain {
+            missing: Missing::Saturating,
+            element: <Self as Element>::NAME,
+        })
+    }
+
+    fn saturating_sub<const LANES: u32>(
+        lanes: &mut Lanes<'_>,
+        value: Vector<Self, LANES>,
+        by: Vector<Self, LANES>,
+    ) -> Result<Vector<Self, LANES>, ProgramError> {
+        let _ = (lanes, value, by);
+        Err(ProgramError::NotInThisDomain {
+            missing: Missing::Saturating,
+            element: <Self as Element>::NAME,
+        })
+    }
+
+    fn bitand<const LANES: u32>(
+        lanes: &mut Lanes<'_>,
+        value: Vector<Self, LANES>,
+        by: Vector<Self, LANES>,
+    ) -> Result<Vector<Self, LANES>, ProgramError> {
+        let _ = (lanes, value, by);
+        Err(ProgramError::NotInThisDomain {
+            missing: Missing::Bitwise,
+            element: <Self as Element>::NAME,
+        })
+    }
+
+    fn bitor<const LANES: u32>(
+        lanes: &mut Lanes<'_>,
+        value: Vector<Self, LANES>,
+        by: Vector<Self, LANES>,
+    ) -> Result<Vector<Self, LANES>, ProgramError> {
+        let _ = (lanes, value, by);
+        Err(ProgramError::NotInThisDomain {
+            missing: Missing::Bitwise,
+            element: <Self as Element>::NAME,
+        })
+    }
+
+    fn bitxor<const LANES: u32>(
+        lanes: &mut Lanes<'_>,
+        value: Vector<Self, LANES>,
+        by: Vector<Self, LANES>,
+    ) -> Result<Vector<Self, LANES>, ProgramError> {
+        let _ = (lanes, value, by);
+        Err(ProgramError::NotInThisDomain {
+            missing: Missing::Bitwise,
+            element: <Self as Element>::NAME,
+        })
+    }
+
+    fn not<const LANES: u32>(
+        lanes: &mut Lanes<'_>,
+        value: Vector<Self, LANES>,
+    ) -> Result<Vector<Self, LANES>, ProgramError> {
+        let _ = (lanes, value);
+        Err(ProgramError::NotInThisDomain {
+            missing: Missing::Bitwise,
+            element: <Self as Element>::NAME,
+        })
+    }
+
+    fn floor<const LANES: u32>(
+        lanes: &mut Lanes<'_>,
+        value: Vector<Self, LANES>,
+    ) -> Result<Vector<Self, LANES>, ProgramError> {
+        let _ = (lanes, value);
+        Err(ProgramError::NotInThisDomain {
+            missing: Missing::Rounding,
+            element: <Self as Element>::NAME,
+        })
+    }
+
+    fn ceil<const LANES: u32>(
+        lanes: &mut Lanes<'_>,
+        value: Vector<Self, LANES>,
+    ) -> Result<Vector<Self, LANES>, ProgramError> {
+        let _ = (lanes, value);
+        Err(ProgramError::NotInThisDomain {
+            missing: Missing::Rounding,
+            element: <Self as Element>::NAME,
+        })
+    }
+
+    fn trunc<const LANES: u32>(
+        lanes: &mut Lanes<'_>,
+        value: Vector<Self, LANES>,
+    ) -> Result<Vector<Self, LANES>, ProgramError> {
+        let _ = (lanes, value);
+        Err(ProgramError::NotInThisDomain {
+            missing: Missing::Rounding,
+            element: <Self as Element>::NAME,
+        })
+    }
 }
 
 fn shifted<T: Integer, const LANES: u32>(
@@ -60,6 +164,19 @@ fn magnitude<T: Signed, const LANES: u32>(
     value: Vector<T, LANES>,
 ) -> Result<Vector<T, LANES>, ProgramError> {
     Ok(lanes.abs(value)?)
+}
+
+fn saturated<T: Integer, const LANES: u32>(
+    lanes: &mut Lanes<'_>,
+    up: bool,
+    value: Vector<T, LANES>,
+    by: Vector<T, LANES>,
+) -> Result<Vector<T, LANES>, ProgramError> {
+    Ok(if up {
+        lanes.saturating_add(value, by)?
+    } else {
+        lanes.saturating_sub(value, by)?
+    })
 }
 
 macro_rules! emit_for {
@@ -86,6 +203,77 @@ macro_rules! emit_for {
             magnitude(lanes, value)
         }
     };
+    (@can saturating) => {
+        fn saturating_add<const LANES: u32>(
+            lanes: &mut Lanes<'_>,
+            value: Vector<Self, LANES>,
+            by: Vector<Self, LANES>,
+        ) -> Result<Vector<Self, LANES>, ProgramError> {
+            saturated(lanes, true, value, by)
+        }
+
+        fn saturating_sub<const LANES: u32>(
+            lanes: &mut Lanes<'_>,
+            value: Vector<Self, LANES>,
+            by: Vector<Self, LANES>,
+        ) -> Result<Vector<Self, LANES>, ProgramError> {
+            saturated(lanes, false, value, by)
+        }
+    };
+    (@can bitwise) => {
+        fn bitand<const LANES: u32>(
+            lanes: &mut Lanes<'_>,
+            value: Vector<Self, LANES>,
+            by: Vector<Self, LANES>,
+        ) -> Result<Vector<Self, LANES>, ProgramError> {
+            Ok(lanes.and(value, by)?)
+        }
+
+        fn bitor<const LANES: u32>(
+            lanes: &mut Lanes<'_>,
+            value: Vector<Self, LANES>,
+            by: Vector<Self, LANES>,
+        ) -> Result<Vector<Self, LANES>, ProgramError> {
+            Ok(lanes.or(value, by)?)
+        }
+
+        fn bitxor<const LANES: u32>(
+            lanes: &mut Lanes<'_>,
+            value: Vector<Self, LANES>,
+            by: Vector<Self, LANES>,
+        ) -> Result<Vector<Self, LANES>, ProgramError> {
+            Ok(lanes.xor(value, by)?)
+        }
+
+        fn not<const LANES: u32>(
+            lanes: &mut Lanes<'_>,
+            value: Vector<Self, LANES>,
+        ) -> Result<Vector<Self, LANES>, ProgramError> {
+            Ok(lanes.not(value)?)
+        }
+    };
+    (@can rounding) => {
+        fn floor<const LANES: u32>(
+            lanes: &mut Lanes<'_>,
+            value: Vector<Self, LANES>,
+        ) -> Result<Vector<Self, LANES>, ProgramError> {
+            Ok(lanes.floor(value)?)
+        }
+
+        fn ceil<const LANES: u32>(
+            lanes: &mut Lanes<'_>,
+            value: Vector<Self, LANES>,
+        ) -> Result<Vector<Self, LANES>, ProgramError> {
+            Ok(lanes.ceil(value)?)
+        }
+
+        fn trunc<const LANES: u32>(
+            lanes: &mut Lanes<'_>,
+            value: Vector<Self, LANES>,
+        ) -> Result<Vector<Self, LANES>, ProgramError> {
+            Ok(lanes.trunc(value)?)
+        }
+    };
     (@can fused) => {
         fn fused_mul_add<const LANES: u32>(
             lanes: &mut Lanes<'_>,
@@ -98,13 +286,13 @@ macro_rules! emit_for {
     };
 }
 
-emit_for!(U32, shifts);
-emit_for!(I32, shifts, magnitude);
-emit_for!(U8, shifts);
-emit_for!(I8, shifts, magnitude);
-emit_for!(U16, shifts);
-emit_for!(I16, shifts, magnitude);
-emit_for!(F32, magnitude, fused);
+emit_for!(U32, shifts, saturating, bitwise);
+emit_for!(I32, shifts, magnitude, saturating, bitwise);
+emit_for!(U8, shifts, saturating, bitwise);
+emit_for!(I8, shifts, magnitude, saturating, bitwise);
+emit_for!(U16, shifts, saturating, bitwise);
+emit_for!(I16, shifts, magnitude, saturating, bitwise);
+emit_for!(F32, magnitude, fused, rounding);
 emit_for!(F16, magnitude);
 
 pub(super) fn apply<T: Emit, const LANES: u32>(
@@ -140,6 +328,34 @@ pub(super) fn apply<T: Emit, const LANES: u32>(
             let amount = lanes.splat_bits::<U32, LANES>(by)?;
             T::bit_shift(lanes, kind, value, amount)?
         }
+        Op::SubConstant(operand) => {
+            let constant = lanes.splat_bits::<T, LANES>(domain.encode(operand))?;
+            lanes.sub(value, constant)?
+        }
+        Op::SaturatingAddConstant(operand) => {
+            let constant = lanes.splat_bits::<T, LANES>(domain.encode(operand))?;
+            T::saturating_add(lanes, value, constant)?
+        }
+        Op::SaturatingSubConstant(operand) => {
+            let constant = lanes.splat_bits::<T, LANES>(domain.encode(operand))?;
+            T::saturating_sub(lanes, value, constant)?
+        }
+        Op::AndConstant(operand) => {
+            let constant = lanes.splat_bits::<T, LANES>(domain.encode(operand))?;
+            T::bitand(lanes, value, constant)?
+        }
+        Op::OrConstant(operand) => {
+            let constant = lanes.splat_bits::<T, LANES>(domain.encode(operand))?;
+            T::bitor(lanes, value, constant)?
+        }
+        Op::XorConstant(operand) => {
+            let constant = lanes.splat_bits::<T, LANES>(domain.encode(operand))?;
+            T::bitxor(lanes, value, constant)?
+        }
+        Op::NotValue => T::not(lanes, value)?,
+        Op::Floor => T::floor(lanes, value)?,
+        Op::Ceil => T::ceil(lanes, value)?,
+        Op::Trunc => T::trunc(lanes, value)?,
         Op::Absolute => T::absolute(lanes, value)?,
         Op::FusedMulAdd { by, plus } => {
             let factor = lanes.splat_bits::<T, LANES>(domain.encode(by))?;

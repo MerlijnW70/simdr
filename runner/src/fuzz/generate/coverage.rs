@@ -15,6 +15,8 @@ fn a_whole_subgroup_program_reaches_the_finish_that_carries_a_phi() {
     );
 }
 
+/// Draws unsigned programs only, so the float-only operations cannot appear
+/// here; [`the_generator_reaches_the_operations_only_a_float_has`] covers those.
 #[test]
 fn the_generator_reaches_every_operation_it_knows() {
     let mut seen: Vec<&'static str> = Vec::new();
@@ -54,6 +56,16 @@ fn the_generator_reaches_every_operation_it_knows() {
                 Op::Absolute => "abs",
                 Op::FusedMulAdd { .. } => "fma",
                 Op::AddIfAllAbove { .. } => "all-above",
+                Op::SubConstant(_) => "sub",
+                Op::SaturatingAddConstant(_) => "saturating-add",
+                Op::SaturatingSubConstant(_) => "saturating-sub",
+                Op::AndConstant(_) => "and",
+                Op::OrConstant(_) => "or",
+                Op::XorConstant(_) => "xor",
+                Op::NotValue => "not",
+                Op::Floor => "floor",
+                Op::Ceil => "ceil",
+                Op::Trunc => "trunc",
             };
             if !seen.contains(&name) {
                 seen.push(name);
@@ -68,6 +80,7 @@ fn the_generator_reaches_every_operation_it_knows() {
             "add",
             "agree",
             "all-above",
+            "and",
             "bit-left",
             "bit-right-arithmetic",
             "bit-right-logical",
@@ -81,11 +94,17 @@ fn the_generator_reaches_every_operation_it_knows() {
             "max",
             "min",
             "mul",
+            "not",
+            "or",
             "repeat",
             "rolled",
             "rotate",
+            "saturating-add",
+            "saturating-sub",
             "shift",
             "shift-down",
+            "sub",
+            "xor",
         ],
         "the generator never produced some of its own vocabulary in 512 seeds"
     );
@@ -468,4 +487,33 @@ fn the_two_right_shifts_disagree_once_the_top_bit_is_set() {
              the corpus can never tell the two instructions apart"
         );
     }
+}
+
+#[test]
+fn the_generator_reaches_the_operations_only_a_float_has() {
+    let mut seen: Vec<&'static str> = Vec::new();
+    for seed in 0..512_u64 {
+        let program = generate(&mut Rng::new(seed), Domain::Float, 32, 64);
+        for step in &program.steps {
+            let name = match step {
+                Op::Absolute => "abs",
+                Op::FusedMulAdd { .. } => "fma",
+                Op::Floor => "floor",
+                Op::Ceil => "ceil",
+                Op::Trunc => "trunc",
+                _ => continue,
+            };
+            if !seen.contains(&name) {
+                seen.push(name);
+            }
+        }
+    }
+
+    seen.sort_unstable();
+    assert_eq!(
+        seen,
+        vec!["abs", "ceil", "floor", "fma", "trunc"],
+        "the float pool names operations the generator never draws, so the sweep would never \
+         reach them and nothing else here would say so"
+    );
 }

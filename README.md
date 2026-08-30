@@ -82,12 +82,12 @@ fails the build, so nothing here is stated on trust.
 | --- | --- |
 | SPIR-V opcodes declared | <!--count:opcodes-->121 |
 | lane operations | <!--count:lane-operations-->104 |
-| `#[test]` functions | <!--count:test-functions-->983 |
+| `#[test]` functions | <!--count:test-functions-->984 |
 | checks in `tests/integrity.rs` | <!--count:integrity-tests-->22 |
 | checks in `tests/documented.rs` | <!--count:documented-tests-->12 |
 | counters behind this table | <!--count:counters-->10 |
 | CI jobs | <!--count:ci-jobs-->5 |
-| element operations the differential fuzzer generates | <!--count:fuzz-operations-->23 |
+| element operations the differential fuzzer generates | <!--count:fuzz-operations-->33 |
 | examples | <!--count:examples-->17 |
 | of those, needing a device | <!--count:device-examples-->16 |
 

@@ -31,6 +31,16 @@ pub enum Op {
     Absolute,
     FusedMulAdd { by: u32, plus: u32 },
     AddIfAllAbove { when_all_above: u32, add: u32 },
+    SubConstant(u32),
+    SaturatingAddConstant(u32),
+    SaturatingSubConstant(u32),
+    AndConstant(u32),
+    OrConstant(u32),
+    XorConstant(u32),
+    NotValue,
+    Floor,
+    Ceil,
+    Trunc,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +48,9 @@ pub enum Missing {
     BitShift(BitShift),
     Absolute,
     FusedMulAdd,
+    Saturating,
+    Bitwise,
+    Rounding,
 }
 
 impl fmt::Display for Missing {
@@ -46,6 +59,9 @@ impl fmt::Display for Missing {
             Self::BitShift(kind) => write!(formatter, "a {kind:?} bit shift"),
             Self::Absolute => formatter.write_str("an absolute value"),
             Self::FusedMulAdd => formatter.write_str("a fused multiply-add"),
+            Self::Saturating => formatter.write_str("saturating arithmetic"),
+            Self::Bitwise => formatter.write_str("a bitwise operation"),
+            Self::Rounding => formatter.write_str("a rounding"),
         }
     }
 }

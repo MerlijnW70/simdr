@@ -32,9 +32,20 @@ pub(super) enum Kind {
     Absolute,
     FusedMulAdd,
     AddIfAllAbove,
+    SubConstant,
+    SaturatingAddConstant,
+    SaturatingSubConstant,
+    AndConstant,
+    OrConstant,
+    XorConstant,
+    NotValue,
+    Floor,
+    Ceil,
+    Trunc,
 }
 
 pub(super) const CLUSTERED: &[Kind] = &[
+    Kind::SubConstant,
     Kind::AddConstant,
     Kind::MulConstant,
     Kind::ClampBelow,
@@ -50,6 +61,7 @@ pub(super) const CLUSTERED: &[Kind] = &[
 ];
 
 pub(super) const WHOLE: &[Kind] = &[
+    Kind::SubConstant,
     Kind::AddConstant,
     Kind::MulConstant,
     Kind::ClampBelow,
@@ -71,6 +83,7 @@ pub(super) const WHOLE: &[Kind] = &[
 ];
 
 pub(super) const STRIPPED: &[Kind] = &[
+    Kind::SubConstant,
     Kind::AddConstant,
     Kind::MulConstant,
     Kind::ClampBelow,
@@ -95,14 +108,35 @@ pub(super) const fn by_element(domain: Domain) -> &'static [Kind] {
         Kind::ShiftLeft,
         Kind::ShiftRightLogical,
         Kind::ShiftRightArithmetic,
+        Kind::SaturatingAddConstant,
+        Kind::SaturatingSubConstant,
+        Kind::AndConstant,
+        Kind::OrConstant,
+        Kind::XorConstant,
+        Kind::NotValue,
     ];
     const SHIFTS_AND_MAGNITUDE: &[Kind] = &[
         Kind::ShiftLeft,
         Kind::ShiftRightLogical,
         Kind::ShiftRightArithmetic,
         Kind::Absolute,
+        Kind::SaturatingAddConstant,
+        Kind::SaturatingSubConstant,
+        Kind::AndConstant,
+        Kind::OrConstant,
+        Kind::XorConstant,
+        Kind::NotValue,
     ];
-    const SINGLE: &[Kind] = &[Kind::Absolute, Kind::FusedMulAdd];
+    /// `floor`, `ceil` and `trunc` are `f32` here for the same reason `sqrt`
+    /// and `exp` are: the lane API takes them at that width and no other, so
+    /// the half domain gets the magnitude and nothing else.
+    const SINGLE: &[Kind] = &[
+        Kind::Absolute,
+        Kind::FusedMulAdd,
+        Kind::Floor,
+        Kind::Ceil,
+        Kind::Trunc,
+    ];
     const HALF: &[Kind] = &[Kind::Absolute];
 
     match domain {
@@ -120,6 +154,20 @@ fn shift_by(rng: &mut Rng, domain: Domain) -> u32 {
 pub(super) fn fill(rng: &mut Rng, domain: Domain, subgroup: u32, lanes: u32, kind: Kind) -> Op {
     match kind {
         Kind::AddConstant => Op::AddConstant(rng.below(16) as u32),
+        Kind::SubConstant => Op::SubConstant(rng.below(16) as u32),
+        Kind::SaturatingAddConstant => {
+            Op::SaturatingAddConstant(rng.below(u64::from(domain.ceiling())) as u32)
+        }
+        Kind::SaturatingSubConstant => {
+            Op::SaturatingSubConstant(rng.below(u64::from(domain.ceiling())) as u32)
+        }
+        Kind::AndConstant => Op::AndConstant(rng.below(u64::from(domain.ceiling())) as u32),
+        Kind::OrConstant => Op::OrConstant(rng.below(u64::from(domain.ceiling())) as u32),
+        Kind::XorConstant => Op::XorConstant(rng.below(u64::from(domain.ceiling())) as u32),
+        Kind::NotValue => Op::NotValue,
+        Kind::Floor => Op::Floor,
+        Kind::Ceil => Op::Ceil,
+        Kind::Trunc => Op::Trunc,
         Kind::MulConstant => Op::MulConstant(1 + rng.below(3) as u32),
         Kind::ClampBelow => Op::ClampBelow(rng.below(8) as u32),
         Kind::MinConstant => Op::MinConstant(rng.below(u64::from(domain.ceiling())) as u32),
@@ -192,7 +240,17 @@ fn distances(subgroup: u32) -> u64 {
 mod tests {
     use super::*;
 
-    const EVERY_KIND: [Kind; 23] = [
+    const EVERY_KIND: [Kind; 33] = [
+        Kind::SubConstant,
+        Kind::SaturatingAddConstant,
+        Kind::SaturatingSubConstant,
+        Kind::AndConstant,
+        Kind::OrConstant,
+        Kind::XorConstant,
+        Kind::NotValue,
+        Kind::Floor,
+        Kind::Ceil,
+        Kind::Trunc,
         Kind::ShiftLeft,
         Kind::ShiftRightLogical,
         Kind::ShiftRightArithmetic,
