@@ -182,18 +182,30 @@ fn walk(directory: &Path, into: &mut BTreeSet<String>) {
 }
 
 fn sources_in_config() -> Option<BTreeSet<String>> {
-    let text = fs::read_to_string(root().join("noha.yaml")).ok()?;
+    const CONFIGS: [(&str, &str); 3] = [
+        ("noha.yaml", ""),
+        ("runner/noha.yaml", "runner/"),
+        ("cli/noha.yaml", "cli/"),
+    ];
 
-    Some(
-        text.lines()
-            .skip_while(|line| line.trim() != "sources:")
-            .skip(1)
-            .take_while(|line| line.starts_with("  - ") || line.trim_start().starts_with('#'))
-            .filter_map(|line| line.strip_prefix("  - ").map(str::trim))
-            .filter(|entry| entry.ends_with(".rs"))
-            .map(str::to_owned)
-            .collect(),
-    )
+    let mut found = BTreeSet::new();
+    let mut any = false;
+    for (path, prefix) in CONFIGS {
+        let Ok(text) = fs::read_to_string(root().join(path)) else {
+            continue;
+        };
+        any = true;
+        found.extend(
+            text.lines()
+                .skip_while(|line| line.trim() != "sources:")
+                .skip(1)
+                .take_while(|line| line.starts_with("  - ") || line.trim_start().starts_with('#'))
+                .filter_map(|line| line.strip_prefix("  - ").map(str::trim))
+                .filter(|entry| entry.ends_with(".rs"))
+                .map(|entry| format!("{prefix}{entry}")),
+        );
+    }
+    any.then_some(found)
 }
 
 fn config_or_skip(label: &str) -> Option<BTreeSet<String>> {
