@@ -1,5 +1,5 @@
 use runner::Gpu;
-use runner::kernels::{self, Bitwise, Comparison, Transcendental, WORKGROUP_SIZE};
+use runner::kernels::{self, Bitwise, Comparison, Running, Transcendental, WORKGROUP_SIZE};
 use simdr::lanes::{F32, U32};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -174,6 +174,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         1,
     )?;
     println!("  pow(x, 2)     {:?}", &squared[..8]);
+
+    println!("\nrunning folds over the subgroup, each lane holding everything up to it:");
+    let steps: Vec<u32> = (0..count as u32)
+        .map(|index| (index % 3 + 1) | 0b1000)
+        .collect();
+    println!("  in            {:?}", &steps[..8]);
+    for (label, running) in [
+        ("sum    ", Running::Sum),
+        ("product", Running::Product),
+        ("min    ", Running::Min),
+        ("max    ", Running::Max),
+        ("and    ", Running::And),
+        ("or     ", Running::Or),
+        ("xor    ", Running::Xor),
+    ] {
+        let output = gpu.run_u32(
+            &kernels::lane_prefix_whole(width, running, false)?,
+            &steps,
+            1,
+        )?;
+        println!("  prefix {label} {:?}", &output[..8]);
+    }
+
+    println!("\nthe exclusive form leaves each lane its own element out:");
+    for (label, running) in [("sum", Running::Sum), ("and", Running::And)] {
+        let inclusive = gpu.run_u32(
+            &kernels::lane_prefix_whole(width, running, false)?,
+            &steps,
+            1,
+        )?;
+        let exclusive = gpu.run_u32(
+            &kernels::lane_prefix_whole(width, running, true)?,
+            &steps,
+            1,
+        )?;
+        println!("  {label} inclusive  {:?}", &inclusive[..8]);
+        println!("  {label} exclusive  {:?}", &exclusive[..8]);
+    }
+    println!("  the first lane of the exclusive `and` is every bit set, which is what leaves an");
+    println!("  intersection alone; seeding it with nought would empty the fold.");
 
     println!("\nstrip-mined, and an integer:");
     let long: Vec<f32> = (0..count as u32 * 2).map(|index| index as f32).collect();

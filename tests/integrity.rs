@@ -625,3 +625,94 @@ fn the_opcode_scanner_finds_the_numbers_that_are_there() {
         &mentions
     ));
 }
+
+/// The operations `prefix_` names, split by whether they leave a lane its own
+/// element out.
+fn scan_operations() -> (BTreeSet<String>, BTreeSet<String>) {
+    let text = fs::read_to_string(root().join("src/lanes/scan.rs")).unwrap_or_default();
+    let mut inclusive = BTreeSet::new();
+    let mut exclusive = BTreeSet::new();
+
+    for line in text.lines().map(str::trim_start) {
+        let Some(rest) = line.strip_prefix("pub fn prefix_") else {
+            continue;
+        };
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        match name.strip_suffix("_exclusive") {
+            Some(stem) => exclusive.insert(stem.to_owned()),
+            None => inclusive.insert(name),
+        };
+    }
+
+    (inclusive, exclusive)
+}
+
+/// The variants of the enum the tour drives its running folds from.
+fn tour_running_folds() -> BTreeSet<String> {
+    let text = fs::read_to_string(root().join("runner/src/kernels/mod.rs")).unwrap_or_default();
+    let Some(body) = text.split("pub enum Running {").nth(1) else {
+        return BTreeSet::new();
+    };
+    let Some(body) = body.split('}').next() else {
+        return BTreeSet::new();
+    };
+
+    body.lines()
+        .map(str::trim)
+        .filter_map(|line| line.strip_suffix(','))
+        .filter(|name| name.chars().all(char::is_alphanumeric) && !name.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+#[test]
+fn every_scan_has_the_exclusive_twin_its_family_promises() {
+    let (inclusive, exclusive) = scan_operations();
+
+    assert!(
+        !inclusive.is_empty(),
+        "no `prefix_` operation was found at all, so this test is checking nothing"
+    );
+
+    let missing: Vec<&String> = inclusive.difference(&exclusive).collect();
+    assert!(
+        missing.is_empty(),
+        "these scans run inclusively and have no exclusive form, so a caller who needs the value \
+         before their own lane has to build it by hand: {missing:?}"
+    );
+
+    let orphaned: Vec<&String> = exclusive.difference(&inclusive).collect();
+    assert!(
+        orphaned.is_empty(),
+        "these exclusive scans have no inclusive form beside them: {orphaned:?}"
+    );
+}
+
+#[test]
+fn the_tour_knows_every_running_fold_this_crate_can_do() {
+    let (inclusive, _) = scan_operations();
+    let shown = tour_running_folds();
+
+    assert!(
+        !shown.is_empty(),
+        "`pub enum Running` was not found in the kernels, so the tour drives its scans some other \
+         way and this test no longer watches anything"
+    );
+
+    let unshown: Vec<&String> = inclusive.difference(&shown).collect();
+    assert!(
+        unshown.is_empty(),
+        "`runner/examples/show.rs` walks `Running` to print one row per running fold, and these \
+         scans have no variant there — so the tour would print a surface smaller than the one \
+         this crate has, and would go on doing it silently: {unshown:?}"
+    );
+
+    let invented: Vec<&String> = shown.difference(&inclusive).collect();
+    assert!(
+        invented.is_empty(),
+        "`Running` names folds that `src/lanes/scan.rs` does not declare: {invented:?}"
+    );
+}
